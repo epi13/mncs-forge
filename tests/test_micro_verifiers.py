@@ -387,6 +387,7 @@ def test_witnesses_are_bounded(config: ForgeConfig) -> None:
 
 
 def test_batch_limits_and_dominance(config: ForgeConfig) -> None:
+    config = with_native_latency_allowance(config)
     forge = Forge(config)
     begin_and_register(forge)
     result = forge.verifier_batch(

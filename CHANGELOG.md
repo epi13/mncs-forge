@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Decouple semantic tests from native-toolchain speed. Batch tests asserting
+  semantic outcomes opt into headroom for compiler latency through a
+  `with_native_latency_allowance` test helper (product defaults untouched;
+  budget exhaustion stays pinned by the fake-clock test), and the MCP/CLI
+  smoke and benchmark harnesses treat their subprocess timeouts as hang
+  guards rather than performance contracts. No timing assertion was
+  weakened: none of these tests assert absolute durations.
 - Fix native lifecycle projection of recorded selections in evidence-free
   history slices. The kernel's history projection required PASS evidence for
   selection lineage, so evaluator-mode views (which deliberately exclude
