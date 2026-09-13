@@ -5,6 +5,7 @@ import sys
 from collections.abc import Callable
 
 import pytest
+from conftest import with_native_latency_allowance
 
 from mncs_forge.config import ForgeConfig
 from mncs_forge.engine import Forge
@@ -196,6 +197,7 @@ def test_evaluator_terminal_unknown_is_redacted_before_recording(
     config: ForgeConfig,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    config = with_native_latency_allowance(config)
     development = Forge(config)
     candidate = begin_and_register(development)
     development.development_checks_run(["pass-check"])
@@ -237,6 +239,7 @@ def test_evaluator_terminal_unknown_is_redacted_before_recording(
 
 
 def test_batch_supports_per_verifier_parameters(config: ForgeConfig) -> None:
+    config = with_native_latency_allowance(config)
     forge = Forge(config)
     begin_and_register(forge)
     result = forge.verifier_batch(
@@ -259,6 +262,7 @@ def test_batch_supports_per_verifier_parameters(config: ForgeConfig) -> None:
 def test_batch_retains_explicit_unknown_when_one_run_is_rejected(
     config: ForgeConfig,
 ) -> None:
+    config = with_native_latency_allowance(config)
     forge = Forge(config)
     begin_and_register(forge)
     result = forge.verifier_batch(

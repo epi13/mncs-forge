@@ -356,7 +356,12 @@ fn project_evidence(current: ProjectionState, event: HistoryEvent) -> (result: P
     if idlib.equal(event.candidate, current.current_candidate) { } else {
         return invalid_projection(current);
     }
-    if is_undisposed(current.disposition) { } else { return invalid_projection(current); }
+    // Evidence observed after disposition is legitimate revalidation input:
+    // freeze re-runs required checks after selection, and the readiness
+    // kernel plus host authorization decide whether it blocks. Disposition
+    // itself is unchanged here, so recorded terminal dispositions are never
+    // rewritten by later observations. Post-freeze and post-evaluation
+    // observations remain outside the lifecycle.
     if current.frozen { return invalid_projection(current); }
     if current.evaluated { return invalid_projection(current); }
     let combined: statlib.Status = join_evidence(current, event.status);
@@ -383,7 +388,11 @@ fn project_selected(current: ProjectionState, event: HistoryEvent) -> (result: P
         return invalid_projection(current);
     }
     if is_undisposed(current.disposition) { } else { return invalid_projection(current); }
-    if is_pass(current.evidence) { } else { return invalid_projection(current); }
+    // History projection accepts a recorded selection without re-proving
+    // evidence sufficiency. Selection authorization (readiness kernel plus
+    // host evidence gates) happens at record time, while projected history
+    // slices legitimately omit evidence kinds (evaluator views). Evidence
+    // stays visible in the projected state for status derivation below.
     return ProjectionState {
         stage: Stage.CandidateSelected,
         active_epoch: current.active_epoch,
@@ -509,6 +518,13 @@ fn project_stage(current: ProjectionState, required_evidence: byte) -> (result: 
     };
 }
 
+fn selected_status(evidence: statlib.Status) -> (result: statlib.Status) {
+    // A recorded selection reports PASS only when PASS evidence is actually
+    // present in the projected slice; evaluator views omit evidence kinds.
+    if is_pass(evidence) { return statlib.Status.PASS; }
+    return statlib.Status.UNKNOWN;
+}
+
 fn project_status(stage: Stage, evidence: statlib.Status) -> (result: statlib.Status) {
     return match stage {
         Stage.NoEpoch => statlib.Status.UNKNOWN,
@@ -517,8 +533,8 @@ fn project_status(stage: Stage, evidence: statlib.Status) -> (result: statlib.St
         Stage.CandidateRejected => statlib.Status.FAIL,
         Stage.EvidenceIncomplete => evidence,
         Stage.CandidateReady => statlib.Status.PASS,
-        Stage.CandidateSelected => statlib.Status.PASS,
-        Stage.CandidateFrozen => statlib.Status.PASS,
+        Stage.CandidateSelected => selected_status(evidence),
+        Stage.CandidateFrozen => selected_status(evidence),
         Stage.EvaluationComplete => evidence,
         Stage.AmbiguousHistory => statlib.Status.UNKNOWN,
     };

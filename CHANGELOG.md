@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Fix native lifecycle projection of recorded selections in evidence-free
+  history slices. The kernel's history projection required PASS evidence for
+  selection lineage, so evaluator-mode views (which deliberately exclude
+  evidence kinds) projected `AmbiguousHistory` for coherent selected/frozen
+  histories. Evidence sufficiency stays enforced where it belongs — the
+  readiness kernel plus host selection/freeze authorization — while the
+  lifecycle kernel now owns only parent-linkage coherence. Projected
+  selection/freeze status additionally reports `PASS` only when PASS
+  evidence is present in the slice. Covered by
+  `test_native_lifecycle_projection_accepts_recorded_selection_without_evidence`
+  and the evaluator verifier/state-machine suites.
+- Accept post-disposition evidence observations in native history
+  projection. Freeze re-runs required checks after selection, so a FAIL
+  observed after disposition is revalidation input — not a lineage break —
+  and surfaces as `EVIDENCE_FAILED` at freeze authorization instead of a
+  misleading ambiguity limitation. Post-freeze and post-evaluation
+  observations remain outside the lifecycle. Covered by
+  `test_native_lifecycle_projection_accepts_post_selection_evidence` and
+  `test_freeze_revalidates_selected_evidence`.
 - Report native toolchain selection in `project.doctor` (`native_execution`
   with mode, selected command, binary path, and build timestamp) so a stale
   compiler is visible in pre-flight diagnostics.

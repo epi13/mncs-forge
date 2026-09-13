@@ -8,6 +8,13 @@ reconciliation, and evidence-readiness projection; the Python CLI and MCP server
 remain the stable integration surface during the migration. Forge invokes the
 lifecycle module for both bounded history projection and covered transition
 preflight, and invokes a bundle-precondition module before bundle materialization.
+History projection owns only parent-linkage coherence: a recorded selection
+projects `CandidateSelected` even when the projected slice omits evidence
+kinds (evaluator views), while selection authorization still requires PASS
+evidence through the readiness kernel and host gates. Projected
+selection/freeze status reports `PASS` only when PASS evidence is present in
+the slice, so an evidence-free view can never upgrade into an assurance
+claim.
 
 | Module | Responsibility |
 | --- | --- |

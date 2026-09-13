@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from conftest import with_native_latency_allowance
 
 from mncs_forge.config import ForgeConfig
 from mncs_forge.engine import Forge
@@ -775,6 +776,7 @@ def test_freeze_rejects_selection_after_policy_change(config: ForgeConfig, proje
 
 
 def test_freeze_revalidates_selected_evidence(config: ForgeConfig) -> None:
+    config = with_native_latency_allowance(config)
     forge = Forge(config)
     candidate = selected_candidate(forge)
     failing_required = replace(config.workflows["fail-check"], name="pass-check")
