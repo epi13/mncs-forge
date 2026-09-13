@@ -43,6 +43,26 @@ MNCS source when the checked-out language runtime is available, and `required` f
 Forge startup when either side of the native boundary is unavailable. `project inspect` reports
 the mode, availability, selection, and reason.
 
+## Precedence and environment overrides
+
+Configuration resolves in this order, later sources winning: built-in
+defaults, then `mncs-forge.toml`, then the environment overrides below.
+There is no workspace-level configuration file and no parent-directory
+search: `--config` defaults to `./mncs-forge.toml` relative to the current
+working directory, and anything else must be passed explicitly.
+
+| Variable | Effect |
+| --- | --- |
+| `MNCS_FORGE_NATIVE_MODE` | Overrides `[native].mode` (`off`/`prefer`/`required`); invalid values fail closed. |
+| `MNCS_FORGE_STATE_DIR` | Relocates the `.mncs-forge` state directory; the project identity is appended. |
+| `MNCS_CLI` | Pins the exact MNCS compiler binary; otherwise Forge selects the most recently built `target/release/mncs` or `target/debug/mncs`. |
+| `MNCS_LANGUAGE_ROOT` | Pins the sibling `mncs-language` checkout used for native execution. |
+| `MNCS_FORGE_NATIVE_SOURCE` | Pins the packaged Forge MNCS entrypoint (testing and release lanes). |
+
+Provider and workflow execution environments additionally inherit only the
+project's `environment_allowlist` keys; undeclared keys are never passed
+through, and inspection never returns environment values.
+
 All project paths are relative to the configured root. Absolute paths, `..`, NULs, symlink escape,
 and protected/writable overlap are rejected. Every command is a non-empty argument array. Forge
 never uses `shell=True` and has no arbitrary shell MCP tool.
