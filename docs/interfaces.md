@@ -87,6 +87,8 @@ MCP resources are explicit read-model projections and prompts are guidance rathe
 operations. Resources backed by a canonical operation pass through the registry before projecting
 fields. `project.doctor`, `config.validate`, and `ledger.verify` intentionally remain CLI-only local
 diagnostics; operation inventory is a CLI operation and MCP resource rather than an MCP tool.
+`project.doctor` includes the `native_execution` selection status (mode, selected binary, and
+build timestamp) so toolchain staleness is visible in pre-flight diagnostics.
 
 Micro-verifier CLI equivalents are:
 

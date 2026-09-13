@@ -8,6 +8,13 @@ reconciliation, and evidence-readiness projection; the Python CLI and MCP server
 remain the stable integration surface during the migration. Forge invokes the
 lifecycle module for both bounded history projection and covered transition
 preflight, and invokes a bundle-precondition module before bundle materialization.
+History projection owns only parent-linkage coherence: a recorded selection
+projects `CandidateSelected` even when the projected slice omits evidence
+kinds (evaluator views), while selection authorization still requires PASS
+evidence through the readiness kernel and host gates. Projected
+selection/freeze status reports `PASS` only when PASS evidence is present in
+the slice, so an evidence-free view can never upgrade into an assurance
+claim.
 
 | Module | Responsibility |
 | --- | --- |
@@ -27,6 +34,20 @@ same files through `importlib.resources`. A release or CI lane may set
 `off` disables selection, `prefer` selects the packaged runtime when available,
 and `required` fails closed before startup when it is unavailable. Project
 inspection exposes the selected/available/reason status.
+
+## Toolchain binary selection
+
+An explicit `MNCS_CLI` path always wins. Otherwise Forge selects the most
+recently built prebuilt CLI (`target/release/mncs` or `target/debug/mncs`)
+by modification time, with exact ties broken deterministically toward the
+release build; only when neither binary is usable does Forge fall back to
+`cargo run -p mncs-cli`. Release builds do not unconditionally win: a stale
+release binary predating the current checkout or library sources fails
+elaboration of newer standard-library modules, so newest-build wins. The
+status surface additionally reports the selected `binary` path and its
+`binary_modified_at` timestamp as observational provenance; semantic cache
+keys already bind the binary content itself. See
+`tests/test_toolchain_selection.py`.
 
 The canonical candidate material is exactly 71 bytes in this tranche:
 

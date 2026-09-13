@@ -30,6 +30,9 @@ def test_cli_smoke(project: Path) -> None:
     assert result["mode"] == "development"
 
 
+# Both smoke timeouts below are hang guards, not performance contracts: the
+# spawned server performs native toolchain calls, so slow toolchains need
+# headroom while a wedged server still fails loudly.
 def test_direct_mcp_protocol_smoke(project: Path) -> None:
     root = Path(__file__).parents[1]
     executable = installed_mcp_executable()
@@ -43,7 +46,7 @@ def test_direct_mcp_protocol_smoke(project: Path) -> None:
         check=True,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=300,
     )
     assert '"expected_tools_present": true' in result.stdout
 
@@ -61,7 +64,7 @@ def test_mcp_health_probe_reports_healthy(project: Path) -> None:
         check=True,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=300,
     )
     assert '"status": "healthy"' in result.stdout
     assert '"reachable": true' in result.stdout

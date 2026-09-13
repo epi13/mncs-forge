@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+- Decouple semantic tests from native-toolchain speed. Batch tests asserting
+  semantic outcomes opt into headroom for compiler latency through a
+  `with_native_latency_allowance` test helper (product defaults untouched;
+  budget exhaustion stays pinned by the fake-clock test), and the MCP/CLI
+  smoke and benchmark harnesses treat their subprocess timeouts as hang
+  guards rather than performance contracts. No timing assertion was
+  weakened: none of these tests assert absolute durations.
+- Fix native lifecycle projection of recorded selections in evidence-free
+  history slices. The kernel's history projection required PASS evidence for
+  selection lineage, so evaluator-mode views (which deliberately exclude
+  evidence kinds) projected `AmbiguousHistory` for coherent selected/frozen
+  histories. Evidence sufficiency stays enforced where it belongs — the
+  readiness kernel plus host selection/freeze authorization — while the
+  lifecycle kernel now owns only parent-linkage coherence. Projected
+  selection/freeze status additionally reports `PASS` only when PASS
+  evidence is present in the slice. Covered by
+  `test_native_lifecycle_projection_accepts_recorded_selection_without_evidence`
+  and the evaluator verifier/state-machine suites.
+- Accept post-disposition evidence observations in native history
+  projection. Freeze re-runs required checks after selection, so a FAIL
+  observed after disposition is revalidation input — not a lineage break —
+  and surfaces as `EVIDENCE_FAILED` at freeze authorization instead of a
+  misleading ambiguity limitation. Post-freeze and post-evaluation
+  observations remain outside the lifecycle. Covered by
+  `test_native_lifecycle_projection_accepts_post_selection_evidence` and
+  `test_freeze_revalidates_selected_evidence`.
+- Report native toolchain selection in `project.doctor` (`native_execution`
+  with mode, selected command, binary path, and build timestamp) so a stale
+  compiler is visible in pre-flight diagnostics.
+- Consolidate Forge-local content identities onto the shared canonical JSON
+  track (`serialization.canonical_bytes`): the hand-rolled encoders in
+  concept evaluations and license evidence are retired (byte-identical for
+  their value domains; non-finite floats now fail closed instead of hashing
+  invalid JSON). RFC 8785 JCS remains the track for language-owned receipt
+  envelopes and runner/host identities; see the `serialization` policy note.
+- Select the most recently built MNCS toolchain binary instead of always
+  preferring `target/release/mncs`. A stale release build predating the
+  current checkout or library sources fails elaboration of newer
+  standard-library modules, so newest-build wins with deterministic
+  release-on-tie ordering; an explicit `MNCS_CLI` path still wins and the
+  `cargo run -p mncs-cli` fallback remains last. Native status now also
+  reports the selected `binary` path and `binary_modified_at` as
+  observational provenance. Covered by `tests/test_toolchain_selection.py`;
+  see `docs/development-pressure/forge-p-0001-toolchain-identity.md` for the
+  remaining language-side identity gap.
+
 - Add a typed `mncs.forge.bundle.v1` precondition projection. Native mode now
   checks request validity, opaque candidate identity correspondence, candidate
   freshness, and evaluator selection/freeze coherence before bundle workflow

@@ -275,6 +275,62 @@ def test_native_lifecycle_projection_covers_lineage_freshness_and_terminality() 
     assert ambiguous.status == "UNKNOWN"
 
 
+def test_native_lifecycle_projection_accepts_recorded_selection_without_evidence() -> None:
+    """Evaluator history slices omit evidence kinds; selection is still lineage-valid."""
+
+    adapter = NativeForgeAdapter(ROOT)
+    adapter.ensure_available()
+    epoch = "epoch:" + ("01" * 32)
+    candidate = "forge-tree-sha256-v1:" + ("02" * 32)
+    events = [
+        {"kind": "EpochStarted", "epoch": epoch, "parent_epoch": None},
+        {
+            "kind": "CandidateRegistered",
+            "epoch": epoch,
+            "candidate": candidate,
+            "parent_candidate": None,
+        },
+        {"kind": "CandidateSelected", "candidate": candidate},
+        {"kind": "CandidateFrozen", "candidate": candidate},
+    ]
+
+    result = adapter.lifecycle_projection(events, current_candidate=candidate, required_evidence=0)
+
+    assert result.stage == "CandidateFrozen"
+    assert result.lineage_ok is True
+    assert result.disposition == "Selected"
+    assert result.frozen is True
+    # No evidence in the projected slice means no PASS claim from the kernel.
+    assert result.status == "UNKNOWN"
+
+
+def test_native_lifecycle_projection_accepts_post_selection_evidence() -> None:
+    """Freeze revalidation observes evidence after selection; lineage stays valid."""
+
+    adapter = NativeForgeAdapter(ROOT)
+    adapter.ensure_available()
+    epoch = "epoch:" + ("01" * 32)
+    candidate = "forge-tree-sha256-v1:" + ("02" * 32)
+    events = [
+        {"kind": "EpochStarted", "epoch": epoch, "parent_epoch": None},
+        {
+            "kind": "CandidateRegistered",
+            "epoch": epoch,
+            "candidate": candidate,
+            "parent_candidate": None,
+        },
+        {"kind": "EvidenceObserved", "candidate": candidate, "status": "PASS"},
+        {"kind": "CandidateSelected", "candidate": candidate},
+        {"kind": "EvidenceObserved", "candidate": candidate, "status": "FAIL"},
+    ]
+
+    result = adapter.lifecycle_projection(events, current_candidate=candidate, required_evidence=1)
+
+    assert result.stage == "CandidateSelected"
+    assert result.lineage_ok is True
+    assert result.disposition == "Selected"
+
+
 def test_native_reconciliation_projection_is_typed_and_conflict_visible() -> None:
     adapter = NativeForgeAdapter(ROOT)
     adapter.ensure_available()

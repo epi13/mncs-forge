@@ -52,6 +52,8 @@ development planning. The root README remains a short project entrypoint.
   adversarial validation.
 - [Architecture decision records](adr/README.md) — accepted decisions for implemented boundaries
   and proposed decisions for future work.
+- [Language-pressure records](development-pressure/README.md) — Forge's local inventory of the
+  open `mncs-language` frontier with reproducers and acceptance tests.
 - [Task 3 validation evidence](development-evidence/task-3-validation.md) — baseline, focused/full
   test results, benchmark comparison, graph-analysis limits, and the deferred storage seam.
 - [Task 4 validation evidence](development-evidence/task-4-validation.md) — transaction fault

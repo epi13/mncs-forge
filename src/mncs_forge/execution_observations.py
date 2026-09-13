@@ -24,7 +24,13 @@ from .ports import (
 
 
 def canonical_sha256(value: object) -> str:
-    """Return the MNCS-compatible RFC 8785 SHA-256 identity for JSON data."""
+    """Return the MNCS-compatible RFC 8785 SHA-256 identity for JSON data.
+
+    This is the cross-implementation track (see ``serialization``): runner and
+    host identities stay comparable with language-owned JCS digests. Forge
+    persisted bytes and Forge-local content identities use
+    :func:`mncs_forge.serialization.canonical_bytes` instead.
+    """
 
     return hashlib.sha256(rfc8785.dumps(cast(Any, value))).hexdigest()
 

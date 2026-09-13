@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,19 @@ from mncs_forge.config import ForgeConfig, load_config
 
 def _verifier_modes(mode: str) -> str:
     return json.dumps(["development", "evaluator"] if mode == "PASS" else ["development"])
+
+
+def with_native_latency_allowance(config: ForgeConfig) -> ForgeConfig:
+    """Copy the fixture config with headroom for native-toolchain latency.
+
+    Fixture workflow timeouts are tiny (0.5s), so the batch budgets derived
+    from them cannot absorb native compiler executions. Tests asserting
+    semantic outcomes — not budgets — opt in explicitly. Budget exhaustion
+    itself stays pinned by the fake-clock test, and product defaults are
+    untouched.
+    """
+
+    return replace(config, raw={**config.raw, "verifier_limits": {"batch_timeout_seconds": 300}})
 
 
 @pytest.fixture

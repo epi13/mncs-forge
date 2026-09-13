@@ -8,6 +8,8 @@ from pathlib import Path
 
 def test_micro_verifier_benchmark_smoke() -> None:
     root = Path(__file__).parents[1]
+    # Hang guard only: this benchmark asserts structural properties, never
+    # absolute timings, so it must tolerate slow native toolchains.
     completed = subprocess.run(
         [
             sys.executable,
@@ -19,7 +21,7 @@ def test_micro_verifier_benchmark_smoke() -> None:
         capture_output=True,
         text=True,
         check=False,
-        timeout=30,
+        timeout=300,
     )
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)

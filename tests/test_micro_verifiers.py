@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from conftest import with_native_latency_allowance
 
 from mncs_forge.cli import run
 from mncs_forge.config import ForgeConfig, load_config
@@ -386,6 +387,7 @@ def test_witnesses_are_bounded(config: ForgeConfig) -> None:
 
 
 def test_batch_limits_and_dominance(config: ForgeConfig) -> None:
+    config = with_native_latency_allowance(config)
     forge = Forge(config)
     begin_and_register(forge)
     result = forge.verifier_batch(
@@ -466,6 +468,7 @@ def test_evaluator_freeze_status_only_and_non_independence(config: ForgeConfig) 
 def test_development_reuse_cannot_become_independent_evaluator_evidence(
     config: ForgeConfig,
 ) -> None:
+    config = with_native_latency_allowance(config)
     development = Forge(config)
     candidate = begin_and_register(development)
     development.verifier_run("verify-pass", changed_paths=["candidate/main.py"], scope="file")
@@ -490,6 +493,7 @@ def test_evaluator_only_verifier_is_rejected_in_development(config: ForgeConfig)
 
 
 def test_evaluator_freeze_drift_rejected(config: ForgeConfig, project: Path) -> None:
+    config = with_native_latency_allowance(config)
     development = Forge(config)
     candidate = begin_and_register(development)
     freeze_candidate(development, candidate)
