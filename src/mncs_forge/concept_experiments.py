@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .errors import ForgeError
+from .serialization import canonical_bytes
 
 CONCEPT_EVALUATION_SCHEMA = "mncs-forge.concept-evaluation.v0.1"
 CONCEPT_EVALUATION_INTERPRETATION = "bounded_forge_evaluation_not_mncs_conformance"
@@ -20,8 +20,10 @@ def _text(value: object, field: str, maximum: int = 4096) -> str:
 
 
 def _digest(value: Mapping[str, Any]) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+    # Forge-local content identity on the shared canonical track. Unlike the
+    # previous bespoke encoder this rejects non-finite floats instead of
+    # hashing their invalid JSON spelling.
+    return "sha256:" + hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
 def build_concept_evaluation(

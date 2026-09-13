@@ -17,6 +17,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any, TypedDict
@@ -530,6 +531,7 @@ class NativeForgeAdapter:
                 "selected": True,
                 "available": True,
                 "command": list(command),
+                **self._selected_binary_observation(),
             }
         return {
             "mode": mode,
@@ -538,25 +540,79 @@ class NativeForgeAdapter:
             "reason": "NATIVE_UNAVAILABLE",
         }
 
+    def _selected_binary_observation(self) -> dict[str, object]:
+        """Describe the selected prebuilt binary for provenance inspection.
+
+        The observation is best-effort host metadata, never semantic input:
+        cache keys already bind the binary content through
+        :meth:`semantic_input_identity`.
+        """
+
+        assert self.language_root is not None
+        try:
+            selected = self._command()[0]
+        except (IndexError, ForgeError):
+            return {}
+        for relative in (Path("target/release/mncs"), Path("target/debug/mncs")):
+            binary = self.language_root / relative
+            try:
+                if os.path.samefile(binary, selected):
+                    modified = datetime.fromtimestamp(
+                        binary.stat().st_mtime_ns / 1_000_000_000, tz=UTC
+                    ).isoformat()
+                    return {
+                        "binary": binary.as_posix(),
+                        "binary_modified_at": modified,
+                    }
+            except OSError:
+                continue
+        return {}
+
+    def _candidate_binaries(self) -> list[Path]:
+        """Return usable prebuilt CLI binaries, newest build first.
+
+        A stale release build predating the current checkout or library
+        sources fails elaboration of newer standard-library modules, so
+        release builds do not unconditionally win over newer debug builds.
+        Ordering is total (mtime, then path) to keep selection deterministic.
+        """
+
+        assert self.language_root is not None
+        candidates: list[tuple[int, str, Path]] = []
+        for relative in (Path("target/release/mncs"), Path("target/debug/mncs")):
+            binary = self.language_root / relative
+            try:
+                if not (binary.is_file() and os.access(binary, os.X_OK)):
+                    continue
+                mtime_ns = binary.stat().st_mtime_ns
+            except OSError:
+                continue
+            candidates.append((mtime_ns, binary.as_posix(), binary))
+        candidates.sort(reverse=True)
+        return [binary for _, _, binary in candidates]
+
     def _command(self) -> list[str]:
         configured = os.environ.get("MNCS_CLI")
         if configured:
             if "\x00" in configured:
                 raise ForgeError("NATIVE_CONFIG_INVALID", "MNCS_CLI contains NUL")
             return [configured]
+        if self.language_root is None:
+            raise ForgeError(
+                "NATIVE_UNAVAILABLE",
+                "mncs-language sibling checkout is unavailable; native Forge is UNKNOWN",
+            )
         cargo = shutil.which("cargo")
         if cargo is None:
             raise ForgeError("NATIVE_UNAVAILABLE", "cargo is not available")
-        assert self.language_root is not None
         if self.source_available:
-            for relative in (Path("target/release/mncs"), Path("target/debug/mncs")):
-                binary = self.language_root / relative
-                if binary.is_file() and os.access(binary, os.X_OK):
-                    # The CLI loads Forge source at invocation time. Its
-                    # timestamp therefore does not need to track the source
-                    # checkout, and using the built binary keeps lifecycle
-                    # preflights bounded without a cargo rebuild per call.
-                    return [str(binary)]
+            candidates = self._candidate_binaries()
+            if candidates:
+                # The CLI loads Forge source at invocation time. Its
+                # timestamp therefore does not need to track the source
+                # checkout, and using the built binary keeps lifecycle
+                # preflights bounded without a cargo rebuild per call.
+                return [str(candidates[0])]
         return [
             cargo,
             "run",

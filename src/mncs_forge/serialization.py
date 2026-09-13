@@ -1,4 +1,19 @@
-"""Deterministic local serialization helpers."""
+"""Deterministic local serialization helpers.
+
+Two-track encoding policy:
+
+- Forge-persisted bytes (ledger lines, immutable records, transaction
+  journals) and Forge-local content identities use :func:`canonical_bytes`.
+  Its exact bytes are load-bearing for existing ledgers and snapshots: never
+  change its output for previously encodable values.
+- Identities over language-owned envelopes (MNCS execution receipts) use RFC
+  8785 JCS through ``rfc8785`` at the verification site. That is the
+  cross-implementation contract with the language-owned receipt producer, not
+  a Forge-local choice.
+
+New code must use one of these two tracks explicitly. Do not add a third
+hand-rolled canonicalizer.
+"""
 
 from __future__ import annotations
 

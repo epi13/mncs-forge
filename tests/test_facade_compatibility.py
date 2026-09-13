@@ -46,9 +46,11 @@ def test_facade_preserves_representative_public_shapes(config: ForgeConfig) -> N
         "mode",
         "ledger",
         "commands",
+        "native_execution",
         "network_required",
         "limitations",
     }
+    assert doctor["native_execution"]["mode"] in {"off", "prefer", "required"}
     assert {"project", "lifecycle", "configured_providers", "declared_micro_verifiers"} <= set(
         inspection
     )

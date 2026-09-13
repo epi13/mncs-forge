@@ -117,11 +117,49 @@ def test_tampered_evaluations_are_rejected_at_record_time(config) -> None:
         forge.concept_evaluation_record(relabeled)
 
 
+def _material(value: dict[str, object]) -> dict[str, object]:
+    return {key: item for key, item in value.items() if key not in {"stable_id", "content_digest"}}
+
+
+def test_content_digest_uses_shared_canonical_bytes() -> None:
+    import hashlib
+
+    from mncs_forge.serialization import canonical_bytes
+
+    value = evaluation()
+    expected = "sha256:" + hashlib.sha256(canonical_bytes(_material(value))).hexdigest()
+    assert value["content_digest"] == expected
+
+    rebuilt = build_concept_evaluation(
+        concept_experiment_id="cre-unicode",
+        candidate_identity="candidate:unicode",
+        language_profile="mncs-language:source-profile:0.2",
+        compiler_identity="mncs:compiler:fixture",
+        backend_identity="mncs:language:backend:reference-interpreter",
+        execution_identities=[],
+        verifier_identity="forge:verifier:unicode",
+        verifier_version="0.1",
+        obligation="données — Öffnen ©",
+        evidence_identities=[],
+        status="UNKNOWN",
+    )
+    material = _material(rebuilt)
+    assert (
+        rebuilt["content_digest"]
+        == "sha256:" + hashlib.sha256(canonical_bytes(material)).hexdigest()
+    )
+    # Non-ASCII text stays raw UTF-8 on the Forge-local track (no JCS escapes).
+    assert "données — Öffnen ©".encode() in canonical_bytes(material)
+
+    with pytest.raises(ValueError, match=r"[Nn]an"):
+        canonical_bytes({"value": float("nan")})
+
+
 def test_unknown_cannot_be_upgraded_through_persistence(config) -> None:
     import hashlib
-    import json as json_module
 
     from mncs_forge.engine import Forge
+    from mncs_forge.serialization import canonical_bytes
 
     forge = Forge(config)
     evaluation = _replication_evaluation()
@@ -138,10 +176,7 @@ def test_unknown_cannot_be_upgraded_through_persistence(config) -> None:
     material["status"] = "PASS"
     forged = {
         **material,
-        "content_digest": "sha256:"
-        + hashlib.sha256(
-            json_module.dumps(material, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
+        "content_digest": "sha256:" + hashlib.sha256(canonical_bytes(material)).hexdigest(),
     }
     forged["stable_id"] = f"mncs-forge://evaluation/{forged['content_digest'][7:]}"
     record = forge.concept_evaluation_record(forged)

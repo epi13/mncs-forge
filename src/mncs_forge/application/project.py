@@ -73,6 +73,7 @@ class ProjectService:
             "mode": self.mode,
             "ledger": ledger,
             "commands": commands,
+            "native_execution": self.lifecycle.native_status(),
             "network_required": False,
             "limitations": PUBLIC_LIMITATIONS,
         }

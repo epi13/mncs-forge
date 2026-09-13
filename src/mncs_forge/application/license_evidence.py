@@ -23,6 +23,7 @@ from typing import Any
 
 from ..config import ForgeConfig
 from ..paths import resolve_contained
+from ..serialization import canonical_bytes
 
 EVIDENCE_SCHEMA_VERSION = "0.2.0"
 
@@ -62,30 +63,13 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _jcs(value: Any) -> bytes:
-    if value is None:
-        return b"null"
-    if value is True:
-        return b"true"
-    if value is False:
-        return b"false"
-    if isinstance(value, int):
-        return str(value).encode("ascii")
-    if isinstance(value, float):
-        return repr(value).encode("ascii")
-    if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    if isinstance(value, list):
-        return b"[" + b",".join(_jcs(item) for item in value) + b"]"
-    if isinstance(value, dict):
-        items = sorted(value.items(), key=lambda item: str(item[0]).encode("utf-16-be"))
-        return b"{" + b",".join(_jcs(str(key)) + b":" + _jcs(item) for key, item in items) + b"}"
-    raise TypeError(f"unsupported canonical JSON value: {type(value).__name__}")
-
-
 def compute_content_digest(record: dict[str, Any]) -> str:
+    # Forge-local content identity on the shared canonical track. The retired
+    # hand-rolled encoder produced byte-identical output for this value
+    # domain (ASCII keys, no non-finite floats); the shared encoder additionally
+    # rejects non-finite floats instead of hashing their invalid spelling.
     reduced = {key: item for key, item in record.items() if key != "content_digest"}
-    return "sha256:" + hashlib.sha256(_jcs(reduced)).hexdigest()
+    return "sha256:" + hashlib.sha256(canonical_bytes(reduced)).hexdigest()
 
 
 def _classify_license_text(head_text: str) -> str | None:
@@ -215,7 +199,7 @@ def scan_license_evidence(config: ForgeConfig) -> dict[str, Any]:
         )
 
     identity_material = {"root": str(root), "claims": claims}
-    digest = hashlib.sha256(_jcs(identity_material)).hexdigest()
+    digest = hashlib.sha256(canonical_bytes(identity_material)).hexdigest()
     evidence_id = f"mncs-forge://license-evidence/{digest[:32]}"
     evidence: dict[str, Any] = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
