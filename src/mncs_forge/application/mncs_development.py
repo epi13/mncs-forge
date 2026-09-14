@@ -1142,11 +1142,7 @@ class MncsDevelopmentService:
                     }
                 )
         if effective_diagnostic_depth != "minimal":
-            escalation_reason = (
-                "explicit_user_request"
-                if diagnostic_depth != "minimal" or minimize
-                else "insufficient_diagnostic_evidence"
-            )
+            escalation_reason = "explicit_user_request"
             base["observability"]["escalations"].append(
                 {
                     "kind": "diagnostic_depth",
