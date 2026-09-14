@@ -27,11 +27,17 @@ is a routing decision, not local family proof, so the operation returns
 `UNKNOWN` until the family boundary is established.
 
 The default diagnostic depth is `minimal`: validation and inspection run after
-the failing witness. `standard` adds trace and provenance; `deep` adds open,
-replay, and minimization where the debugger declares them. These queries use
-the existing failing execution and do not rerun successful tests. An Actions
-handoff preserves its receipt/manifest references and lets Forge consume the
-existing witness.
+the failing witness, followed by the typed mncs-debug sufficiency decision. If
+the decision says the diagnosis is ambiguous, Forge requests only its named
+next projection (trace, provenance, replay, or minimization) and asks for a
+second sufficiency decision. The same witness, validation, and inspection are
+reused. `standard` adds the explicitly requested trace/provenance and `deep`
+adds open, replay, and minimization where the debugger declares them. These
+queries use the existing failing execution and do not rerun successful tests.
+Forge records the evidence gap, requested operation, reused artifacts, and the
+point at which diagnosis became sufficient. An Actions handoff preserves its
+receipt/manifest references and lets Forge consume the existing witness and
+sufficiency projection.
 
 The same operation also accepts `provider_mode = "consume"` for an
 Actions-produced handoff. In that mode Forge validates the transported
