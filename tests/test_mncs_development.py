@@ -191,7 +191,7 @@ def test_failure_loop_consumes_ravel_plan_and_rebinds_after_repair(config, proje
     assert output["impact"]["plan"]["level"] == "direct_dependents"
     assert output["impact"]["after_plan"]["plan_id"] != output["impact"]["plan"]["plan_id"]
     assert output["debug"]["diagnostic_depth"] == "minimal"
-    assert output["debug"]["diagnostic_operations"] == ["validation", "inspection"]
+    assert output["debug"]["diagnostic_operations"] == ["validation", "inspection", "sufficiency"]
     assert output["observability"]["selected_test_count"] == 1
     assert output["observability"]["reused_evidence"]["post_repair_plan"] is False
     assert output["verification"]["selection"]["selected_count"] == 1
