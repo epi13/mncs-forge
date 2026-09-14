@@ -449,6 +449,10 @@ class Forge:
         repair_path: str | None = None,
         repair_from: str | None = None,
         repair_to: str | None = None,
+        verification_plan_file: str | None = None,
+        post_repair_verification_plan_file: str | None = None,
+        ravel_command: list[str] | None = None,
+        diagnostic_depth: str = "minimal",
         output_file: str | None = None,
     ) -> dict[str, object]:
         return self._mncs_development_service.failure_loop(
@@ -478,6 +482,10 @@ class Forge:
             repair_path=repair_path,
             repair_from=repair_from,
             repair_to=repair_to,
+            verification_plan_file=verification_plan_file,
+            post_repair_verification_plan_file=post_repair_verification_plan_file,
+            ravel_command=ravel_command,
+            diagnostic_depth=diagnostic_depth,
             output_file=output_file,
         )
 

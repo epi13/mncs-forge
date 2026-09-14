@@ -201,6 +201,12 @@ def _common_parser() -> argparse.ArgumentParser:
     failure_loop.add_argument("--repair-path", default=None)
     failure_loop.add_argument("--repair-from", default=None)
     failure_loop.add_argument("--repair-to", default=None)
+    failure_loop.add_argument("--verification-plan-file", default=None)
+    failure_loop.add_argument("--post-repair-verification-plan-file", default=None)
+    failure_loop.add_argument("--ravel-command", default=None)
+    failure_loop.add_argument(
+        "--diagnostic-depth", choices=("minimal", "standard", "deep"), default="minimal"
+    )
     failure_loop.add_argument("--output-file", default=None)
 
     explain = _register(

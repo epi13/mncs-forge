@@ -255,6 +255,10 @@ class MncsFailureLoopInput(OperationInput):
     repair_path: str | None = None
     repair_from: str | None = None
     repair_to: str | None = None
+    verification_plan_file: str | None = None
+    post_repair_verification_plan_file: str | None = None
+    ravel_command: list[str] | None = None
+    diagnostic_depth: str = "minimal"
     output_file: str | None = None
 
 
@@ -520,6 +524,10 @@ class ForgeOperationTarget(Protocol):
         repair_path: str | None = None,
         repair_from: str | None = None,
         repair_to: str | None = None,
+        verification_plan_file: str | None = None,
+        post_repair_verification_plan_file: str | None = None,
+        ravel_command: list[str] | None = None,
+        diagnostic_depth: str = "minimal",
         output_file: str | None = None,
     ) -> JsonObject: ...
     def candidate_compare(self, candidate_ids: list[str]) -> JsonObject: ...
@@ -851,6 +859,10 @@ def _mncs_failure_loop(forge: ForgeOperationTarget, value: OperationInput) -> Js
         repair_path=request.repair_path,
         repair_from=request.repair_from,
         repair_to=request.repair_to,
+        verification_plan_file=request.verification_plan_file,
+        post_repair_verification_plan_file=request.post_repair_verification_plan_file,
+        ravel_command=request.ravel_command,
+        diagnostic_depth=request.diagnostic_depth,
         output_file=request.output_file,
     )
 
@@ -1477,6 +1489,10 @@ _OPERATIONS = (
                 _binding("repair_path", "repair_path"),
                 _binding("repair_from", "repair_from"),
                 _binding("repair_to", "repair_to"),
+                _binding("verification_plan_file", "verification_plan_file"),
+                _binding("post_repair_verification_plan_file", "post_repair_verification_plan_file"),
+                _binding("ravel_command", "ravel_command", CliDecoder.JSON_VALUE),
+                _binding("diagnostic_depth", "diagnostic_depth"),
                 _binding("output_file", "output_file"),
             ),
         ),

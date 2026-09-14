@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,7 @@ PROJECTS = Path(__file__).resolve().parents[2]
 MNCS_TEST = Path(os.environ.get("MNCS_TEST_REPO", PROJECTS / "mncs-test"))
 MNCS_DEBUG = Path(os.environ.get("MNCS_DEBUG_REPO", PROJECTS / "mncs-debug"))
 MNCS_LANGUAGE = Path(os.environ.get("MNCS_LANGUAGE_REPO", PROJECTS / "mncs-language"))
+RAVEL = Path(os.environ.get("RAVEL_REPO", PROJECTS / "RAVEL"))
 MNCS_BINARY = Path(os.environ.get("MNCS", MNCS_LANGUAGE / "target/debug/mncs"))
 MNCS_EMBED = Path(
     os.environ.get("MNCS_EMBED_LIBRARY", MNCS_LANGUAGE / "target/debug/libmncs_embed.so")
@@ -66,6 +68,50 @@ def _commands() -> tuple[list[str], list[str]]:
     )
 
 
+def _write_ravel_plan(project: Path, source: Path) -> Path:
+    inventory = subprocess.run(
+        [str(MNCS_BINARY), "test-inventory", str(source)],
+        cwd=project,
+        env={
+            **os.environ,
+            "MNCS_LIBRARY_PATH": os.pathsep.join(
+                (str(MNCS_TEST / "native"), str(MNCS_LANGUAGE / "library"))
+            ),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert inventory.returncode == 0, inventory.stderr + inventory.stdout
+    inventory_document = json.loads(inventory.stdout)
+    root = inventory_document["inventory"]["tests"][0]["function_identity"]
+    plan = project / ".mncs-forge" / "verification-plan.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(RAVEL / "src" / "ravel" / "impact.py"),
+            str(source),
+            "--mncs",
+            str(MNCS_BINARY),
+            "--library",
+            str(MNCS_TEST / "native"),
+            "--library",
+            str(MNCS_LANGUAGE / "library"),
+            "--root",
+            root,
+            "--output",
+            str(plan),
+        ],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert plan.is_file()
+    return plan
+
+
 def test_failure_loop_preserves_lineage_and_verifies_exact_repair(config, project: Path) -> None:
     _require_native_toolchain()
     _fixture_manifest(project)
@@ -112,6 +158,43 @@ def test_failure_loop_preserves_lineage_and_verifies_exact_repair(config, projec
     assert persisted["output_identity"] == output["output_identity"]
     assert output["artifact"]["sha256"]
     assert output["artifact"]["path"].endswith("output/mncs-failure-loop.json")
+    schema = json.loads(DEVELOPMENT_SCHEMA.read_text(encoding="utf-8"))
+    assert list(Draft202012Validator(schema).iter_errors(output)) == []
+
+
+def test_failure_loop_consumes_ravel_plan_and_rebinds_after_repair(config, project: Path) -> None:
+    _require_native_toolchain()
+    manifest = _fixture_manifest(project)
+    source = project / "candidate" / "first_class_failing.mncs"
+    plan = _write_ravel_plan(project, source)
+    test_command, debug_command = _commands()
+    forge = _forge_with_native_headroom(config)
+
+    output = forge.mncs_failure_loop(
+        manifest="candidate/first-class-failing.toml",
+        test_command=test_command,
+        debug_command=debug_command,
+        mncs_binary=str(MNCS_BINARY),
+        library_paths=[str(MNCS_TEST / "native"), str(MNCS_LANGUAGE / "library")],
+        embed_library=str(MNCS_EMBED),
+        verification_plan_file=str(plan.relative_to(project)),
+        ravel_command=[sys.executable, str(RAVEL / "src" / "ravel" / "impact.py")],
+        diagnostic_depth="minimal",
+        timeout_seconds=120,
+        repair_path="candidate/first_class_failing.mncs",
+        repair_from="equals_i64(7, 6, 2001)",
+        repair_to="equals_i64(6, 6, 2001)",
+        output_file="output/mncs-ravel-plan-loop.json",
+    )
+
+    assert output["verdict"] == "PASS"
+    assert output["impact"]["plan"]["level"] == "direct_dependents"
+    assert output["impact"]["after_plan"]["plan_id"] != output["impact"]["plan"]["plan_id"]
+    assert output["debug"]["diagnostic_depth"] == "minimal"
+    assert output["debug"]["diagnostic_operations"] == ["validation", "inspection"]
+    assert output["observability"]["selected_test_count"] == 1
+    assert output["observability"]["reused_evidence"]["post_repair_plan"] is False
+    assert output["verification"]["selection"]["selected_count"] == 1
     schema = json.loads(DEVELOPMENT_SCHEMA.read_text(encoding="utf-8"))
     assert list(Draft202012Validator(schema).iter_errors(output)) == []
 
