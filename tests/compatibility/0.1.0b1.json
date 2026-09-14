@@ -409,6 +409,21 @@
         },
         {
           "decoder": "value",
+          "input": "max_values",
+          "namespace": "max_values"
+        },
+        {
+          "decoder": "value",
+          "input": "max_value_bytes",
+          "namespace": "max_value_bytes"
+        },
+        {
+          "decoder": "value",
+          "input": "selected_operations",
+          "namespace": "selected_operations"
+        },
+        {
+          "decoder": "value",
           "input": "timeout_seconds",
           "namespace": "timeout_seconds"
         },
@@ -1564,7 +1579,9 @@
           {
             "choices": [
               "failure-only",
+              "selected",
               "bounded",
+              "diagnostic",
               "events"
             ],
             "default": "failure-only",
@@ -1584,6 +1601,35 @@
             ],
             "required": false,
             "value_type": "int"
+          },
+          {
+            "default": 1024,
+            "destination": "max_values",
+            "nargs": null,
+            "options": [
+              "--max-values"
+            ],
+            "required": false,
+            "value_type": "int"
+          },
+          {
+            "default": 4096,
+            "destination": "max_value_bytes",
+            "nargs": null,
+            "options": [
+              "--max-value-bytes"
+            ],
+            "required": false,
+            "value_type": "int"
+          },
+          {
+            "default": null,
+            "destination": "selected_operations",
+            "nargs": null,
+            "options": [
+              "--selected-operation"
+            ],
+            "required": false
           },
           {
             "default": null,
@@ -2674,6 +2720,8 @@
             "library_paths",
             "manifest",
             "max_events",
+            "max_value_bytes",
+            "max_values",
             "minimize",
             "mncs_binary",
             "output_file",
@@ -2681,6 +2729,7 @@
             "repair_from",
             "repair_path",
             "repair_to",
+            "selected_operations",
             "test_artifacts_directory",
             "test_check_file",
             "test_command",
@@ -2689,7 +2738,7 @@
             "timeout_seconds",
             "working_directory"
           ],
-          "input_schema_sha256": "6b930b05b0ef6630164dbf6fb91684e356e8d7d286189bd2b795178c064b1eb2",
+          "input_schema_sha256": "6f1db4ec4fbc5a49f681d4e5c7c69921e610839c517bfac3a468ab079911169f",
           "output_schema_sha256": "82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
           "required_inputs": [
             "manifest"
@@ -3391,7 +3440,7 @@
       "learned_specialist_shadow": "(self, artifact_path: 'str', provider_command: 'list[str]', source_records: 'list[dict[str, object]]', *, context_observations: 'list[dict[str, object]] | None' = None, lineage_identity: 'str | None' = None, timeout_seconds: 'float' = 5.0) -> 'dict[str, object]'",
       "ledger_verify": "(self) -> 'dict[str, object]'",
       "license_evidence_scan": "(self) -> 'dict[str, object]'",
-      "mncs_failure_loop": "(self, *, manifest: 'str', test_command: 'list[str] | None' = None, debug_command: 'list[str] | None' = None, mncs_binary: 'str | None' = None, library_paths: 'list[str] | None' = None, embed_library: 'str | None' = None, working_directory: 'str' = '.', test_result_file: 'str' = '.mncs-forge/mncs-test-result.json', test_check_file: 'str' = '.mncs-forge/mncs-test-check.json', test_artifacts_directory: 'str' = '.mncs-forge/mncs-test-artifacts', debug_witness_file: 'str' = '.mncs-forge/mncs-debug-witness.json', debug_artifacts_directory: 'str' = '.mncs-forge/mncs-debug-artifacts', capture_policy: 'str' = 'failure-only', max_events: 'int' = 256, timeout_seconds: 'float | None' = None, minimize: 'bool' = False, test_id: 'str | None' = None, provider_mode: 'str' = 'invoke', debug_check_file: 'str | None' = None, actions_evidence_files: 'list[str] | None' = None, repair_path: 'str | None' = None, repair_from: 'str | None' = None, repair_to: 'str | None' = None, output_file: 'str | None' = None) -> 'dict[str, object]'",
+      "mncs_failure_loop": "(self, *, manifest: 'str', test_command: 'list[str] | None' = None, debug_command: 'list[str] | None' = None, mncs_binary: 'str | None' = None, library_paths: 'list[str] | None' = None, embed_library: 'str | None' = None, working_directory: 'str' = '.', test_result_file: 'str' = '.mncs-forge/mncs-test-result.json', test_check_file: 'str' = '.mncs-forge/mncs-test-check.json', test_artifacts_directory: 'str' = '.mncs-forge/mncs-test-artifacts', debug_witness_file: 'str' = '.mncs-forge/mncs-debug-witness.json', debug_artifacts_directory: 'str' = '.mncs-forge/mncs-debug-artifacts', capture_policy: 'str' = 'failure-only', max_events: 'int' = 256, max_values: 'int' = 1024, max_value_bytes: 'int' = 4096, selected_operations: 'list[str] | None' = None, timeout_seconds: 'float | None' = None, minimize: 'bool' = False, test_id: 'str | None' = None, provider_mode: 'str' = 'invoke', debug_check_file: 'str | None' = None, actions_evidence_files: 'list[str] | None' = None, repair_path: 'str | None' = None, repair_from: 'str | None' = None, repair_to: 'str | None' = None, output_file: 'str | None' = None) -> 'dict[str, object]'",
       "project_inspect": "(self) -> 'dict[str, object]'",
       "provider_list": "(self) -> 'dict[str, object]'",
       "provider_probe": "(self, provider_id: 'str') -> 'dict[str, object]'",

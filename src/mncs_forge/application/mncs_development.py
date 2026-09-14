@@ -24,6 +24,8 @@ CHECK_RESULT_SCHEMA = "mncs.check-result/1"
 CAPABILITIES_SCHEMA = "mncs.debug-capabilities/1"
 SESSION_SCHEMA = "mncs.debug-session/1"
 WITNESS_SCHEMA = "mncs.debug-witness/1"
+OBSERVATION_SCHEMA = "mncs.execution-observation/1"
+SOURCE_MAP_SCHEMA = "mncs.execution-source-map/1"
 VALIDATION_SCHEMA = "mncs.debug-validation/1"
 TRACE_SCHEMA = "mncs.debug-trace/1"
 INSPECTION_SCHEMA = "mncs.debug-inspection/1"
@@ -31,6 +33,18 @@ PROVENANCE_SCHEMA = "mncs.debug-provenance/1"
 REPLAY_SCHEMA = "mncs.debug-replay/1"
 MINIMIZATION_SCHEMA = "mncs.debug-minimization/1"
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    """Return a JSON object without weakening the typed projection boundary."""
+
+    return value if isinstance(value, dict) else {}
+
+
+def _object_list(value: object) -> list[dict[str, Any]]:
+    """Select JSON objects from a bounded provider array."""
+
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _sha256(path: Path) -> str:
@@ -213,6 +227,9 @@ class MncsDevelopmentService:
         library_paths: list[str] | None,
         capture_policy: str,
         max_events: int,
+        max_values: int,
+        max_value_bytes: int,
+        selected_operations: list[str] | None,
         timeout: float,
         minimize: bool,
         include_import: bool = True,
@@ -228,10 +245,17 @@ class MncsDevelopmentService:
                 capture_policy,
                 "--max-events",
                 str(max_events),
+                "--max-values",
+                str(max_values),
+                "--max-value-bytes",
+                str(max_value_bytes),
                 "--timeout",
                 str(timeout),
             )
         )
+        if capture_policy == "selected":
+            for operation in selected_operations or []:
+                common.extend(("--operation", operation))
         for path in library_paths or []:
             common.extend(("--library", path))
         capabilities_command = [*prefix, "capabilities"]
@@ -354,6 +378,244 @@ class MncsDevelopmentService:
             )
         return selected
 
+    @staticmethod
+    def _validate_native_observation(witness: dict[str, Any]) -> dict[str, Any] | None:
+        """Validate the native facts Forge is about to project.
+
+        `mncs-debug` is the semantic authority for these documents.  Forge
+        still validates the membrane shape and identity linkage before using
+        the facts in a diagnosis, but it never recomputes their identities or
+        infers missing execution relationships.
+        """
+
+        runtime = _mapping(witness.get("runtime"))
+        observation_value = runtime.get("observation")
+        if observation_value is None:
+            return None
+        if not isinstance(observation_value, dict):
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "mncs-debug emitted a malformed native execution observation",
+            )
+        observation: dict[str, Any] = observation_value
+        if observation.get("schema_version") != OBSERVATION_SCHEMA:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "mncs-debug emitted a malformed native execution observation",
+            )
+        required = (
+            "identity",
+            "execution_identity",
+            "policy",
+            "completeness",
+            "events",
+            "values",
+            "frames",
+            "effects",
+        )
+        missing = [field for field in required if field not in observation]
+        if missing or not all(
+            isinstance(observation[field], list)
+            for field in ("events", "values", "frames", "effects")
+        ):
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                f"native execution observation is missing or invalid: {missing}",
+            )
+        execution_identity = witness.get("execution_identity")
+        if observation.get("execution_identity") != execution_identity:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "native observation execution identity does not match the debug witness",
+            )
+        if (
+            not isinstance(runtime.get("observation_identity"), str)
+            or not runtime["observation_identity"]
+        ):
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "native observation transport identity is missing",
+            )
+        source = _mapping(_mapping(witness.get("static")).get("source"))
+        source_map = source.get("source_map")
+        if source_map is not None and (
+            not isinstance(source_map, dict)
+            or source_map.get("schema_version") != SOURCE_MAP_SCHEMA
+        ):
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "mncs-debug emitted a malformed compiler execution source map",
+            )
+        return observation
+
+    @staticmethod
+    def _native_diagnosis(
+        witness: dict[str, Any],
+        inspection: dict[str, Any],
+        trace: dict[str, Any],
+        provenance: dict[str, Any],
+        selected: dict[str, Any],
+        *,
+        status: str,
+    ) -> dict[str, Any]:
+        """Project provider facts into a bounded Forge diagnosis.
+
+        This is deliberately a projection, not a second debugger.  Every
+        relationship below is copied from `mncs-debug` inspection/provenance
+        or its structured trace.  Forge does not rebuild dataflow from source
+        text, operation order, or human process output.
+        """
+
+        runtime = _mapping(witness.get("runtime"))
+        observation = _mapping(runtime.get("observation"))
+        native = observation.get("schema_version") == OBSERVATION_SCHEMA
+        events = _object_list(trace.get("events"))
+        outcome = _mapping(witness.get("outcome"))
+        failure = _mapping(outcome.get("failure"))
+        failure_operation = (
+            failure.get("identity") if isinstance(failure.get("identity"), str) else None
+        )
+        matching_events: list[dict[str, Any]] = []
+
+        def operation_of(event: dict[str, Any]) -> str | None:
+            location = _mapping(event.get("location"))
+            runtime_location = _mapping(location.get("runtime"))
+            operation = runtime_location.get("operation")
+            if isinstance(operation, str):
+                return operation
+            payload = _mapping(event.get("payload"))
+            operation = payload.get("operation_identity")
+            return operation if isinstance(operation, str) else None
+
+        for event in events:
+            payload = _mapping(event.get("payload"))
+            event_failure = payload.get("failure_identity")
+            event_operation = operation_of(event)
+            if failure_operation is None and event.get("kind") == "failure" and event_operation:
+                failure_operation = event_operation
+            if failure_operation and (
+                event_operation == failure_operation or event_failure == failure_operation
+            ):
+                matching_events.append(event)
+
+        event_ids = [
+            item.get("event_id")
+            for item in matching_events
+            if isinstance(item.get("event_id"), str)
+        ]
+        frame_ids: list[str] = []
+        value_ids: list[str] = []
+        effect_ids: list[str] = []
+        for event in matching_events:
+            location = _mapping(event.get("location"))
+            runtime_location = _mapping(location.get("runtime"))
+            frame = runtime_location.get("frame")
+            if isinstance(frame, str) and frame not in frame_ids:
+                frame_ids.append(frame)
+            relationships = _mapping(event.get("relationships"))
+            for key in ("value_inputs", "value_outputs"):
+                relationship_values = relationships.get(key)
+                values_for_event = (
+                    relationship_values if isinstance(relationship_values, list) else []
+                )
+                for value in values_for_event:
+                    if isinstance(value, str) and value not in value_ids:
+                        value_ids.append(value)
+            effect = relationships.get("effect")
+            if isinstance(effect, str) and effect not in effect_ids:
+                effect_ids.append(effect)
+
+        raw_frames = _object_list(inspection.get("frames"))
+        frames = [
+            frame for frame in raw_frames if not frame_ids or frame.get("frame_id") in frame_ids
+        ]
+        raw_values = _object_list(inspection.get("values"))
+        values = [
+            value
+            for value in raw_values
+            if not value_ids
+            or value.get("value_id") in value_ids
+            or value.get("identity") in value_ids
+        ]
+        raw_effects = _object_list(inspection.get("effects"))
+        effects = [
+            effect
+            for effect in raw_effects
+            if not effect_ids or effect.get("identity") in effect_ids
+        ]
+        source_correspondence = None
+        for event in matching_events:
+            location = _mapping(event.get("location"))
+            source = location.get("source")
+            if isinstance(source, dict):
+                source_correspondence = source
+                break
+
+        claims = _object_list(provenance.get("claims"))
+        completeness = _mapping(_mapping(inspection.get("trace")).get("completeness"))
+        observation_completeness = _mapping(observation.get("completeness")) if native else {}
+        complete = observation_completeness.get("status") == "complete"
+        if native and complete:
+            confidence = "native_runtime_observation"
+        elif native:
+            confidence = "partial_native_observation"
+        else:
+            confidence = "bounded_provider_evidence"
+        if failure_operation and native:
+            statement = (
+                f"mncs-debug observed runtime failure at {failure_operation} with "
+                "native operation, frame, and value references"
+            )
+        elif native:
+            statement = (
+                "mncs-debug preserved bounded structured failure evidence; no "
+                "native runtime failure operation was emitted"
+            )
+        else:
+            statement = (
+                "mncs-debug correlated the failing TestExecution with bounded provider evidence"
+            )
+
+        limitations = witness.get("limitations")
+        if not isinstance(limitations, list):
+            limitations = []
+        diagnosis: dict[str, Any] = {
+            "status": status,
+            "confidence": confidence,
+            "statement": statement,
+            "test_failure": selected.get("failure"),
+            "source_location": selected.get("location"),
+            "evidence_basis": {
+                "authority": "mncs-debug",
+                "witness_id": witness.get("witness_id"),
+                "execution_identity": witness.get("execution_identity"),
+                "observation_identity": runtime.get("observation_identity") if native else None,
+                "trace_id": trace.get("trace_id"),
+                "inspection_id": inspection.get("inspection_id"),
+                "provenance_id": provenance.get("provenance_id"),
+            },
+            "failure_operation": {
+                "identity": failure_operation,
+                "event_ids": event_ids,
+                "source_correspondence": source_correspondence,
+                "frame_ids": frame_ids,
+                "input_value_ids": value_ids,
+                "effect_ids": effect_ids,
+                "status": "observed" if failure_operation and matching_events else "not_observed",
+            },
+            "frames": frames[:32],
+            "consumed_values": values[:64],
+            "effects": effects[:32],
+            "provenance_claims": claims[:64],
+            "completeness": {
+                "observation": observation_completeness,
+                "debugger": completeness,
+                "status": "complete" if complete else "partial" if native else "provider_bounded",
+                "limitations": limitations,
+            },
+        }
+        return diagnosis
+
     def _source_change(self, path: str, old: str, new: str) -> tuple[Path, str, str]:
         resolved = self._path(path, must_exist=True)
         relative = PurePosixPath(self._relative(resolved))
@@ -406,6 +668,9 @@ class MncsDevelopmentService:
         debug_artifacts_directory: str = ".mncs-forge/mncs-debug-artifacts",
         capture_policy: str = "failure-only",
         max_events: int = 256,
+        max_values: int = 1024,
+        max_value_bytes: int = 4096,
+        selected_operations: list[str] | None = None,
         timeout_seconds: float | None = None,
         minimize: bool = False,
         test_id: str | None = None,
@@ -426,12 +691,21 @@ class MncsDevelopmentService:
             )
         if provider_mode not in {"invoke", "consume"}:
             raise ForgeError("MNCS_PROVIDER_INPUT", "provider_mode must be invoke or consume")
-        if capture_policy not in {"failure-only", "bounded", "events"}:
+        if capture_policy not in {"failure-only", "selected", "bounded", "diagnostic", "events"}:
             raise ForgeError(
-                "MNCS_DEBUG_INPUT", "capture_policy must be failure-only, bounded, or events"
+                "MNCS_DEBUG_INPUT",
+                "capture_policy must be failure-only, selected, bounded, diagnostic, or events",
             )
         if max_events < 1 or max_events > 512:
             raise ForgeError("MNCS_DEBUG_INPUT", "max_events must be between 1 and 512")
+        if max_values < 0 or max_values > 2048:
+            raise ForgeError("MNCS_DEBUG_INPUT", "max_values must be between 0 and 2048")
+        if max_value_bytes < 0 or max_value_bytes > 65536:
+            raise ForgeError("MNCS_DEBUG_INPUT", "max_value_bytes must be between 0 and 65536")
+        if capture_policy == "selected" and not selected_operations:
+            raise ForgeError(
+                "MNCS_DEBUG_INPUT", "selected capture requires at least one operation identity"
+            )
         timeout = float(timeout_seconds if timeout_seconds is not None else self.config.timeout)
         if timeout <= 0:
             raise ForgeError("MNCS_DEBUG_INPUT", "timeout_seconds must be positive")
@@ -488,7 +762,7 @@ class MncsDevelopmentService:
             self._selected_test(test_result, test_id) if test_result["verdict"] == "FAIL" else None
         )
 
-        base: dict[str, object] = {
+        base: dict[str, Any] = {
             "schema_version": "mncs.forge-mncs-development/1",
             "operation": "development.mncs.failure-loop",
             "test": {
@@ -503,7 +777,10 @@ class MncsDevelopmentService:
             "diagnosis": {
                 "status": "NOT_REQUESTED",
                 "confidence": "none",
-                "statement": "mncs-test did not establish a failing test; no debugger invocation was required",
+                "statement": (
+                    "mncs-test did not establish a failing test; no debugger invocation "
+                    "was required"
+                ),
             },
             "repair": {"status": "NOT_REQUESTED"},
             "verification": {"status": "NOT_REQUESTED"},
@@ -513,6 +790,9 @@ class MncsDevelopmentService:
                 "working_directory": self._relative(cwd),
                 "capture_policy": capture_policy,
                 "max_events": max_events,
+                "max_values": max_values,
+                "max_value_bytes": max_value_bytes,
+                "selected_operations": selected_operations or [],
                 "provider_mode": provider_mode,
                 "provider_handoff": {
                     "provider": "mncs-actions" if provider_mode == "consume" else None,
@@ -580,7 +860,9 @@ class MncsDevelopmentService:
                 base["diagnosis"] = {
                     "status": "UNKNOWN",
                     "confidence": "none",
-                    "statement": "test FAIL is established; malformed Actions debug evidence remains INVALID",
+                    "statement": (
+                        "test FAIL is established; malformed Actions debug evidence remains INVALID"
+                    ),
                 }
                 return self._persist(base, output_file)
             if debug_check.get("verdict") != "PASS":
@@ -615,7 +897,9 @@ class MncsDevelopmentService:
                 base["diagnosis"] = {
                     "status": "UNKNOWN",
                     "confidence": "none",
-                    "statement": "test FAIL is established; the Actions debug witness is unavailable",
+                    "statement": (
+                        "test FAIL is established; the Actions debug witness is unavailable"
+                    ),
                 }
                 return self._persist(base, output_file)
 
@@ -634,6 +918,9 @@ class MncsDevelopmentService:
             library_paths=library_paths,
             capture_policy=capture_policy,
             max_events=max_events,
+            max_values=max_values,
+            max_value_bytes=max_value_bytes,
+            selected_operations=selected_operations,
             timeout=timeout,
             minimize=minimize,
             include_import=provider_mode == "invoke",
@@ -687,9 +974,9 @@ class MncsDevelopmentService:
             }
             return self._persist(base, output_file)
 
-        integration = (
-            witness.get("integration") if isinstance(witness.get("integration"), dict) else {}
-        )
+        observation = self._validate_native_observation(witness)
+
+        integration = _mapping(witness.get("integration"))
         if (
             integration.get("run_id") != test_result.get("run_id")
             or integration.get("test_id") != selected_id
@@ -718,10 +1005,12 @@ class MncsDevelopmentService:
             "debug-replay": REPLAY_SCHEMA,
             "debug-minimization": MINIMIZATION_SCHEMA,
         }
+        query_documents: dict[str, dict[str, Any]] = {}
         for label, path, _ in debug_query_paths:
             if label == "debug-import":
                 continue
-            document = self._read(path, label=label)
+            document = self._read(path, label=label, byte_cap=4_000_000)
+            query_documents[label] = document
             expected = schema_by_label[label]
             if document.get("schema_version") != expected:
                 raise ForgeError("PROVIDER_CONTRACT_INVALID", f"{label} did not emit {expected}")
@@ -737,20 +1026,32 @@ class MncsDevelopmentService:
             "execution_identity": witness.get("execution_identity"),
             "test_execution": integration.get("test_execution"),
             "outcome": witness.get("outcome"),
+            "observation": {
+                "schema_revision": observation.get("schema_version") if observation else None,
+                "identity": _mapping(witness.get("runtime")).get("observation_identity")
+                if observation
+                else None,
+                "completeness": observation.get("completeness") if observation else None,
+            },
+            "source_map": {
+                "schema_revision": _mapping(
+                    _mapping(_mapping(witness.get("static")).get("source"))
+                ).get("source_map_schema"),
+                "identity": _mapping(_mapping(_mapping(witness.get("static")).get("source"))).get(
+                    "source_map_identity"
+                ),
+            },
             "execution": debug_executions,
             "references": debug_references,
         }
-        base["diagnosis"] = {
-            "status": debug_status,
-            "confidence": "bounded_evidence" if debug_status == "ESTABLISHED" else "none",
-            "statement": (
-                "mncs-debug correlated the failing TestExecution with bounded trace, inspection, provenance, and trace replay"
-                if debug_status == "ESTABLISHED"
-                else "debug evidence was incomplete; no diagnosis is established"
-            ),
-            "test_failure": selected.get("failure"),
-            "source_location": selected.get("location"),
-        }
+        base["diagnosis"] = self._native_diagnosis(
+            witness,
+            query_documents.get("debug-inspection", {}),
+            query_documents.get("debug-trace", {}),
+            query_documents.get("debug-provenance", {}),
+            selected,
+            status=debug_status,
+        )
         if debug_status != "ESTABLISHED":
             base["verdict"] = "FAIL"
             return self._persist(base, output_file)
@@ -820,16 +1121,19 @@ class MncsDevelopmentService:
         base["verdict"] = after_test.get("verdict")
         return self._persist(base, output_file)
 
-    def _persist(self, result: dict[str, object], output_file: str | None) -> dict[str, object]:
+    def _persist(self, result: dict[str, Any], output_file: str | None) -> dict[str, Any]:
         material = dict(result)
         material.pop("artifact", None)
         result["output_identity"] = local_json_identity(material)
+        output_identity = result["output_identity"]
+        if not isinstance(output_identity, str):  # pragma: no cover - local identity is a string
+            raise ForgeError("FORGE_OUTPUT_INVALID", "Forge output identity is not a string")
         destination = (
             self._path(output_file)
             if output_file is not None
             else self.config.state_dir
             / "mncs-development"
-            / f"{result['output_identity'].split(':')[-1]}.json"
+            / f"{output_identity.split(':')[-1]}.json"
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(pretty_json(result), encoding="utf-8")
