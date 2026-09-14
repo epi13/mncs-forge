@@ -96,7 +96,9 @@
       "additionalProperties": false,
       "properties": {
         "mncs": {"$ref": "#/$defs/command"},
-        "mncds": {"$ref": "#/$defs/command"}
+        "mncds": {"$ref": "#/$defs/command"},
+        "mncs_test": {"$ref": "#/$defs/command"},
+        "mncs_debug": {"$ref": "#/$defs/command"}
       }
     },
     "environment_allowlist": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}},

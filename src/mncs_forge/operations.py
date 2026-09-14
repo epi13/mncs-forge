@@ -228,6 +228,31 @@ class FailureExplainInput(OperationInput):
 
 
 @dataclass(frozen=True, slots=True)
+class MncsFailureLoopInput(OperationInput):
+    manifest: str
+    test_command: list[str] | None = None
+    debug_command: list[str] | None = None
+    mncs_binary: str | None = None
+    library_paths: list[str] | None = None
+    embed_library: str | None = None
+    working_directory: str = "."
+    test_result_file: str = ".mncs-forge/mncs-test-result.json"
+    test_check_file: str = ".mncs-forge/mncs-test-check.json"
+    test_artifacts_directory: str = ".mncs-forge/mncs-test-artifacts"
+    debug_witness_file: str = ".mncs-forge/mncs-debug-witness.json"
+    debug_artifacts_directory: str = ".mncs-forge/mncs-debug-artifacts"
+    capture_policy: str = "failure-only"
+    max_events: int = 256
+    timeout_seconds: float | None = None
+    minimize: bool = False
+    test_id: str | None = None
+    repair_path: str | None = None
+    repair_from: str | None = None
+    repair_to: str | None = None
+    output_file: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateCompareInput(OperationInput):
     candidate_identities: list[str]
 
@@ -460,6 +485,30 @@ class ForgeOperationTarget(Protocol):
         self, workflow_names: list[str], candidate_id: str | None = None
     ) -> JsonObject: ...
     def failure_explain(self, output_identity: str | None = None) -> JsonObject: ...
+    def mncs_failure_loop(
+        self,
+        *,
+        manifest: str,
+        test_command: list[str] | None = None,
+        debug_command: list[str] | None = None,
+        mncs_binary: str | None = None,
+        library_paths: list[str] | None = None,
+        embed_library: str | None = None,
+        working_directory: str = ".",
+        test_result_file: str = ".mncs-forge/mncs-test-result.json",
+        test_check_file: str = ".mncs-forge/mncs-test-check.json",
+        test_artifacts_directory: str = ".mncs-forge/mncs-test-artifacts",
+        debug_witness_file: str = ".mncs-forge/mncs-debug-witness.json",
+        debug_artifacts_directory: str = ".mncs-forge/mncs-debug-artifacts",
+        capture_policy: str = "failure-only",
+        max_events: int = 256,
+        timeout_seconds: float | None = None,
+        test_id: str | None = None,
+        repair_path: str | None = None,
+        repair_from: str | None = None,
+        repair_to: str | None = None,
+        output_file: str | None = None,
+    ) -> JsonObject: ...
     def candidate_compare(self, candidate_ids: list[str]) -> JsonObject: ...
     def candidate_disposition(
         self, candidate_id: str, *, disposition: str, reason: str
@@ -758,6 +807,33 @@ def _development_checks(forge: ForgeOperationTarget, value: OperationInput) -> J
 def _failure_explain(forge: ForgeOperationTarget, value: OperationInput) -> JsonObject:
     request = _typed(value, FailureExplainInput)
     return forge.failure_explain(request.output_identity)
+
+
+def _mncs_failure_loop(forge: ForgeOperationTarget, value: OperationInput) -> JsonObject:
+    request = _typed(value, MncsFailureLoopInput)
+    return forge.mncs_failure_loop(
+        manifest=request.manifest,
+        test_command=request.test_command,
+        debug_command=request.debug_command,
+        mncs_binary=request.mncs_binary,
+        library_paths=request.library_paths,
+        embed_library=request.embed_library,
+        working_directory=request.working_directory,
+        test_result_file=request.test_result_file,
+        test_check_file=request.test_check_file,
+        test_artifacts_directory=request.test_artifacts_directory,
+        debug_witness_file=request.debug_witness_file,
+        debug_artifacts_directory=request.debug_artifacts_directory,
+        capture_policy=request.capture_policy,
+        max_events=request.max_events,
+        timeout_seconds=request.timeout_seconds,
+        minimize=request.minimize,
+        test_id=request.test_id,
+        repair_path=request.repair_path,
+        repair_from=request.repair_from,
+        repair_to=request.repair_to,
+        output_file=request.output_file,
+    )
 
 
 def _candidate_compare(forge: ForgeOperationTarget, value: OperationInput) -> JsonObject:
@@ -1338,6 +1414,48 @@ _OPERATIONS = (
         description="Return compact decision-oriented FAIL or UNKNOWN information.",
         cli=_cli("explain", bindings=(_binding("output_identity", "result"),)),
         mcp=_mcp("mncs_forge_failure_explain"),
+    ),
+    _operation(
+        "development.mncs.failure-loop",
+        modes=DEVELOPMENT_ONLY,
+        mutation=MutationClass.MUTATING,
+        input_model=MncsFailureLoopInput,
+        output=OutputContract.RECORD,
+        handler=_mncs_failure_loop,
+        authority=AuthorityRequirement.DEVELOPMENT,
+        disclosure=DisclosureClass.DEVELOPMENT_EVIDENCE,
+        description=(
+            "Run canonical mncs-test, consume its structured failure through mncs-debug, "
+            "and optionally apply one exact candidate replacement before verification."
+        ),
+        cli=_cli(
+            "mncs",
+            "failure-loop",
+            bindings=(
+                _binding("manifest"),
+                _binding("test_command", "test_command", CliDecoder.JSON_VALUE),
+                _binding("debug_command", "debug_command", CliDecoder.JSON_VALUE),
+                _binding("mncs_binary"),
+                _binding("library_paths", "library_paths", CliDecoder.JSON_VALUE),
+                _binding("embed_library"),
+                _binding("working_directory", "working_directory"),
+                _binding("test_result_file", "test_result_file"),
+                _binding("test_check_file", "test_check_file"),
+                _binding("test_artifacts_directory", "test_artifacts_directory"),
+                _binding("debug_witness_file", "debug_witness_file"),
+                _binding("debug_artifacts_directory", "debug_artifacts_directory"),
+                _binding("capture_policy", "capture_policy"),
+                _binding("max_events", "max_events"),
+                _binding("timeout_seconds", "timeout_seconds"),
+                _binding("minimize", "minimize"),
+                _binding("test_id", "test_id"),
+                _binding("repair_path", "repair_path"),
+                _binding("repair_from", "repair_from"),
+                _binding("repair_to", "repair_to"),
+                _binding("output_file", "output_file"),
+            ),
+        ),
+        mcp=_mcp("mncs_forge_mncs_failure_loop", DEVELOPMENT_ONLY),
     ),
     _operation(
         "candidates.compare",

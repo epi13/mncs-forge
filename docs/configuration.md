@@ -6,6 +6,12 @@ project identity/root, candidate/generated/contract/reference/evaluator/policy/e
 paths, output paths, limits, environment allowlist, optional MNCS/MNCDS commands, development and
 evaluator authority, selection/objective references, providers, and workflows.
 
+For the structured MNCS development loop, the optional `[commands]` entries
+`mncs_test` and `mncs_debug` declare argv prefixes for the canonical test and
+debug providers. Forge passes explicit artifact paths and bounded limits to
+those providers; it does not discover them from terminal summaries or turn
+debug evidence into a replacement test verdict.
+
 A provider can declare name, identity/version, argv command, `stdio-jsonl` transport,
 capabilities, required/optional status, supported and unsupported constructs, limitations,
 expected executable SHA-256 identity, descriptor, allowlisted environment overrides,

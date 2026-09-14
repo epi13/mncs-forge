@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/epi13/mncs-forge-mcp/schemas/mncs-forge-mncs-development.schema.json",
+  "title": "Forge structured MNCS development loop",
+  "description": "Forge's orchestration projection over mncs-test and mncs-debug. Provider semantics remain owned by those providers.",
+  "type": "object",
+  "required": ["schema_version", "operation", "verdict", "test", "debug", "diagnosis", "repair", "verification", "provenance", "output_identity", "artifact"],
+  "properties": {
+    "schema_version": {"const": "mncs.forge-mncs-development/1"},
+    "operation": {"const": "development.mncs.failure-loop"},
+    "verdict": {"enum": ["PASS", "FAIL", "UNKNOWN"]},
+    "test": {
+      "type": "object",
+      "required": ["result", "check", "run_id", "verdict", "execution"],
+      "properties": {
+        "result": {"$ref": "#/$defs/artifact_ref"},
+        "check": {"$ref": "#/$defs/artifact_ref"},
+        "run_id": {"type": ["string", "null"]},
+        "verdict": {"enum": ["PASS", "FAIL", "UNKNOWN"]},
+        "execution": {"type": ["object", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "debug": {
+      "type": "object",
+      "required": ["status", "references"],
+      "properties": {
+        "status": {"enum": ["NOT_REQUESTED", "ESTABLISHED", "UNKNOWN"]},
+        "references": {"type": "array", "items": {"$ref": "#/$defs/artifact_ref"}}
+      },
+      "additionalProperties": true
+    },
+    "diagnosis": {"$ref": "#/$defs/status_object"},
+    "repair": {"$ref": "#/$defs/status_object"},
+    "verification": {"$ref": "#/$defs/status_object"},
+    "provenance": {"type": "object"},
+    "output_identity": {"type": "string", "minLength": 1},
+    "artifact": {
+      "type": "object",
+      "required": ["kind", "path", "sha256"],
+      "properties": {
+        "kind": {"const": "forge-mncs-development"},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "artifact_ref": {
+      "type": "object",
+      "required": ["kind", "path", "sha256"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": true
+    },
+    "status_object": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {"status": {"type": "string", "minLength": 1}},
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

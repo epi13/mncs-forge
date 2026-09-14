@@ -63,6 +63,7 @@ EXPECTED_CLI = {
     "inspect",
     "ledger verify",
     "license-evidence scan",
+    "mncs failure-loop",
     "operations",
     "providers blockers",
     "providers learned-shadow",
@@ -107,6 +108,7 @@ EXPECTED_DEVELOPMENT_MCP = {
     "mncs_forge_concept_evaluation_record",
     "mncs_forge_concept_evaluations_list",
     "mncs_forge_development_checks_run",
+    "mncs_forge_mncs_failure_loop",
     "mncs_forge_evidence_reconcile",
     "mncs_forge_epoch_begin",
     "mncs_forge_cell_document_validate",
@@ -149,7 +151,7 @@ def semantic_snapshot() -> list[tuple[object, ...]]:
 def test_registry_is_unique_validated_and_deterministically_ordered() -> None:
     operation_ids = [item.operation_id for item in DEFAULT_OPERATION_REGISTRY.operations]
     assert operation_ids == sorted(operation_ids)
-    assert len(operation_ids) == len(set(operation_ids)) == 50
+    assert len(operation_ids) == len(set(operation_ids)) == 51
     assert all(callable(item.handler) for item in DEFAULT_OPERATION_REGISTRY.operations)
     assert all(
         fields(item.input_model) is not None for item in DEFAULT_OPERATION_REGISTRY.operations
@@ -180,7 +182,7 @@ def test_inventory_is_canonical_json_and_omits_unstable_handler_details() -> Non
     assert first == second
     inventory = canonical_operation_inventory()
     assert inventory["schema_version"] == "1"
-    assert len(inventory["operations"]) == 50
+    assert len(inventory["operations"]) == 51
     assert "0x" not in first
     assert "handler" not in first
     semantic = json.dumps(
@@ -198,7 +200,7 @@ def test_inventory_is_canonical_json_and_omits_unstable_handler_details() -> Non
         separators=(",", ":"),
     )
     assert hashlib.sha256(semantic.encode()).hexdigest() == (
-        "2df90ea4221ca5927ca788e12c17b5c1890a56d68c9e85d78e0f3c790e0a956e"
+        "6668efeff1f7513fba61342484881dfacda01544d9fe68bdfdbeda3f6cab19bb"
     )
 
 
@@ -220,6 +222,7 @@ def test_cli_and_mcp_coverage_and_intentional_asymmetry() -> None:
             "mncs_forge_compiler_tournament",
             "mncs_forge_compiler_candidate_select",
             "mncs_forge_execution_assurance_assess",
+            "mncs_forge_mncs_failure_loop",
         }
         | {"mncs_forge_final_evaluation_run"}
     )
@@ -339,6 +342,7 @@ def test_mutation_metadata_matches_persisted_operation_set() -> None:
         "compiler.experiments.record",
         "concept.evaluations.record",
         "development.checks.run",
+        "development.mncs.failure-loop",
         "epochs.begin",
         "evaluation.final.run",
         "execution.assurance.assess",

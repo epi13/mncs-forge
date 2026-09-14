@@ -336,6 +336,108 @@
           "namespace": "result"
         }
       ],
+      "development.mncs.failure-loop": [
+        {
+          "decoder": "value",
+          "input": "manifest",
+          "namespace": "manifest"
+        },
+        {
+          "decoder": "json-value",
+          "input": "test_command",
+          "namespace": "test_command"
+        },
+        {
+          "decoder": "json-value",
+          "input": "debug_command",
+          "namespace": "debug_command"
+        },
+        {
+          "decoder": "value",
+          "input": "mncs_binary",
+          "namespace": "mncs_binary"
+        },
+        {
+          "decoder": "json-value",
+          "input": "library_paths",
+          "namespace": "library_paths"
+        },
+        {
+          "decoder": "value",
+          "input": "embed_library",
+          "namespace": "embed_library"
+        },
+        {
+          "decoder": "value",
+          "input": "working_directory",
+          "namespace": "working_directory"
+        },
+        {
+          "decoder": "value",
+          "input": "test_result_file",
+          "namespace": "test_result_file"
+        },
+        {
+          "decoder": "value",
+          "input": "test_check_file",
+          "namespace": "test_check_file"
+        },
+        {
+          "decoder": "value",
+          "input": "test_artifacts_directory",
+          "namespace": "test_artifacts_directory"
+        },
+        {
+          "decoder": "value",
+          "input": "debug_witness_file",
+          "namespace": "debug_witness_file"
+        },
+        {
+          "decoder": "value",
+          "input": "debug_artifacts_directory",
+          "namespace": "debug_artifacts_directory"
+        },
+        {
+          "decoder": "value",
+          "input": "capture_policy",
+          "namespace": "capture_policy"
+        },
+        {
+          "decoder": "value",
+          "input": "max_events",
+          "namespace": "max_events"
+        },
+        {
+          "decoder": "value",
+          "input": "timeout_seconds",
+          "namespace": "timeout_seconds"
+        },
+        {
+          "decoder": "value",
+          "input": "test_id",
+          "namespace": "test_id"
+        },
+        {
+          "decoder": "value",
+          "input": "repair_path",
+          "namespace": "repair_path"
+        },
+        {
+          "decoder": "value",
+          "input": "repair_from",
+          "namespace": "repair_from"
+        },
+        {
+          "decoder": "value",
+          "input": "repair_to",
+          "namespace": "repair_to"
+        },
+        {
+          "decoder": "value",
+          "input": "output_file",
+          "namespace": "output_file"
+        }
+      ],
       "epochs.begin": [
         {
           "decoder": "value",
@@ -1331,6 +1433,196 @@
         "arguments": [],
         "operation_id": "rights.license-evidence.scan"
       },
+      "mncs failure-loop": {
+        "arguments": [
+          {
+            "default": null,
+            "destination": "manifest",
+            "nargs": null,
+            "options": [],
+            "required": true
+          },
+          {
+            "default": null,
+            "destination": "test_command",
+            "nargs": null,
+            "options": [
+              "--test-command"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "debug_command",
+            "nargs": null,
+            "options": [
+              "--debug-command"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "mncs_binary",
+            "nargs": null,
+            "options": [
+              "--mncs-binary"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "library_paths",
+            "nargs": null,
+            "options": [
+              "--library-paths"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "embed_library",
+            "nargs": null,
+            "options": [
+              "--embed-library"
+            ],
+            "required": false
+          },
+          {
+            "default": ".",
+            "destination": "working_directory",
+            "nargs": null,
+            "options": [
+              "--working-directory"
+            ],
+            "required": false
+          },
+          {
+            "default": ".mncs-forge/mncs-test-result.json",
+            "destination": "test_result_file",
+            "nargs": null,
+            "options": [
+              "--test-result-file"
+            ],
+            "required": false
+          },
+          {
+            "default": ".mncs-forge/mncs-test-check.json",
+            "destination": "test_check_file",
+            "nargs": null,
+            "options": [
+              "--test-check-file"
+            ],
+            "required": false
+          },
+          {
+            "default": ".mncs-forge/mncs-test-artifacts",
+            "destination": "test_artifacts_directory",
+            "nargs": null,
+            "options": [
+              "--test-artifacts-directory"
+            ],
+            "required": false
+          },
+          {
+            "default": ".mncs-forge/mncs-debug-witness.json",
+            "destination": "debug_witness_file",
+            "nargs": null,
+            "options": [
+              "--debug-witness-file"
+            ],
+            "required": false
+          },
+          {
+            "default": ".mncs-forge/mncs-debug-artifacts",
+            "destination": "debug_artifacts_directory",
+            "nargs": null,
+            "options": [
+              "--debug-artifacts-directory"
+            ],
+            "required": false
+          },
+          {
+            "choices": [
+              "failure-only",
+              "bounded",
+              "events"
+            ],
+            "default": "failure-only",
+            "destination": "capture_policy",
+            "nargs": null,
+            "options": [
+              "--capture-policy"
+            ],
+            "required": false
+          },
+          {
+            "default": 256,
+            "destination": "max_events",
+            "nargs": null,
+            "options": [
+              "--max-events"
+            ],
+            "required": false,
+            "value_type": "int"
+          },
+          {
+            "default": null,
+            "destination": "timeout_seconds",
+            "nargs": null,
+            "options": [
+              "--timeout-seconds"
+            ],
+            "required": false,
+            "value_type": "float"
+          },
+          {
+            "default": null,
+            "destination": "test_id",
+            "nargs": null,
+            "options": [
+              "--test-id"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "repair_path",
+            "nargs": null,
+            "options": [
+              "--repair-path"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "repair_from",
+            "nargs": null,
+            "options": [
+              "--repair-from"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "repair_to",
+            "nargs": null,
+            "options": [
+              "--repair-to"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "output_file",
+            "nargs": null,
+            "options": [
+              "--output-file"
+            ],
+            "required": false
+          }
+        ],
+        "operation_id": "development.mncs.failure-loop"
+      },
       "operations": {
         "arguments": [],
         "operation_id": "operations.inventory"
@@ -2309,6 +2601,35 @@
           "output_schema_sha256": "82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
           "required_inputs": []
         },
+        "mncs_forge_mncs_failure_loop": {
+          "input_properties": [
+            "capture_policy",
+            "debug_artifacts_directory",
+            "debug_command",
+            "debug_witness_file",
+            "embed_library",
+            "library_paths",
+            "manifest",
+            "max_events",
+            "mncs_binary",
+            "output_file",
+            "repair_from",
+            "repair_path",
+            "repair_to",
+            "test_artifacts_directory",
+            "test_check_file",
+            "test_command",
+            "test_id",
+            "test_result_file",
+            "timeout_seconds",
+            "working_directory"
+          ],
+          "input_schema_sha256": "0b59711d4c409f25c47bd1e3fc0379599cda3f952616f3edadfa42d9caa66e33",
+          "output_schema_sha256": "82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+          "required_inputs": [
+            "manifest"
+          ]
+        },
         "mncs_forge_project_inspect": {
           "input_properties": [],
           "input_schema_sha256": "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
@@ -2920,6 +3241,7 @@
       "config.validate",
       "development.checks.run",
       "development.failure.explain",
+      "development.mncs.failure-loop",
       "epochs.begin",
       "evaluation.final.run",
       "evidence.reconcile",
@@ -2945,7 +3267,7 @@
       "verifiers.run"
     ],
     "schema_version": "1",
-    "semantic_sha256": "2df90ea4221ca5927ca788e12c17b5c1890a56d68c9e85d78e0f3c790e0a956e"
+    "semantic_sha256": "6668efeff1f7513fba61342484881dfacda01544d9fe68bdfdbeda3f6cab19bb"
   },
   "packaging": {
     "dependencies": [
@@ -3004,6 +3326,7 @@
       "learned_specialist_shadow": "(self, artifact_path: 'str', provider_command: 'list[str]', source_records: 'list[dict[str, object]]', *, context_observations: 'list[dict[str, object]] | None' = None, lineage_identity: 'str | None' = None, timeout_seconds: 'float' = 5.0) -> 'dict[str, object]'",
       "ledger_verify": "(self) -> 'dict[str, object]'",
       "license_evidence_scan": "(self) -> 'dict[str, object]'",
+      "mncs_failure_loop": "(self, *, manifest: 'str', test_command: 'list[str] | None' = None, debug_command: 'list[str] | None' = None, mncs_binary: 'str | None' = None, library_paths: 'list[str] | None' = None, embed_library: 'str | None' = None, working_directory: 'str' = '.', test_result_file: 'str' = '.mncs-forge/mncs-test-result.json', test_check_file: 'str' = '.mncs-forge/mncs-test-check.json', test_artifacts_directory: 'str' = '.mncs-forge/mncs-test-artifacts', debug_witness_file: 'str' = '.mncs-forge/mncs-debug-witness.json', debug_artifacts_directory: 'str' = '.mncs-forge/mncs-debug-artifacts', capture_policy: 'str' = 'failure-only', max_events: 'int' = 256, timeout_seconds: 'float | None' = None, test_id: 'str | None' = None, repair_path: 'str | None' = None, repair_from: 'str | None' = None, repair_to: 'str | None' = None, output_file: 'str | None' = None) -> 'dict[str, object]'",
       "project_inspect": "(self) -> 'dict[str, object]'",
       "provider_list": "(self) -> 'dict[str, object]'",
       "provider_probe": "(self, provider_id: 'str') -> 'dict[str, object]'",

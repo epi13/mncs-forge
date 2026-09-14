@@ -33,6 +33,7 @@ MCP tools:
 - `mncs_forge_execution_assurance_list`
 - `mncs_forge_cell_document_validate`
 - `mncs_forge_cell_execution_assess`
+- `mncs_forge_mncs_failure_loop`
 
 The development inventory contains the tools above. A separately started evaluator-mode
 server additionally exposes `mncs_forge_final_evaluation_run`; the development registration
@@ -43,6 +44,15 @@ and typed facade handlers come from the canonical operation registry. Argparse r
 hand-tuned presentation, but command leaves invoke those same definitions. Run
 `mncs-forge operations` or read `mncs-forge://operations` for the deterministic machine-readable
 inventory. See [Canonical Forge operation registry](operation-registry.md).
+
+The development-only `mncs failure-loop` operation invokes the declared
+`mncs-test` provider, selects a structured failing `TestExecution`, invokes
+the declared `mncs-debug` provider for bounded witness/trace/inspection/
+provenance/replay evidence, and optionally applies one exact, authority-
+permitted source replacement before rerunning `mncs-test`. It consumes only
+versioned JSON artifacts; provider semantics and test verdicts are not
+reconstructed from terminal text. The output contract is
+`mncs.forge-mncs-development/1`.
 
 All structured statuses remain separate. A declared command exit of zero is `UNKNOWN` unless it
 emits a recognized structured status; command completion alone is not evidence `PASS`.

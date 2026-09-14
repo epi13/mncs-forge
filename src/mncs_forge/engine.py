@@ -16,6 +16,7 @@ from .application.evidence import EvidenceService
 from .application.execution_receipts import get_binding, list_bindings
 from .application.license_evidence import scan_license_evidence as _scan_license_evidence
 from .application.lifecycle import LifecycleContext
+from .application.mncs_development import MncsDevelopmentService
 from .application.project import ProjectService
 from .application.providers import ProviderService
 from .application.recovery import RecoveryService
@@ -95,6 +96,10 @@ class Forge:
             mode=mode,
             executor=self._executor,
             observer=self._observer,
+        )
+        self._mncs_development_service = MncsDevelopmentService(
+            config=config,
+            executor=self._executor,
         )
         self._development_service = DevelopmentWorkflowService(
             config=config,
@@ -414,6 +419,55 @@ class Forge:
 
     def failure_explain(self, output_identity: str | None = None) -> dict[str, object]:
         return self._development_service.explain(output_identity)
+
+    def mncs_failure_loop(
+        self,
+        *,
+        manifest: str,
+        test_command: list[str] | None = None,
+        debug_command: list[str] | None = None,
+        mncs_binary: str | None = None,
+        library_paths: list[str] | None = None,
+        embed_library: str | None = None,
+        working_directory: str = ".",
+        test_result_file: str = ".mncs-forge/mncs-test-result.json",
+        test_check_file: str = ".mncs-forge/mncs-test-check.json",
+        test_artifacts_directory: str = ".mncs-forge/mncs-test-artifacts",
+        debug_witness_file: str = ".mncs-forge/mncs-debug-witness.json",
+        debug_artifacts_directory: str = ".mncs-forge/mncs-debug-artifacts",
+        capture_policy: str = "failure-only",
+        max_events: int = 256,
+        timeout_seconds: float | None = None,
+        minimize: bool = False,
+        test_id: str | None = None,
+        repair_path: str | None = None,
+        repair_from: str | None = None,
+        repair_to: str | None = None,
+        output_file: str | None = None,
+    ) -> dict[str, object]:
+        return self._mncs_development_service.failure_loop(
+            manifest=manifest,
+            test_command=test_command,
+            debug_command=debug_command,
+            mncs_binary=mncs_binary,
+            library_paths=library_paths,
+            embed_library=embed_library,
+            working_directory=working_directory,
+            test_result_file=test_result_file,
+            test_check_file=test_check_file,
+            test_artifacts_directory=test_artifacts_directory,
+            debug_witness_file=debug_witness_file,
+            debug_artifacts_directory=debug_artifacts_directory,
+            capture_policy=capture_policy,
+            max_events=max_events,
+            timeout_seconds=timeout_seconds,
+            minimize=minimize,
+            test_id=test_id,
+            repair_path=repair_path,
+            repair_from=repair_from,
+            repair_to=repair_to,
+            output_file=output_file,
+        )
 
     def candidate_compare(self, candidate_ids: list[str]) -> dict[str, object]:
         return self._candidate_service.compare(candidate_ids)
