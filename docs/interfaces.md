@@ -54,8 +54,18 @@ versioned JSON artifacts; provider semantics and test verdicts are not
 reconstructed from terminal text. With `provider_mode = "consume"`, the same
 operation accepts an Actions-produced test/check/debug handoff, preserves its
 execution receipts and evidence manifests, queries the existing witness, and
-then performs the bounded repair/verification. The output contract is
+then performs the bounded repair/rebound-plan verification. Canonical or
+family verification occurs only when the selected plan or an explicit
+boundary requires it. The output contract is
 `mncs.forge-mncs-development/1`.
+
+For selective source verification, pass `--verification-plan-file` with a
+Ravel-produced `mncs.verification-plan/1`. Forge forwards the exact plan to
+mncs-test and records its digest-bound projection. After repair, pass
+`--post-repair-verification-plan-file` or declare `commands.ravel_impact` (or
+use `--ravel-command`) so the changed source receives a fresh plan. Use
+`--diagnostic-depth minimal|standard|deep` to request progressive debugger
+evidence; the default is `minimal`.
 
 All structured statuses remain separate. A declared command exit of zero is `UNKNOWN` unless it
 emits a recognized structured status; command completion alone is not evidence `PASS`.

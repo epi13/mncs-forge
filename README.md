@@ -61,6 +61,7 @@ minimal controlled workflow.
 - [Query-driven micro-debugging](docs/micro-debugging.md)
 - [Compiler evolution observations](docs/compiler-evolution.md)
 - [MNCS-native Forge spine](docs/mncs-native-spine.md)
+- [Selective MNCS development loop](docs/mncs-development-loop.md)
 - [Evidence and identity model](docs/evidence-model.md)
 - [Lifecycle state machine](docs/lifecycle.md)
 - [Transactional local storage](docs/storage.md)

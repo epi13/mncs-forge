@@ -21,6 +21,32 @@ from ..serialization import canonical_bytes, local_json_identity, pretty_json, r
 
 TEST_RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_RESULT_SCHEMA = "mncs.check-result/1"
+VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
+VERIFICATION_LEVELS = {
+    "changed_item",
+    "direct_dependents",
+    "affected_subsystem",
+    "repository_canonical",
+    "family",
+}
+VERIFICATION_ESCALATION_REASONS = {
+    "direct_dependents_affected",
+    "public_contract_changed",
+    "shared_type_changed",
+    "parser_semantics_changed",
+    "serialization_format_changed",
+    "effect_semantics_changed",
+    "abi_boundary_changed",
+    "canonical_fixture_changed",
+    "high_connectivity_definition_changed",
+    "dependent_targeted_test_failed",
+    "insufficient_diagnostic_evidence",
+    "migration_broad_semantic_surface",
+    "language_profile_changed",
+    "cross_repository_contract_changed",
+    "impact_evidence_truncated",
+    "unknown_changed_identity",
+}
 CAPABILITIES_SCHEMA = "mncs.debug-capabilities/1"
 SESSION_SCHEMA = "mncs.debug-session/1"
 WITNESS_SCHEMA = "mncs.debug-witness/1"
@@ -182,6 +208,123 @@ class MncsDevelopmentService:
         if value.get("verdict") not in VERDICTS:
             raise ForgeError("PROVIDER_CONTRACT_INVALID", f"{provider} check verdict is invalid")
 
+    @staticmethod
+    def _validate_verification_plan(value: dict[str, Any]) -> None:
+        """Validate the compact RAVEL plan without reimplementing selection."""
+
+        if value.get("schema_version") != VERIFICATION_PLAN_SCHEMA:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                f"verification plan did not emit {VERIFICATION_PLAN_SCHEMA}",
+            )
+        plan_id = value.get("plan_id")
+        if (
+            not isinstance(plan_id, str)
+            or len(plan_id) != 64
+            or any(character not in "0123456789abcdef" for character in plan_id)
+        ):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan plan_id is not a sha256 identity")
+        source = value.get("source")
+        if not isinstance(source, dict) or not isinstance(source.get("path"), str):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan source binding is missing")
+        source_sha256 = source.get("sha256")
+        if (
+            not isinstance(source_sha256, str)
+            or len(source_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in source_sha256)
+        ):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan source sha256 is invalid")
+        impact = value.get("impact")
+        if not isinstance(impact, dict) or not isinstance(impact.get("graph_identity"), str):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan impact identity is missing")
+        if not isinstance(impact.get("roots"), list) or not all(
+            isinstance(item, str) and item for item in impact["roots"]
+        ):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan impact roots are invalid")
+        if not isinstance(impact.get("affected_count"), int) or isinstance(
+            impact["affected_count"], bool
+        ) or impact["affected_count"] < 0:
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan affected count is invalid")
+        for field in ("direct_dependents", "test_identities", "risk_flags", "limitations"):
+            values = impact.get(field)
+            if not isinstance(values, list) or not all(
+                isinstance(item, str) and (item or field == "limitations") for item in values
+            ):
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID", f"verification plan impact {field} is invalid"
+                )
+        if not isinstance(impact.get("complete"), bool):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan impact completeness is invalid")
+        selection = value.get("selection")
+        if not isinstance(selection, dict) or selection.get("level") not in VERIFICATION_LEVELS:
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan selection level is invalid")
+        selected = selection.get("selected_test_identities")
+        if not isinstance(selected, list) or not all(isinstance(item, str) and item for item in selected):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan test identities are invalid")
+        reasons = selection.get("escalation_reasons", [])
+        if not isinstance(reasons, list) or not all(isinstance(item, str) and item for item in reasons):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan escalation reasons are invalid")
+        unknown_reasons = sorted(set(reasons) - VERIFICATION_ESCALATION_REASONS)
+        if unknown_reasons:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "verification plan has unknown escalation reasons: " + ", ".join(unknown_reasons),
+            )
+        available = selection.get("available_test_count")
+        if not isinstance(available, int) or isinstance(available, bool) or available < 0:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "verification plan available test count is invalid"
+            )
+        proof = value.get("proof")
+        if not isinstance(proof, dict) or not isinstance(proof.get("sufficient_to_stop"), bool):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan proof stop condition is missing")
+        required_evidence = proof.get("required_evidence")
+        if not isinstance(required_evidence, list) or not all(
+            isinstance(item, str) and item for item in required_evidence
+        ):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan required evidence is invalid")
+        if not isinstance(value.get("provenance"), dict):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan provenance is missing")
+
+    def _plan_source(self, plan: dict[str, Any]) -> Path:
+        source = _mapping(plan.get("source"))
+        value = source.get("path")
+        if not isinstance(value, str) or not value:
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan source path is missing")
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = self._path(value)
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(self.config.root.resolve())
+        except (OSError, ValueError) as exc:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "verification plan source is outside the Forge project or unavailable",
+            ) from exc
+        return resolved
+
+    def _plan_projection(self, plan: dict[str, Any], plan_ref: dict[str, object]) -> dict[str, Any]:
+        impact = _mapping(plan.get("impact"))
+        selection = _mapping(plan.get("selection"))
+        return {
+            "plan_id": plan.get("plan_id"),
+            "reference": plan_ref,
+            "graph_identity": impact.get("graph_identity"),
+            "roots": impact.get("roots", []),
+            "affected_surface_size": impact.get("affected_count", 0),
+            "direct_dependents": impact.get("direct_dependents", []),
+            "risk_flags": impact.get("risk_flags", []),
+            "complete": impact.get("complete"),
+            "level": selection.get("level"),
+            "selected_test_count": len(selection.get("selected_test_identities", []))
+            if isinstance(selection.get("selected_test_identities"), list)
+            else 0,
+            "available_test_count": selection.get("available_test_count"),
+            "escalation_reasons": selection.get("escalation_reasons", []),
+            "sufficient_to_stop": _mapping(plan.get("proof")).get("sufficient_to_stop"),
+        }
+
     def _test_command(
         self,
         prefix: list[str],
@@ -193,6 +336,7 @@ class MncsDevelopmentService:
         mncs_binary: str | None,
         library_paths: list[str] | None,
         embed_library: str | None,
+        verification_plan: Path | None = None,
     ) -> list[str]:
         command = [
             *prefix,
@@ -212,6 +356,8 @@ class MncsDevelopmentService:
             command.extend(("--library", path))
         if embed_library:
             command.extend(("--embed-library", embed_library))
+        if verification_plan is not None:
+            command.extend(("--verification-plan", str(verification_plan)))
         return command
 
     def _debug_commands(
@@ -232,6 +378,7 @@ class MncsDevelopmentService:
         selected_operations: list[str] | None,
         timeout: float,
         minimize: bool,
+        diagnostic_depth: str = "minimal",
         include_import: bool = True,
     ) -> list[tuple[str, list[str], Path]]:
         common: list[str] = []
@@ -258,91 +405,94 @@ class MncsDevelopmentService:
                 common.extend(("--operation", operation))
         for path in library_paths or []:
             common.extend(("--library", path))
-        capabilities_command = [*prefix, "capabilities"]
-        if mncs_binary:
-            capabilities_command.extend(("--mncs", mncs_binary))
-        capabilities_command.extend(("--output", str(artifacts / "capabilities.json")))
-        commands = [("debug-capabilities", capabilities_command, artifacts / "capabilities.json")]
+        commands: list[tuple[str, list[str], Path]] = []
+
+        def add(label: str, command: list[str], path: Path) -> None:
+            commands.append((label, command, path))
+
+        if diagnostic_depth == "deep":
+            capabilities_command = [*prefix, "capabilities"]
+            if mncs_binary:
+                capabilities_command.extend(("--mncs", mncs_binary))
+            capabilities_command.extend(("--output", str(artifacts / "capabilities.json")))
+            add("debug-capabilities", capabilities_command, artifacts / "capabilities.json")
         if include_import:
-            commands.append(
-                (
-                    "debug-import",
-                    [
-                        *prefix,
-                        "import-test",
-                        str(test_result),
-                        "--test-id",
-                        test_id,
-                        *common,
-                        "--output",
-                        str(witness),
-                    ],
-                    witness,
-                )
+            add(
+                "debug-import",
+                [
+                    *prefix,
+                    "import-test",
+                    str(test_result),
+                    "--test-id",
+                    test_id,
+                    *common,
+                    "--output",
+                    str(witness),
+                ],
+                witness,
             )
-        commands.extend(
+        add(
+            "debug-validation",
             [
-                (
-                    "debug-validation",
-                    [
-                        *prefix,
-                        "validate",
-                        str(witness),
-                        "--output",
-                        str(artifacts / "validation.json"),
-                    ],
-                    artifacts / "validation.json",
-                ),
-                (
-                    "debug-open",
-                    [*prefix, "open", str(witness), "--output", str(artifacts / "session.json")],
-                    artifacts / "session.json",
-                ),
-                (
-                    "debug-inspection",
-                    [
-                        *prefix,
-                        "inspect",
-                        str(witness),
-                        "--output",
-                        str(artifacts / "inspection.json"),
-                    ],
-                    artifacts / "inspection.json",
-                ),
-                (
-                    "debug-trace",
-                    [
-                        *prefix,
-                        "trace",
-                        str(witness),
-                        "--limit",
-                        str(max_events),
-                        "--output",
-                        str(artifacts / "trace.json"),
-                    ],
-                    artifacts / "trace.json",
-                ),
-                (
-                    "debug-provenance",
-                    [*prefix, "why", str(witness), "--output", str(artifacts / "provenance.json")],
-                    artifacts / "provenance.json",
-                ),
-                (
-                    "debug-replay",
-                    [
-                        *prefix,
-                        "replay",
-                        str(witness),
-                        "--mode",
-                        "trace",
-                        "--output",
-                        str(artifacts / "replay.json"),
-                    ],
-                    artifacts / "replay.json",
-                ),
-            ]
+                *prefix,
+                "validate",
+                str(witness),
+                "--output",
+                str(artifacts / "validation.json"),
+            ],
+            artifacts / "validation.json",
         )
-        if minimize:
+        if diagnostic_depth == "deep":
+            add(
+                "debug-open",
+                [*prefix, "open", str(witness), "--output", str(artifacts / "session.json")],
+                artifacts / "session.json",
+            )
+        add(
+            "debug-inspection",
+            [
+                *prefix,
+                "inspect",
+                str(witness),
+                "--output",
+                str(artifacts / "inspection.json"),
+            ],
+            artifacts / "inspection.json",
+        )
+        if diagnostic_depth in {"standard", "deep"}:
+            add(
+                "debug-trace",
+                [
+                    *prefix,
+                    "trace",
+                    str(witness),
+                    "--limit",
+                    str(max_events),
+                    "--output",
+                    str(artifacts / "trace.json"),
+                ],
+                artifacts / "trace.json",
+            )
+            add(
+                "debug-provenance",
+                [*prefix, "why", str(witness), "--output", str(artifacts / "provenance.json")],
+                artifacts / "provenance.json",
+            )
+        if diagnostic_depth == "deep":
+            add(
+                "debug-replay",
+                [
+                    *prefix,
+                    "replay",
+                    str(witness),
+                    "--mode",
+                    "trace",
+                    "--output",
+                    str(artifacts / "replay.json"),
+                ],
+                artifacts / "replay.json",
+            )
+        if minimize and diagnostic_depth == "deep":
             minimize_command = [
                 *prefix,
                 "minimize",
@@ -359,6 +509,51 @@ class MncsDevelopmentService:
                 ("debug-minimization", minimize_command, artifacts / "minimization.json")
             )
         return commands
+
+    def _reusable_debug_queries(
+        self, check: dict[str, Any] | None, cwd: Path
+    ) -> dict[str, Path]:
+        """Return integrity-checked query artifacts from an Actions handoff.
+
+        Actions references are evidence, not instructions.  A query is reused
+        only when its declared path is inside the Forge project and its
+        recorded digest matches.  Missing references simply leave that query
+        to the normal bounded provider invocation.
+        """
+
+        if check is None or not isinstance(check.get("references"), list):
+            return {}
+        labels = {
+            "mncs-debug-capabilities": "debug-capabilities",
+            "mncs-debug-validation": "debug-validation",
+            "mncs-debug-open": "debug-open",
+            "mncs-debug-inspection": "debug-inspection",
+            "mncs-debug-trace": "debug-trace",
+            "mncs-debug-provenance": "debug-provenance",
+            "mncs-debug-replay": "debug-replay",
+            "mncs-debug-minimization": "debug-minimization",
+        }
+        reusable: dict[str, Path] = {}
+        for reference in check["references"]:
+            if not isinstance(reference, dict):
+                continue
+            label = labels.get(reference.get("kind"))
+            raw_path = reference.get("path")
+            expected_digest = reference.get("digest") or reference.get("sha256")
+            if label is None or not isinstance(raw_path, str) or not raw_path:
+                continue
+            candidate = Path(raw_path)
+            if not candidate.is_absolute():
+                candidate = cwd / candidate
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(self.config.root.resolve())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(expected_digest, str) or _sha256(resolved) != expected_digest:
+                continue
+            reusable[label] = resolved
+        return reusable
 
     def _selected_test(self, result: dict[str, Any], test_id: str | None) -> dict[str, Any]:
         tests = [item for item in result.get("tests", []) if isinstance(item, dict)]
@@ -651,6 +846,63 @@ class MncsDevelopmentService:
             raise ForgeError("REPAIR_INVALID", "repair replacement must match exactly once")
         return resolved, text, text.replace(old, new, 1)
 
+    def _regenerate_verification_plan(
+        self,
+        *,
+        plan: dict[str, Any],
+        ravel_command: list[str] | None,
+        mncs_binary: str | None,
+        library_paths: list[str] | None,
+        output_path: Path,
+        cwd: Path,
+        timeout: float,
+    ) -> tuple[dict[str, Any], dict[str, object]]:
+        """Ask RAVEL to rebind impact after a source mutation.
+
+        Forge only assembles the declared argv and validates the returned
+        plan. It never copies the compiler's graph traversal or test policy.
+        """
+
+        configured = ravel_command
+        if configured is None:
+            configured = self.config.public_commands().get("ravel_impact")
+        if not isinstance(configured, list) or not configured:
+            raise ForgeError(
+                "MNCS_PROVIDER_UNAVAILABLE",
+                "a post-repair verification plan is required; declare ravel_impact to regenerate it",
+            )
+        if not mncs_binary:
+            raise ForgeError(
+                "MNCS_PROVIDER_INPUT",
+                "mncs_binary is required to regenerate a RAVEL verification plan",
+            )
+        impact = _mapping(plan.get("impact"))
+        roots = impact.get("roots")
+        if not isinstance(roots, list) or not all(isinstance(root, str) and root for root in roots):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan has no compiler roots to rebind")
+        source_path = self._plan_source(plan)
+        command = [*configured, str(source_path), "--mncs", mncs_binary]
+        for root in roots:
+            command.extend(("--root", root))
+        for library in library_paths or []:
+            command.extend(("--library", library))
+        provenance = _mapping(plan.get("provenance"))
+        change_class = provenance.get("change_class")
+        if isinstance(change_class, str) and change_class:
+            command.extend(("--change-class", change_class))
+        if provenance.get("cross_repository") is True:
+            command.append("--cross-repository")
+        command.extend(("--cwd", str(cwd), "--output", str(output_path)))
+        execution = self._run(command, cwd, label="ravel-impact", timeout=timeout)
+        if not output_path.is_file():
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "ravel-impact completed without producing a verification plan",
+            )
+        rebound = self._read(output_path, label="post-repair verification plan")
+        self._validate_verification_plan(rebound)
+        return rebound, execution
+
     def failure_loop(
         self,
         *,
@@ -680,6 +932,10 @@ class MncsDevelopmentService:
         repair_path: str | None = None,
         repair_from: str | None = None,
         repair_to: str | None = None,
+        verification_plan_file: str | None = None,
+        post_repair_verification_plan_file: str | None = None,
+        ravel_command: list[str] | None = None,
+        diagnostic_depth: str = "minimal",
         output_file: str | None = None,
     ) -> dict[str, object]:
         if (
@@ -691,6 +947,11 @@ class MncsDevelopmentService:
             )
         if provider_mode not in {"invoke", "consume"}:
             raise ForgeError("MNCS_PROVIDER_INPUT", "provider_mode must be invoke or consume")
+        if diagnostic_depth not in {"minimal", "standard", "deep"}:
+            raise ForgeError(
+                "MNCS_DEBUG_INPUT",
+                "diagnostic_depth must be minimal, standard, or deep",
+            )
         if capture_policy not in {"failure-only", "selected", "bounded", "diagnostic", "events"}:
             raise ForgeError(
                 "MNCS_DEBUG_INPUT",
@@ -717,6 +978,16 @@ class MncsDevelopmentService:
         witness_path = self._path(debug_witness_file)
         debug_artifacts = self._path(debug_artifacts_directory)
         debug_check_path = self._path(debug_check_file) if debug_check_file is not None else None
+        verification_plan_path = (
+            self._path(verification_plan_file, must_exist=True)
+            if verification_plan_file is not None
+            else None
+        )
+        post_verification_plan_path = (
+            self._path(post_repair_verification_plan_file, must_exist=True)
+            if post_repair_verification_plan_file is not None
+            else None
+        )
         action_refs = [
             self._ref(self._path(path, must_exist=True), "mncs-actions-artifact")
             for path in (actions_evidence_files or [])
@@ -726,6 +997,51 @@ class MncsDevelopmentService:
         test_artifacts.mkdir(parents=True, exist_ok=True)
         witness_path.parent.mkdir(parents=True, exist_ok=True)
         debug_artifacts.mkdir(parents=True, exist_ok=True)
+
+        verification_plan: dict[str, Any] | None = None
+        verification_plan_ref: dict[str, object] | None = None
+        plan_source_path: Path | None = None
+        plan_projection: dict[str, Any] | None = None
+        if verification_plan_path is not None:
+            verification_plan = self._read(
+                verification_plan_path,
+                label="verification plan",
+                byte_cap=262144,
+            )
+            self._validate_verification_plan(verification_plan)
+            plan_source_path = self._plan_source(verification_plan)
+            declared_source_sha = _mapping(verification_plan.get("source")).get("sha256")
+            if declared_source_sha != _sha256(plan_source_path):
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    "verification plan is stale: source digest does not match the current source",
+                )
+            verification_plan_ref = self._ref(
+                verification_plan_path,
+                "mncs-verification-plan",
+                VERIFICATION_PLAN_SCHEMA,
+            )
+            verification_plan_ref["plan_id"] = verification_plan["plan_id"]
+            plan_projection = self._plan_projection(verification_plan, verification_plan_ref)
+
+        post_verification_plan_template: dict[str, Any] | None = None
+        if post_verification_plan_path is not None:
+            post_verification_plan_template = self._read(
+                post_verification_plan_path,
+                label="post-repair verification plan",
+                byte_cap=262144,
+            )
+            self._validate_verification_plan(post_verification_plan_template)
+
+        effective_diagnostic_depth = "deep" if minimize else diagnostic_depth
+        if repair_path is not None and verification_plan_path is not None:
+            if post_verification_plan_path is None and not (
+                isinstance(ravel_command, list) and ravel_command
+            ) and not self.config.public_commands().get("ravel_impact"):
+                raise ForgeError(
+                    "REPAIR_INVALID",
+                    "repair with a verification plan requires a post-repair plan or declared ravel_impact command",
+                )
 
         test_prefix = self._command_prefix(test_command, "mncs_test")
         if provider_mode == "invoke":
@@ -738,6 +1054,7 @@ class MncsDevelopmentService:
                 mncs_binary=mncs_binary,
                 library_paths=library_paths,
                 embed_library=embed_library,
+                verification_plan=verification_plan_path,
             )
             before_execution = self._run(test_argv, cwd, label="mncs-test", timeout=timeout)
         else:
@@ -758,6 +1075,39 @@ class MncsDevelopmentService:
         test_check = self._read(check_path, label="mncs-test check")
         self._validate_test_result(test_result)
         self._validate_check(test_check, "mncs-test")
+        if verification_plan is not None:
+            observed_source = _mapping(_mapping(test_result.get("provenance")).get("source")).get(
+                "path"
+            )
+            if isinstance(observed_source, str) and plan_source_path is not None:
+                try:
+                    if Path(observed_source).resolve() != plan_source_path:
+                        raise ForgeError(
+                            "PROVIDER_CONTRACT_INVALID",
+                            "mncs-test source provenance does not match the RAVEL plan source",
+                        )
+                except OSError as exc:
+                    raise ForgeError(
+                        "PROVIDER_CONTRACT_INVALID",
+                        "mncs-test source provenance could not be resolved",
+                    ) from exc
+            result_selection = _mapping(test_result.get("selection"))
+            planned_values = _mapping(verification_plan.get("selection")).get(
+                "selected_test_identities", []
+            )
+            observed_values = result_selection.get("selected_test_identities", [])
+            if not isinstance(planned_values, list) or not isinstance(observed_values, list):
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    "mncs-test selection identities are not lists",
+                )
+            planned_ids = sorted(set(planned_values))
+            observed_ids = sorted(set(observed_values))
+            if planned_ids != observed_ids:
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    "mncs-test selection does not match the RAVEL verification plan",
+                )
         selected = (
             self._selected_test(test_result, test_id) if test_result["verdict"] == "FAIL" else None
         )
@@ -772,6 +1122,11 @@ class MncsDevelopmentService:
                 "verdict": test_result.get("verdict"),
                 "classification": test_result.get("classification"),
                 "execution": before_execution,
+            },
+            "impact": {
+                "status": "CONSUMED" if verification_plan is not None else "NOT_REQUESTED",
+                "plan": plan_projection,
+                "execution": None,
             },
             "debug": {"status": "NOT_REQUESTED", "execution": None, "references": []},
             "diagnosis": {
@@ -803,10 +1158,67 @@ class MncsDevelopmentService:
                     ),
                     "references": action_refs,
                 },
+                "verification_plan": plan_projection,
+            },
+            "observability": {
+                "verification_scope": plan_projection,
+                "selected_test_count": (
+                    plan_projection.get("selected_test_count", 0)
+                    if plan_projection is not None
+                    else len(test_result.get("tests", []))
+                ),
+                "available_test_count": (
+                    plan_projection.get("available_test_count")
+                    if plan_projection is not None
+                    else len(test_result.get("tests", []))
+                ),
+                "affected_surface_size": (
+                    plan_projection.get("affected_surface_size", 0)
+                    if plan_projection is not None
+                    else None
+                ),
+                "diagnostic_depth_requested": diagnostic_depth,
+                "diagnostic_depth_reached": None,
+                "escalations": [],
+                "reused_evidence": {
+                    "actions_references": len(action_refs),
+                    "verification_plan": verification_plan is not None,
+                    "debug_queries": 0,
+                },
             },
         }
+        if plan_projection is not None:
+            plan_level = plan_projection.get("level")
+            plan_reasons = plan_projection.get("escalation_reasons", [])
+            if plan_level != "changed_item" and isinstance(plan_reasons, list):
+                base["observability"]["escalations"].append(
+                    {
+                        "kind": "verification_scope",
+                        "from": "changed_item",
+                        "to": plan_level,
+                        "reasons": plan_reasons,
+                    }
+                )
+        if effective_diagnostic_depth != "minimal":
+            base["observability"]["escalations"].append(
+                {
+                    "kind": "diagnostic_depth",
+                    "from": "minimal",
+                    "to": effective_diagnostic_depth,
+                    "reason": "insufficient_diagnostic_evidence",
+                }
+            )
         if test_result["verdict"] != "FAIL":
-            base["verdict"] = test_result["verdict"]
+            if verification_plan is not None and not _mapping(verification_plan.get("proof")).get(
+                "sufficient_to_stop", False
+            ):
+                base["verdict"] = "UNKNOWN"
+                base["verification"] = {
+                    "status": "NOT_ESTABLISHED",
+                    "reason": "selected local result is not the required family proof boundary",
+                }
+            else:
+                base["verdict"] = test_result["verdict"]
             return self._persist(base, output_file)
 
         if selected is None:  # pragma: no cover - guarded by _selected_test
@@ -829,6 +1241,7 @@ class MncsDevelopmentService:
             }
             return self._persist(base, output_file)
 
+        handoff_debug_check: dict[str, Any] | None = None
         if provider_mode == "consume":
             if debug_check_path is None or not debug_check_path.is_file():
                 base["verdict"] = "FAIL"
@@ -845,8 +1258,10 @@ class MncsDevelopmentService:
                 }
                 return self._persist(base, output_file)
             try:
-                debug_check = self._read(debug_check_path, label="mncs-debug action check")
-                self._validate_check(debug_check, "mncs-debug")
+                handoff_debug_check = self._read(
+                    debug_check_path, label="mncs-debug action check"
+                )
+                self._validate_check(handoff_debug_check, "mncs-debug")
             except ForgeError:
                 base["verdict"] = "FAIL"
                 base["debug"] = {
@@ -865,7 +1280,7 @@ class MncsDevelopmentService:
                     ),
                 }
                 return self._persist(base, output_file)
-            if debug_check.get("verdict") != "PASS":
+            if handoff_debug_check.get("verdict") != "PASS":
                 base["verdict"] = "FAIL"
                 base["debug"] = {
                     "status": "UNKNOWN",
@@ -907,6 +1322,7 @@ class MncsDevelopmentService:
         debug_references: list[dict[str, object]] = []
         debug_executions: list[dict[str, object]] = []
         debug_query_paths: list[tuple[str, Path, str]] = []
+        reusable_debug_queries = self._reusable_debug_queries(handoff_debug_check, cwd)
         for label, command, path in self._debug_commands(
             list(debug_prefix),
             test_result=result_path,
@@ -923,10 +1339,25 @@ class MncsDevelopmentService:
             selected_operations=selected_operations,
             timeout=timeout,
             minimize=minimize,
+            diagnostic_depth=effective_diagnostic_depth,
             include_import=provider_mode == "invoke",
         ):
-            execution = self._run(command, cwd, label=label, timeout=timeout)
-            debug_executions.append(execution)
+            reused_path = reusable_debug_queries.get(label) if provider_mode == "consume" else None
+            if reused_path is not None:
+                path = reused_path
+                debug_executions.append(
+                    {
+                        "label": label,
+                        "status": "reused",
+                        "reference": self._ref(path, "mncs-actions-debug-artifact"),
+                    }
+                )
+                base["observability"]["reused_evidence"]["debug_queries"] = (
+                    base["observability"]["reused_evidence"].get("debug_queries", 0) + 1
+                )
+            else:
+                execution = self._run(command, cwd, label=label, timeout=timeout)
+                debug_executions.append(execution)
             if path.is_file():
                 debug_query_paths.append((label, path, ""))
 
@@ -949,7 +1380,10 @@ class MncsDevelopmentService:
         # provider-result cap.  Keep a separate hard membrane for this
         # structured artifact instead of truncating it or parsing stdout.
         witness = self._read(witness_path, label="mncs-debug witness", byte_cap=4_000_000)
-        validation_path = debug_artifacts / "validation.json"
+        query_path_by_label = {label: path for label, path, _schema in debug_query_paths}
+        validation_path = query_path_by_label.get(
+            "debug-validation", debug_artifacts / "validation.json"
+        )
         validation = (
             self._read(validation_path, label="mncs-debug validation")
             if validation_path.is_file()
@@ -1018,7 +1452,28 @@ class MncsDevelopmentService:
                 self._ref(path, f"mncs-debug-{label.removeprefix('debug-')}", expected)
             )
         debug_references.insert(0, self._ref(witness_path, "mncs-debug-witness", WITNESS_SCHEMA))
-        expected_queries = 9 if minimize else 8
+        expected_queries = 1 + sum(
+            1 for label, _command, _path in self._debug_commands(
+                list(debug_prefix),
+                test_result=result_path,
+                test_id=selected_id,
+                witness=witness_path,
+                artifacts=debug_artifacts,
+                cwd=cwd,
+                mncs_binary=mncs_binary,
+                library_paths=library_paths,
+                capture_policy=capture_policy,
+                max_events=max_events,
+                max_values=max_values,
+                max_value_bytes=max_value_bytes,
+                selected_operations=selected_operations,
+                timeout=timeout,
+                minimize=minimize,
+                diagnostic_depth=effective_diagnostic_depth,
+                include_import=False,
+            )
+            if label != "debug-import"
+        )
         debug_status = "ESTABLISHED" if len(debug_references) == expected_queries else "UNKNOWN"
         base["debug"] = {
             "status": debug_status,
@@ -1043,7 +1498,16 @@ class MncsDevelopmentService:
             },
             "execution": debug_executions,
             "references": debug_references,
+            "diagnostic_depth": effective_diagnostic_depth,
+            "diagnostic_operations": [
+                label.removeprefix("debug-")
+                for label, _path, _schema in debug_query_paths
+                if label != "debug-import"
+            ],
         }
+        base["observability"]["diagnostic_depth_reached"] = (
+            effective_diagnostic_depth if debug_status == "ESTABLISHED" else "insufficient"
+        )
         base["diagnosis"] = self._native_diagnosis(
             witness,
             query_documents.get("debug-inspection", {}),
@@ -1070,8 +1534,56 @@ class MncsDevelopmentService:
             repair_path, repair_from, repair_to
         )
         before_source_sha = _sha256(source_path)
+        after_plan: dict[str, Any] | None = None
+        after_plan_ref: dict[str, object] | None = None
+        after_plan_execution: dict[str, object] | None = None
+        after_plan_path: Path | None = None
+        if verification_plan is not None and post_verification_plan_template is not None:
+            expected_after_sha = hashlib.sha256(after_text.encode("utf-8")).hexdigest()
+            declared_after_sha = _mapping(post_verification_plan_template.get("source")).get("sha256")
+            if declared_after_sha != expected_after_sha:
+                raise ForgeError(
+                    "REPAIR_INVALID",
+                    "post-repair verification plan is not bound to the proposed source result",
+                )
         source_path.write_text(after_text, encoding="utf-8")
         after_source_sha = _sha256(source_path)
+        if verification_plan is not None:
+            if post_verification_plan_template is not None and post_verification_plan_path is not None:
+                after_plan = post_verification_plan_template
+                after_plan_path = post_verification_plan_path
+                after_plan_ref = self._ref(
+                    post_verification_plan_path,
+                    "mncs-verification-plan",
+                    VERIFICATION_PLAN_SCHEMA,
+                )
+                after_plan_ref["plan_id"] = after_plan["plan_id"]
+            else:
+                generated_after_plan_path = verification_plan_path.with_name(
+                    verification_plan_path.stem + ".after" + verification_plan_path.suffix
+                )
+                after_plan_path = generated_after_plan_path
+                after_plan, after_plan_execution = self._regenerate_verification_plan(
+                    plan=verification_plan,
+                    ravel_command=ravel_command,
+                    mncs_binary=mncs_binary,
+                    library_paths=library_paths,
+                    output_path=generated_after_plan_path,
+                    cwd=cwd,
+                    timeout=timeout,
+                )
+                after_plan_ref = self._ref(
+                    generated_after_plan_path,
+                    "mncs-verification-plan",
+                    VERIFICATION_PLAN_SCHEMA,
+                )
+                after_plan_ref["plan_id"] = after_plan["plan_id"]
+            base["impact"]["after_plan"] = self._plan_projection(after_plan, after_plan_ref)
+            base["impact"]["execution"] = after_plan_execution
+            base["provenance"]["verification_plan_after"] = base["impact"]["after_plan"]
+            base["observability"]["reused_evidence"]["post_repair_plan"] = (
+                after_plan_execution is None
+            )
         after_result = result_path.with_name(result_path.stem + ".after" + result_path.suffix)
         after_check = check_path.with_name(check_path.stem + ".after" + check_path.suffix)
         after_artifacts = test_artifacts.with_name(test_artifacts.name + ".after")
@@ -1084,6 +1596,7 @@ class MncsDevelopmentService:
             mncs_binary=mncs_binary,
             library_paths=library_paths,
             embed_library=embed_library,
+            verification_plan=after_plan_path,
         )
         after_execution = self._run(
             after_argv, cwd, label="mncs-test-verification", timeout=timeout
@@ -1092,6 +1605,27 @@ class MncsDevelopmentService:
         after_check_value = self._read(after_check, label="mncs-test verification check")
         self._validate_test_result(after_test)
         self._validate_check(after_check_value, "mncs-test")
+        if after_plan is not None:
+            after_selection = _mapping(after_test.get("selection"))
+            after_planned_values = _mapping(after_plan.get("selection")).get(
+                "selected_test_identities", []
+            )
+            after_observed_values = after_selection.get("selected_test_identities", [])
+            if not isinstance(after_planned_values, list) or not isinstance(after_observed_values, list):
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    "post-repair mncs-test selection identities are not lists",
+                )
+            after_planned_ids = sorted(set(after_planned_values))
+            after_observed_ids = sorted(set(after_observed_values))
+            if after_planned_ids != after_observed_ids:
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    "post-repair mncs-test selection does not match the rebound RAVEL plan",
+                )
+        proof_sufficient = after_plan is None or _mapping(after_plan.get("proof")).get(
+            "sufficient_to_stop", False
+        )
         base["repair"] = {
             "status": "APPLIED",
             "path": self._relative(source_path),
@@ -1102,11 +1636,13 @@ class MncsDevelopmentService:
             "source_after_sha256": after_source_sha,
         }
         base["verification"] = {
-            "status": after_test.get("verdict"),
+            "status": after_test.get("verdict") if proof_sufficient else "UNKNOWN",
             "result": self._ref(after_result, "mncs-test-result", TEST_RESULT_SCHEMA),
             "check": self._ref(after_check, "mncs-test-check", CHECK_RESULT_SCHEMA),
             "run_id": after_test.get("run_id"),
             "execution": after_execution,
+            "selection": after_test.get("selection"),
+            "proof_sufficient": proof_sufficient,
         }
         base["provenance"]["identity_continuity"] = {
             "before_test_run_id": test_result.get("run_id"),
@@ -1118,7 +1654,7 @@ class MncsDevelopmentService:
             "source_before_sha256": before_source_sha,
             "source_after_sha256": after_source_sha,
         }
-        base["verdict"] = after_test.get("verdict")
+        base["verdict"] = after_test.get("verdict") if proof_sufficient else "UNKNOWN"
         return self._persist(base, output_file)
 
     def _persist(self, result: dict[str, Any], output_file: str | None) -> dict[str, Any]:
