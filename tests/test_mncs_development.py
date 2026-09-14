@@ -13,11 +13,13 @@ from jsonschema import Draft202012Validator
 from mncs_forge.engine import Forge
 
 PROJECTS = Path(__file__).resolve().parents[2]
-MNCS_TEST = PROJECTS / "mncs-test"
-MNCS_DEBUG = PROJECTS / "mncs-debug"
-MNCS_LANGUAGE = PROJECTS / "mncs-language"
-MNCS_BINARY = MNCS_LANGUAGE / "target/debug/mncs"
-MNCS_EMBED = MNCS_LANGUAGE / "target/debug/libmncs_embed.so"
+MNCS_TEST = Path(os.environ.get("MNCS_TEST_REPO", PROJECTS / "mncs-test"))
+MNCS_DEBUG = Path(os.environ.get("MNCS_DEBUG_REPO", PROJECTS / "mncs-debug"))
+MNCS_LANGUAGE = Path(os.environ.get("MNCS_LANGUAGE_REPO", PROJECTS / "mncs-language"))
+MNCS_BINARY = Path(os.environ.get("MNCS", MNCS_LANGUAGE / "target/debug/mncs"))
+MNCS_EMBED = Path(
+    os.environ.get("MNCS_EMBED_LIBRARY", MNCS_LANGUAGE / "target/debug/libmncs_embed.so")
+)
 DEVELOPMENT_SCHEMA = (
     Path(__file__).resolve().parents[1]
     / "src/mncs_forge/resources/mncs-forge-mncs-development.schema.json"
@@ -89,6 +91,13 @@ def test_failure_loop_preserves_lineage_and_verifies_exact_repair(config, projec
     assert output["test"]["verdict"] == "FAIL"
     assert output["debug"]["status"] == "ESTABLISHED"
     assert output["diagnosis"]["status"] == "ESTABLISHED"
+    assert output["debug"]["observation"]["schema_revision"] == "mncs.execution-observation/1"
+    assert output["debug"]["observation"]["identity"]
+    assert output["debug"]["source_map"]["schema_revision"] == "mncs.execution-source-map/1"
+    assert output["diagnosis"]["evidence_basis"]["authority"] == "mncs-debug"
+    assert output["diagnosis"]["evidence_basis"]["observation_identity"]
+    assert output["diagnosis"]["completeness"]["observation"]["status"] == "complete"
+    assert output["diagnosis"]["consumed_values"]
     assert output["repair"]["status"] == "APPLIED"
     assert output["verification"]["status"] == "PASS"
     continuity = output["provenance"]["identity_continuity"]

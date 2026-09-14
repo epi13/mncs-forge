@@ -182,9 +182,16 @@ def _common_parser() -> argparse.ArgumentParser:
         "--debug-artifacts-directory", default=".mncs-forge/mncs-debug-artifacts"
     )
     failure_loop.add_argument(
-        "--capture-policy", choices=("failure-only", "bounded", "events"), default="failure-only"
+        "--capture-policy",
+        choices=("failure-only", "selected", "bounded", "diagnostic", "events"),
+        default="failure-only",
     )
     failure_loop.add_argument("--max-events", type=int, default=256)
+    failure_loop.add_argument("--max-values", type=int, default=1024)
+    failure_loop.add_argument("--max-value-bytes", type=int, default=4096)
+    failure_loop.add_argument(
+        "--selected-operation", dest="selected_operations", action="append", default=None
+    )
     failure_loop.add_argument("--timeout-seconds", type=float, default=None)
     failure_loop.add_argument("--minimize", action="store_true")
     failure_loop.add_argument("--test-id", default=None)

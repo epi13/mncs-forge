@@ -243,6 +243,9 @@ class MncsFailureLoopInput(OperationInput):
     debug_artifacts_directory: str = ".mncs-forge/mncs-debug-artifacts"
     capture_policy: str = "failure-only"
     max_events: int = 256
+    max_values: int = 1024
+    max_value_bytes: int = 4096
+    selected_operations: list[str] | None = None
     timeout_seconds: float | None = None
     minimize: bool = False
     test_id: str | None = None
@@ -505,7 +508,11 @@ class ForgeOperationTarget(Protocol):
         debug_artifacts_directory: str = ".mncs-forge/mncs-debug-artifacts",
         capture_policy: str = "failure-only",
         max_events: int = 256,
+        max_values: int = 1024,
+        max_value_bytes: int = 4096,
+        selected_operations: list[str] | None = None,
         timeout_seconds: float | None = None,
+        minimize: bool = False,
         test_id: str | None = None,
         provider_mode: str = "invoke",
         debug_check_file: str | None = None,
@@ -832,6 +839,9 @@ def _mncs_failure_loop(forge: ForgeOperationTarget, value: OperationInput) -> Js
         debug_artifacts_directory=request.debug_artifacts_directory,
         capture_policy=request.capture_policy,
         max_events=request.max_events,
+        max_values=request.max_values,
+        max_value_bytes=request.max_value_bytes,
+        selected_operations=request.selected_operations,
         timeout_seconds=request.timeout_seconds,
         minimize=request.minimize,
         test_id=request.test_id,
@@ -1455,6 +1465,9 @@ _OPERATIONS = (
                 _binding("debug_artifacts_directory", "debug_artifacts_directory"),
                 _binding("capture_policy", "capture_policy"),
                 _binding("max_events", "max_events"),
+                _binding("max_values", "max_values"),
+                _binding("max_value_bytes", "max_value_bytes"),
+                _binding("selected_operations", "selected_operations"),
                 _binding("timeout_seconds", "timeout_seconds"),
                 _binding("minimize", "minimize"),
                 _binding("test_id", "test_id"),
