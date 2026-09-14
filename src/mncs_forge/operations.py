@@ -246,6 +246,9 @@ class MncsFailureLoopInput(OperationInput):
     timeout_seconds: float | None = None
     minimize: bool = False
     test_id: str | None = None
+    provider_mode: str = "invoke"
+    debug_check_file: str | None = None
+    actions_evidence_files: list[str] | None = None
     repair_path: str | None = None
     repair_from: str | None = None
     repair_to: str | None = None
@@ -504,6 +507,9 @@ class ForgeOperationTarget(Protocol):
         max_events: int = 256,
         timeout_seconds: float | None = None,
         test_id: str | None = None,
+        provider_mode: str = "invoke",
+        debug_check_file: str | None = None,
+        actions_evidence_files: list[str] | None = None,
         repair_path: str | None = None,
         repair_from: str | None = None,
         repair_to: str | None = None,
@@ -829,6 +835,9 @@ def _mncs_failure_loop(forge: ForgeOperationTarget, value: OperationInput) -> Js
         timeout_seconds=request.timeout_seconds,
         minimize=request.minimize,
         test_id=request.test_id,
+        provider_mode=request.provider_mode,
+        debug_check_file=request.debug_check_file,
+        actions_evidence_files=request.actions_evidence_files,
         repair_path=request.repair_path,
         repair_from=request.repair_from,
         repair_to=request.repair_to,
@@ -1449,6 +1458,9 @@ _OPERATIONS = (
                 _binding("timeout_seconds", "timeout_seconds"),
                 _binding("minimize", "minimize"),
                 _binding("test_id", "test_id"),
+                _binding("provider_mode", "provider_mode"),
+                _binding("debug_check_file", "debug_check_file"),
+                _binding("actions_evidence_files", "actions_evidence_files", CliDecoder.JSON_VALUE),
                 _binding("repair_path", "repair_path"),
                 _binding("repair_from", "repair_from"),
                 _binding("repair_to", "repair_to"),

@@ -51,7 +51,10 @@ the declared `mncs-debug` provider for bounded witness/trace/inspection/
 provenance/replay evidence, and optionally applies one exact, authority-
 permitted source replacement before rerunning `mncs-test`. It consumes only
 versioned JSON artifacts; provider semantics and test verdicts are not
-reconstructed from terminal text. The output contract is
+reconstructed from terminal text. With `provider_mode = "consume"`, the same
+operation accepts an Actions-produced test/check/debug handoff, preserves its
+execution receipts and evidence manifests, queries the existing witness, and
+then performs the bounded repair/verification. The output contract is
 `mncs.forge-mncs-development/1`.
 
 All structured statuses remain separate. A declared command exit of zero is `UNKNOWN` unless it

@@ -174,14 +174,23 @@ def _common_parser() -> argparse.ArgumentParser:
     failure_loop.add_argument("--working-directory", default=".")
     failure_loop.add_argument("--test-result-file", default=".mncs-forge/mncs-test-result.json")
     failure_loop.add_argument("--test-check-file", default=".mncs-forge/mncs-test-check.json")
-    failure_loop.add_argument("--test-artifacts-directory", default=".mncs-forge/mncs-test-artifacts")
+    failure_loop.add_argument(
+        "--test-artifacts-directory", default=".mncs-forge/mncs-test-artifacts"
+    )
     failure_loop.add_argument("--debug-witness-file", default=".mncs-forge/mncs-debug-witness.json")
-    failure_loop.add_argument("--debug-artifacts-directory", default=".mncs-forge/mncs-debug-artifacts")
-    failure_loop.add_argument("--capture-policy", choices=("failure-only", "bounded", "events"), default="failure-only")
+    failure_loop.add_argument(
+        "--debug-artifacts-directory", default=".mncs-forge/mncs-debug-artifacts"
+    )
+    failure_loop.add_argument(
+        "--capture-policy", choices=("failure-only", "bounded", "events"), default="failure-only"
+    )
     failure_loop.add_argument("--max-events", type=int, default=256)
     failure_loop.add_argument("--timeout-seconds", type=float, default=None)
     failure_loop.add_argument("--minimize", action="store_true")
     failure_loop.add_argument("--test-id", default=None)
+    failure_loop.add_argument("--provider-mode", choices=("invoke", "consume"), default="invoke")
+    failure_loop.add_argument("--debug-check-file", default=None)
+    failure_loop.add_argument("--actions-evidence-files", default=None)
     failure_loop.add_argument("--repair-path", default=None)
     failure_loop.add_argument("--repair-from", default=None)
     failure_loop.add_argument("--repair-to", default=None)

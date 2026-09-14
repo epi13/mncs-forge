@@ -14,6 +14,14 @@ Forge      -> diagnosis projection and optional exact repair
 mncs-test -> verification TestResult/CheckResult
 ```
 
+The same operation also accepts `provider_mode = "consume"` for an
+Actions-produced handoff. In that mode Forge validates the transported
+`mncs-test` result/check and `mncs-debug` check/witness, preserves the Actions
+execution-receipt/evidence-manifest references, runs only the remaining
+structured debugger queries, and then performs the bounded repair and
+canonical verification. This is the explicit `mncs-actions -> Forge` seam;
+it does not reparse provider terminal output.
+
 Forge is responsible for bounded invocation, artifact references, identity
 correlation, authority checks, and the before/after evidence projection. It
 does not implement assertion semantics, test selection semantics, trace
