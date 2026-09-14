@@ -2248,7 +2248,7 @@
       "version",
       "workflows"
     ],
-    "semantic_sha256": "4f70a490e61decaa288c6519e442cbfc5941e4863a0676477f25e66df3831edb"
+    "semantic_sha256": "8fffe10ab411eae154cf86ce0e366e4a30ca2028fd10b3b6465bc6d288a38870"
   },
   "intentional_exclusions": [
     "human-readable help and error prose",
