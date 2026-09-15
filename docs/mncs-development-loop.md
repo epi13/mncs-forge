@@ -15,16 +15,19 @@ mncs-debug -> witness + progressive query projections
 Forge      -> diagnosis projection and optional exact repair
 Ravel      -> rebound plan after a source repair
 mncs-test -> exact post-repair TestResult/CheckResult
-Actions    -> execution receipt + evidence manifest for reuse
+Actions    -> selected-family composite proof, execution receipts, and evidence manifests
 ```
 
 `verification_plan_file` is optional for compatibility, but it is the normal
 path for source changes. The plan binds the source digest, compiler graph
 identity, selected test identities, verification level, typed escalation
 reasons, and the evidence required to stop. Forge validates and forwards it;
-it does not select tests or rebuild the graph. A plan whose level is `family`
-is a routing decision, not local family proof, so the operation returns
-`UNKNOWN` until the family boundary is established.
+it does not select tests or rebuild the graph. For
+`selection.routing_scope = selected_repositories`, configure `mncs_actions`
+and pass `family_graph_file` plus `family_workspace_root`; Forge invokes the
+trusted Actions adapter and consumes its composite proof. The adapter owns
+exact check routing and mncs-test execution. A selected plan without an
+established composite proof remains `UNKNOWN`.
 
 The default diagnostic depth is `minimal`: validation and inspection run after
 the failing witness, followed by the typed mncs-debug sufficiency decision. If

@@ -198,6 +198,12 @@ def _common_parser() -> argparse.ArgumentParser:
     failure_loop.add_argument("--provider-mode", choices=("invoke", "consume"), default="invoke")
     failure_loop.add_argument("--debug-check-file", default=None)
     failure_loop.add_argument("--actions-evidence-files", default=None)
+    failure_loop.add_argument("--actions-command", default=None)
+    failure_loop.add_argument("--family-graph-file", default=None)
+    failure_loop.add_argument("--family-workspace-root", default=None)
+    failure_loop.add_argument(
+        "--family-proof-directory", default=".mncs-forge/family-proof"
+    )
     failure_loop.add_argument("--repair-path", default=None)
     failure_loop.add_argument("--repair-from", default=None)
     failure_loop.add_argument("--repair-to", default=None)

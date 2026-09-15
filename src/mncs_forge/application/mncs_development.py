@@ -36,6 +36,7 @@ REPLAY_SCHEMA = "mncs.debug-replay/1"
 MINIMIZATION_SCHEMA = "mncs.debug-minimization/1"
 SUFFICIENCY_SCHEMA = "mncs.debug-sufficiency/1"
 DIAGNOSIS_SCHEMA = "mncs.debug-diagnosis/1"
+SELECTIVE_FAMILY_PROOF_SCHEMA = "mncs-actions.selective-family-proof/1"
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
 
 
@@ -283,7 +284,9 @@ class MncsDevelopmentService:
         source = _mapping(plan.get("source"))
         value = source.get("path")
         if not isinstance(value, str) or not value:
-            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan source path is missing")
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "verification plan source path is missing"
+            )
         candidate = Path(value)
         if not candidate.is_absolute():
             candidate = self._path(value)
@@ -312,6 +315,7 @@ class MncsDevelopmentService:
             "risk_flags": impact.get("risk_flags", []),
             "complete": impact.get("complete"),
             "level": selection.get("level"),
+            "routing_scope": selection.get("routing_scope", "local"),
             "selected_test_count": len(selection.get("selected_test_identities", []))
             if isinstance(selection.get("selected_test_identities"), list)
             else 0,
@@ -323,6 +327,7 @@ class MncsDevelopmentService:
                 "graph_identity": cross_repository.get("graph_identity"),
                 "selected_repositories": cross_repository.get("selected_repositories", []),
                 "complete": cross_repository.get("complete"),
+                "coverage": cross_repository.get("coverage"),
                 "edge_count": len(cross_repository.get("edges", []))
                 if isinstance(cross_repository.get("edges"), list)
                 else 0,
@@ -365,6 +370,248 @@ class MncsDevelopmentService:
         if verification_plan is not None:
             command.extend(("--verification-plan", str(verification_plan)))
         return command
+
+    @staticmethod
+    def _family_runner_path(prefix: list[str], *, label: str) -> str:
+        """Project a configured argv prefix onto Actions' trusted runner slot.
+
+        Actions invokes the repository-owned ``mncs-test`` adapter directly.
+        A normal Forge command may still use ``[python, script.py]`` like the
+        rest of the development provider configuration, so only that bounded
+        two-item form is adapted here.  Arbitrary shell fragments are never
+        accepted as a family runner.
+        """
+
+        if len(prefix) == 1:
+            return prefix[0]
+        if (
+            len(prefix) == 2
+            and Path(prefix[1]).suffix == ".py"
+            and Path(prefix[0]).name.startswith("python")
+        ):
+            return prefix[1]
+        raise ForgeError(
+            "MNCS_PROVIDER_INPUT",
+            f"{label} must be a direct executable or [python, script.py] for Actions",
+        )
+
+    def _family_path(self, value: str, *, label: str, directory: bool = False) -> Path:
+        """Resolve an explicit family path inside the configured workspace parent."""
+
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = self.config.root / candidate
+        try:
+            if candidate.is_symlink():
+                raise ForgeError("SYMLINK_ESCAPE", f"{label} must not be a symlink")
+            resolved = candidate.resolve(strict=True)
+        except ForgeError:
+            raise
+        except OSError as exc:
+            raise ForgeError("PATH_RESOLUTION", f"{label} is unavailable: {exc}") from exc
+        workspace_parent = self.config.root.resolve(strict=True).parent
+        if not resolved.is_relative_to(workspace_parent):
+            raise ForgeError(
+                "FAMILY_PATH_ESCAPE",
+                f"{label} must remain inside the Forge workspace parent",
+            )
+        if directory and not resolved.is_dir():
+            raise ForgeError("PATH_RESOLUTION", f"{label} is not a directory")
+        if not directory and not resolved.is_file():
+            raise ForgeError("PATH_RESOLUTION", f"{label} is not a file")
+        return resolved
+
+    @staticmethod
+    def _validate_selected_family_proof(value: dict[str, Any], plan: dict[str, Any]) -> None:
+        """Validate the Actions composite without reimplementing its semantics."""
+
+        if value.get("schema_version") != SELECTIVE_FAMILY_PROOF_SCHEMA:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "mncs-actions did not emit the selective family proof schema",
+            )
+        if value.get("status") not in VERDICTS:
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "mncs-actions proof status is invalid")
+        if value.get("plan_id") != plan.get("plan_id"):
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "mncs-actions proof is bound to another plan"
+            )
+        expected_graph = _mapping(plan.get("impact")).get("graph_identity")
+        cross = _mapping(_mapping(plan.get("impact")).get("cross_repository"))
+        expected_graph = cross.get("graph_identity", expected_graph)
+        if value.get("graph_identity") != expected_graph:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "mncs-actions proof is bound to another graph"
+            )
+        routing = _mapping(value.get("routing"))
+        if routing.get("scope") != "selected_repositories":
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "mncs-actions proof has the wrong routing scope"
+            )
+        selected = _mapping(plan.get("selection")).get("selected_repositories")
+        observed = routing.get("selected_repositories")
+        if (
+            not isinstance(selected, list)
+            or not isinstance(observed, list)
+            or sorted(selected) != sorted(observed)
+        ):
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "mncs-actions selected repositories disagree with the plan",
+            )
+        consumers = value.get("consumers")
+        if not isinstance(consumers, list) or len(consumers) != len(selected):
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "mncs-actions proof has an incomplete consumer set"
+            )
+        for index, consumer in enumerate(consumers):
+            if not isinstance(consumer, dict) or consumer.get("verdict") not in VERDICTS:
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    f"mncs-actions proof consumers[{index}] is invalid",
+                )
+        metrics = _mapping(value.get("metrics"))
+        for key in (
+            "repositories_selected",
+            "checks_executed",
+            "receipts_reused",
+            "receipts_generated",
+        ):
+            if not isinstance(metrics.get(key), int) or metrics[key] < 0:
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    f"mncs-actions proof metric {key} is invalid",
+                )
+
+    def _run_selected_family_proof(
+        self,
+        *,
+        plan: dict[str, Any],
+        plan_path: Path,
+        actions_command: list[str] | None,
+        family_graph_file: str | None,
+        family_workspace_root: str | None,
+        family_proof_directory: str,
+        test_command: list[str] | None,
+        mncs_binary: str | None,
+        library_paths: list[str] | None,
+        cwd: Path,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """Invoke Actions for exactly the selected family proof boundary."""
+
+        selection = _mapping(plan.get("selection"))
+        if selection.get("routing_scope") != "selected_repositories":
+            return {"status": "NOT_REQUESTED", "boundary": "local"}
+        if actions_command is None:
+            actions_command = self.config.public_commands().get("mncs_actions")
+        if not isinstance(actions_command, list) or not actions_command:
+            return {
+                "status": "UNKNOWN",
+                "boundary": "selected_repositories",
+                "reason": "selected family proof requires a declared mncs_actions command",
+            }
+        if family_graph_file is None or family_workspace_root is None:
+            return {
+                "status": "UNKNOWN",
+                "boundary": "selected_repositories",
+                "reason": (
+                    "selected family proof requires family_graph_file and "
+                    "family_workspace_root"
+                ),
+            }
+        graph_path = self._family_path(family_graph_file, label="family graph")
+        workspace_root = self._family_path(
+            family_workspace_root, label="family workspace root", directory=True
+        )
+        if not mncs_binary:
+            return {
+                "status": "UNKNOWN",
+                "boundary": "selected_repositories",
+                "reason": "selected family proof requires mncs_binary",
+            }
+        test_prefix = self._command_prefix(test_command, "mncs_test")
+        test_runner = self._family_runner_path(test_prefix, label="mncs_test")
+        proof_root = self._path(family_proof_directory)
+        proof_key = hashlib.sha256(
+            canonical_bytes(
+                {
+                    "plan_id": plan.get("plan_id"),
+                    "plan_sha256": _sha256(plan_path),
+                    "graph_sha256": _sha256(graph_path),
+                }
+            )
+        ).hexdigest()[:24]
+        proof_root.mkdir(parents=True, exist_ok=True)
+        base_dir = proof_root / f"plan-{proof_key}"
+        prior_dir = base_dir if (base_dir / "composite-proof.json").is_file() else None
+        if prior_dir is None:
+            output_dir = base_dir
+        else:
+            run_number = 1
+            while (base_dir / f"run-{run_number}").exists():
+                run_number += 1
+            output_dir = base_dir / f"run-{run_number}"
+        command = [
+            *actions_command,
+            "--plan",
+            str(plan_path),
+            "--graph",
+            str(graph_path),
+            "--workspace-root",
+            str(workspace_root),
+            "--output-dir",
+            str(output_dir),
+            "--mncs-test",
+            test_runner,
+            "--mncs",
+            mncs_binary,
+        ]
+        if prior_dir is not None:
+            command.extend(("--prior-proof", str(prior_dir)))
+        for library in library_paths or []:
+            command.extend(("--mncs-test-library", library))
+        execution = self._run(
+            command,
+            cwd,
+            label="mncs-actions-selected-family-proof",
+            timeout=timeout,
+        )
+        composite_path = output_dir / "composite-proof.json"
+        if not composite_path.is_file():
+            return {
+                "status": "UNKNOWN",
+                "boundary": "selected_repositories",
+                "reason": "mncs-actions completed without a composite proof",
+                "execution": execution,
+            }
+        proof = self._read(composite_path, label="mncs-actions composite proof", byte_cap=1_048_576)
+        self._validate_selected_family_proof(proof, plan)
+        metrics = _mapping(proof.get("metrics"))
+        return {
+            "status": proof["status"],
+            "boundary": "selected_repositories",
+            "proof_identity": proof.get("proof_identity"),
+            "plan_id": proof.get("plan_id"),
+            "graph_identity": proof.get("graph_identity"),
+            "proof": proof.get("proof"),
+            "routing": proof.get("routing"),
+            "metrics": metrics,
+            "consumers": proof.get("consumers"),
+            "result": self._ref(
+                composite_path,
+                "mncs-actions-selective-family-proof",
+                SELECTIVE_FAMILY_PROOF_SCHEMA,
+            ),
+            "execution": execution,
+            "prior_proof": self._ref(
+                prior_dir / "composite-proof.json",
+                "mncs-actions-selective-family-proof",
+                SELECTIVE_FAMILY_PROOF_SCHEMA,
+            )
+            if prior_dir is not None
+            else None,
+        }
 
     def _debug_commands(
         self,
@@ -962,6 +1209,10 @@ class MncsDevelopmentService:
         provider_mode: str = "invoke",
         debug_check_file: str | None = None,
         actions_evidence_files: list[str] | None = None,
+        actions_command: list[str] | None = None,
+        family_graph_file: str | None = None,
+        family_workspace_root: str | None = None,
+        family_proof_directory: str = ".mncs-forge/family-proof",
         repair_path: str | None = None,
         repair_from: str | None = None,
         repair_to: str | None = None,
@@ -1243,6 +1494,38 @@ class MncsDevelopmentService:
                 }
             )
         if test_result["verdict"] != "FAIL":
+            if (
+                verification_plan is not None
+                and verification_plan_path is not None
+                and _mapping(verification_plan.get("selection")).get("routing_scope")
+                == "selected_repositories"
+            ):
+                family_proof = self._run_selected_family_proof(
+                    plan=verification_plan,
+                    plan_path=verification_plan_path,
+                    actions_command=actions_command,
+                    family_graph_file=family_graph_file,
+                    family_workspace_root=family_workspace_root,
+                    family_proof_directory=family_proof_directory,
+                    test_command=test_command,
+                    mncs_binary=mncs_binary,
+                    library_paths=library_paths,
+                    cwd=cwd,
+                    timeout=timeout,
+                )
+                base["verification"] = family_proof
+                metrics = _mapping(family_proof.get("metrics"))
+                base["observability"]["selected_family_proof"] = metrics
+                base["observability"]["reused_evidence"]["selected_family_receipts"] = metrics.get(
+                    "receipts_reused", 0
+                )
+                family_status = family_proof.get("status")
+                base["verdict"] = (
+                    family_status
+                    if family_status in {"FAIL", "UNKNOWN"}
+                    else test_result["verdict"]
+                )
+                return self._persist(base, output_file)
             if verification_plan is not None and not _mapping(verification_plan.get("proof")).get(
                 "sufficient_to_stop", False
             ):
@@ -1751,7 +2034,7 @@ class MncsDevelopmentService:
             "source_before_sha256": before_source_sha,
             "source_after_sha256": after_source_sha,
         }
-        base["verification"] = {
+        local_verification = {
             "status": after_test.get("verdict") if proof_sufficient else "UNKNOWN",
             "result": self._ref(after_result, "mncs-test-result", TEST_RESULT_SCHEMA),
             "check": self._ref(after_check, "mncs-test-check", CHECK_RESULT_SCHEMA),
@@ -1760,6 +2043,37 @@ class MncsDevelopmentService:
             "selection": after_test.get("selection"),
             "proof_sufficient": proof_sufficient,
         }
+        base["verification"] = local_verification
+        if (
+            after_plan is not None
+            and after_plan_path is not None
+            and _mapping(after_plan.get("selection")).get("routing_scope")
+            == "selected_repositories"
+        ):
+            family_proof = self._run_selected_family_proof(
+                plan=after_plan,
+                plan_path=after_plan_path,
+                actions_command=actions_command,
+                family_graph_file=family_graph_file,
+                family_workspace_root=family_workspace_root,
+                family_proof_directory=family_proof_directory,
+                test_command=test_command,
+                mncs_binary=mncs_binary,
+                library_paths=library_paths,
+                cwd=cwd,
+                timeout=timeout,
+            )
+            base["verification"] = {**family_proof, "local": local_verification}
+            metrics = _mapping(family_proof.get("metrics"))
+            base["observability"]["selected_family_proof"] = metrics
+            base["observability"]["reused_evidence"]["selected_family_receipts"] = metrics.get(
+                "receipts_reused", 0
+            )
+            family_status = family_proof.get("status")
+            if family_status in {"FAIL", "UNKNOWN"}:
+                base["verdict"] = family_status
+            else:
+                base["verdict"] = after_test.get("verdict")
         base["provenance"]["identity_continuity"] = {
             "before_test_run_id": test_result.get("run_id"),
             "before_test_id": selected_id,
@@ -1770,7 +2084,8 @@ class MncsDevelopmentService:
             "source_before_sha256": before_source_sha,
             "source_after_sha256": after_source_sha,
         }
-        base["verdict"] = after_test.get("verdict") if proof_sufficient else "UNKNOWN"
+        if "selected_family_proof" not in base["observability"]:
+            base["verdict"] = after_test.get("verdict") if proof_sufficient else "UNKNOWN"
         return self._persist(base, output_file)
 
     def _persist(self, result: dict[str, Any], output_file: str | None) -> dict[str, Any]:
