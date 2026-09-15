@@ -1133,6 +1133,7 @@ class MncsDevelopmentService:
         ravel_command: list[str] | None,
         mncs_binary: str | None,
         library_paths: list[str] | None,
+        family_graph_file: str | None,
         output_path: Path,
         cwd: Path,
         timeout: float,
@@ -1166,6 +1167,9 @@ class MncsDevelopmentService:
             command.extend(("--root", root))
         for library in library_paths or []:
             command.extend(("--library", library))
+        if family_graph_file is not None:
+            graph_path = self._family_path(family_graph_file, label="family graph")
+            command.extend(("--family-graph", str(graph_path)))
         provenance = _mapping(plan.get("provenance"))
         change_class = provenance.get("change_class")
         if isinstance(change_class, str) and change_class:
@@ -1967,6 +1971,7 @@ class MncsDevelopmentService:
                     ravel_command=ravel_command,
                     mncs_binary=mncs_binary,
                     library_paths=library_paths,
+                    family_graph_file=family_graph_file,
                     output_path=generated_after_plan_path,
                     cwd=cwd,
                     timeout=timeout,
