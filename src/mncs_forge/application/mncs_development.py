@@ -35,6 +35,7 @@ PROVENANCE_SCHEMA = "mncs.debug-provenance/1"
 REPLAY_SCHEMA = "mncs.debug-replay/1"
 MINIMIZATION_SCHEMA = "mncs.debug-minimization/1"
 SUFFICIENCY_SCHEMA = "mncs.debug-sufficiency/1"
+DIAGNOSIS_SCHEMA = "mncs.debug-diagnosis/1"
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
 
 
@@ -184,6 +185,90 @@ class MncsDevelopmentService:
             )
         if value.get("verdict") not in VERDICTS:
             raise ForgeError("PROVIDER_CONTRACT_INVALID", f"{provider} check verdict is invalid")
+
+    @staticmethod
+    def _validate_debug_diagnosis(value: dict[str, Any], witness_id: str) -> None:
+        """Validate the debugger-owned bounded loop before projecting it."""
+
+        if value.get("schema_version") != DIAGNOSIS_SCHEMA:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "mncs-debug did not emit the diagnosis schema"
+            )
+        if value.get("witness_id") != witness_id:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "debug diagnosis is bound to another witness"
+            )
+        if value.get("status") not in {"sufficient", "unknown", "unsupported"}:
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "debug diagnosis status is invalid")
+        if not isinstance(value.get("sufficient"), bool) or value["sufficient"] != (
+            value["status"] == "sufficient"
+        ):
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "debug diagnosis sufficiency status is inconsistent"
+            )
+        budget = _mapping(value.get("budget"))
+        if (
+            not isinstance(budget.get("max_steps"), int)
+            or not 1 <= budget["max_steps"] <= 4
+            or not isinstance(budget.get("used"), int)
+            or not 0 <= budget["used"] <= budget["max_steps"]
+            or not isinstance(budget.get("reused_artifacts"), int)
+            or budget["reused_artifacts"] < 0
+        ):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "debug diagnosis budget is invalid")
+        final = _mapping(value.get("final_sufficiency"))
+        if (
+            final.get("schema_version") != SUFFICIENCY_SCHEMA
+            or final.get("status") not in {"sufficient", "ambiguous", "unsupported"}
+            or not isinstance(final.get("sufficient"), bool)
+            or final.get("sufficient") != value.get("sufficient")
+            or final.get("sufficient") != (final.get("status") == "sufficient")
+            or final.get("witness_id") != witness_id
+        ):
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "debug diagnosis final sufficiency is invalid"
+            )
+        if (
+            not isinstance(value.get("steps"), list)
+            or not isinstance(value.get("requested_projections"), list)
+            or not isinstance(value.get("projections"), list)
+        ):
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "debug diagnosis projections are invalid")
+        projection_operations = {
+            TRACE_SCHEMA: "trace",
+            PROVENANCE_SCHEMA: "provenance",
+            REPLAY_SCHEMA: "replay",
+            MINIMIZATION_SCHEMA: "minimization",
+        }
+        for item in value["requested_projections"]:
+            if (
+                not isinstance(item, dict)
+                or item.get("schema_version") not in projection_operations
+                or item.get("operation") != projection_operations[item["schema_version"]]
+            ):
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    "debug diagnosis contains an invalid requested projection",
+                )
+        if budget["used"] != len(value["requested_projections"]):
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "debug diagnosis budget does not match requested projections",
+            )
+        for item in value["projections"]:
+            if (
+                not isinstance(item, dict)
+                or item.get("schema_version") not in projection_operations
+            ):
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID", "debug diagnosis contains an invalid projection"
+                )
+        for step in value["steps"]:
+            if not isinstance(step, dict) or not isinstance(step.get("sufficiency"), dict):
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    "debug diagnosis contains an invalid sufficiency step",
+                )
 
     @staticmethod
     def _validate_verification_plan(value: dict[str, Any]) -> None:
@@ -380,21 +465,6 @@ class MncsDevelopmentService:
             ],
             artifacts / "inspection.json",
         )
-        if diagnostic_depth == "minimal":
-            add(
-                "debug-sufficiency",
-                [
-                    *prefix,
-                    "sufficiency",
-                    str(witness),
-                    "--inspection",
-                    str(artifacts / "inspection.json"),
-                    *((["--mncs", mncs_binary]) if mncs_binary else []),
-                    "--output",
-                    str(artifacts / "sufficiency.json"),
-                ],
-                artifacts / "sufficiency.json",
-            )
         if diagnostic_depth in {"standard", "deep"}:
             add(
                 "debug-trace",
@@ -444,6 +514,26 @@ class MncsDevelopmentService:
             commands.append(
                 ("debug-minimization", minimize_command, artifacts / "minimization.json")
             )
+        diagnosis_command = [
+            *prefix,
+            "diagnose",
+            str(witness),
+            "--inspection",
+            str(artifacts / "inspection.json"),
+            "--max-steps",
+            "4",
+            *((["--mncs", mncs_binary]) if mncs_binary else []),
+        ]
+        for label, artifact_name in (
+            ("debug-trace", "trace.json"),
+            ("debug-provenance", "provenance.json"),
+            ("debug-replay", "replay.json"),
+            ("debug-minimization", "minimization.json"),
+        ):
+            if any(existing_label == label for existing_label, _command, _path in commands):
+                diagnosis_command.extend(("--evidence-artifact", str(artifacts / artifact_name)))
+        diagnosis_command.extend(("--output", str(artifacts / "diagnosis.json")))
+        add("debug-diagnosis", diagnosis_command, artifacts / "diagnosis.json")
         return commands
 
     def _reusable_debug_queries(
@@ -465,6 +555,7 @@ class MncsDevelopmentService:
             "mncs-debug-open": "debug-open",
             "mncs-debug-inspection": "debug-inspection",
             "mncs-debug-sufficiency": "debug-sufficiency",
+            "mncs-debug-diagnosis": "debug-diagnosis",
             "mncs-debug-sufficiency-after": "debug-sufficiency-after",
             "mncs-debug-trace": "debug-trace",
             "mncs-debug-trace-adaptive": "debug-trace-adaptive",
@@ -1382,6 +1473,7 @@ class MncsDevelopmentService:
             "debug-replay": REPLAY_SCHEMA,
             "debug-minimization": MINIMIZATION_SCHEMA,
             "debug-sufficiency": SUFFICIENCY_SCHEMA,
+            "debug-diagnosis": DIAGNOSIS_SCHEMA,
         }
         query_documents: dict[str, dict[str, Any]] = {}
         for label, path, _ in debug_query_paths:
@@ -1392,109 +1484,66 @@ class MncsDevelopmentService:
             expected = schema_by_label[label]
             if document.get("schema_version") != expected:
                 raise ForgeError("PROVIDER_CONTRACT_INVALID", f"{label} did not emit {expected}")
+            if label == "debug-diagnosis":
+                self._validate_debug_diagnosis(document, str(witness.get("witness_id")))
             debug_references.append(
                 self._ref(path, f"mncs-debug-{label.removeprefix('debug-')}", expected)
             )
 
-        # The first sufficiency decision is evidence-driven.  If it names a
-        # specific missing projection, request only that projection while
-        # retaining the same witness, validation, and inspection artifacts.
-        sufficiency_document = query_documents.get("debug-sufficiency")
-        initial_sufficiency_document = sufficiency_document
-        adaptive_operation = (
-            sufficiency_document.get("next_operation")
-            if isinstance(sufficiency_document, dict)
-            and sufficiency_document.get("sufficient") is False
-            else None
-        )
-        if diagnostic_depth == "minimal" and adaptive_operation in {
-            "trace",
-            "provenance",
-            "replay",
-            "minimization",
-        }:
-            adaptive_path = debug_artifacts / f"{adaptive_operation}.adaptive.json"
-            adaptive_label = f"debug-{adaptive_operation}-adaptive"
-            if adaptive_operation == "trace":
-                adaptive_command = [
-                    *debug_prefix,
-                    "trace",
-                    str(witness_path),
-                    "--limit",
-                    str(max_events),
-                    "--output",
-                    str(adaptive_path),
-                ]
-            elif adaptive_operation == "provenance":
-                adaptive_command = [
-                    *debug_prefix,
-                    "why",
-                    str(witness_path),
-                    "--output",
-                    str(adaptive_path),
-                ]
-            elif adaptive_operation == "replay":
-                adaptive_command = [
-                    *debug_prefix,
-                    "replay",
-                    str(witness_path),
-                    "--mode",
-                    "trace",
-                    "--output",
-                    str(adaptive_path),
-                ]
-            else:
-                adaptive_command = [
-                    *debug_prefix,
-                    "minimize",
-                    str(witness_path),
-                    "--max-attempts",
-                    "32",
-                    "--report",
-                    str(adaptive_path),
-                ]
-            adaptive_execution = self._run(
-                adaptive_command, cwd, label=adaptive_label, timeout=timeout
+        # The debugger owns the complete bounded evidence loop.  Forge only
+        # validates the diagnosis envelope and projects its typed final
+        # decision; it does not infer a next operation or run a second loop.
+        diagnosis_document = query_documents.get("debug-diagnosis")
+        if isinstance(diagnosis_document, dict):
+            sufficiency_document = diagnosis_document.get("final_sufficiency")
+            if not isinstance(sufficiency_document, dict):
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    "debug diagnosis has no final sufficiency decision",
+                )
+            if diagnosis_document.get("witness_id") != witness.get("witness_id"):
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    "debug diagnosis witness identity does not match",
+                )
+            initial_sufficiency_document = (
+                diagnosis_document.get("steps", [{}])[0].get("sufficiency")
+                if isinstance(diagnosis_document.get("steps"), list)
+                and diagnosis_document.get("steps")
+                and isinstance(diagnosis_document["steps"][0], dict)
+                else sufficiency_document
             )
-            debug_executions.append(adaptive_execution)
-            if adaptive_path.is_file():
-                debug_query_paths.append((adaptive_label, adaptive_path, ""))
-                adaptive_document = self._read(adaptive_path, label=adaptive_label, byte_cap=4_000_000)
-                query_documents[adaptive_label] = adaptive_document
-                expected = {
-                    "trace": TRACE_SCHEMA,
-                    "provenance": PROVENANCE_SCHEMA,
-                    "replay": REPLAY_SCHEMA,
-                    "minimization": MINIMIZATION_SCHEMA,
-                }[adaptive_operation]
-                if adaptive_document.get("schema_version") != expected:
-                    raise ForgeError("PROVIDER_CONTRACT_INVALID", f"{adaptive_label} did not emit {expected}")
-                debug_references.append(self._ref(adaptive_path, f"mncs-debug-{adaptive_label.removeprefix('debug-')}", expected))
-            sufficiency_after = debug_artifacts / "sufficiency-after.json"
-            sufficiency_after_command = [
-                *debug_prefix,
-                "sufficiency",
-                str(witness_path),
-                "--inspection",
-                str(validation_path.parent / "inspection.json"),
-                "--evidence-operation",
-                adaptive_operation,
-                *((["--mncs", mncs_binary]) if mncs_binary else []),
-                "--output",
-                str(sufficiency_after),
-            ]
-            after_execution = self._run(
-                sufficiency_after_command, cwd, label="debug-sufficiency-after", timeout=timeout
+            projection_operation = {
+                TRACE_SCHEMA: "trace",
+                PROVENANCE_SCHEMA: "provenance",
+                REPLAY_SCHEMA: "replay",
+                MINIMIZATION_SCHEMA: "minimization",
+            }
+            adaptive_operation = next(
+                (
+                    item.get("operation")
+                    for item in diagnosis_document.get("requested_projections", [])
+                    if isinstance(item, dict)
+                    and projection_operation.get(item.get("schema_version"))
+                ),
+                None,
             )
-            debug_executions.append(after_execution)
-            if sufficiency_after.is_file():
-                after_document = self._read(sufficiency_after, label="debug-sufficiency-after")
-                if after_document.get("schema_version") != SUFFICIENCY_SCHEMA:
-                    raise ForgeError("PROVIDER_CONTRACT_INVALID", "debug-sufficiency-after did not emit the sufficiency schema")
-                query_documents["debug-sufficiency-after"] = after_document
-                debug_query_paths.append(("debug-sufficiency-after", sufficiency_after, SUFFICIENCY_SCHEMA))
-                debug_references.append(self._ref(sufficiency_after, "mncs-debug-sufficiency-after", SUFFICIENCY_SCHEMA))
-                sufficiency_document = after_document
+            for projection in diagnosis_document.get("projections", []):
+                if not isinstance(projection, dict):
+                    continue
+                schema = projection.get("schema_version")
+                label = {
+                    TRACE_SCHEMA: "debug-trace",
+                    PROVENANCE_SCHEMA: "debug-provenance",
+                    REPLAY_SCHEMA: "debug-replay",
+                    MINIMIZATION_SCHEMA: "debug-minimization",
+                }.get(schema)
+                if label and label not in query_documents:
+                    query_documents[label] = projection
+        else:
+            sufficiency_document = query_documents.get("debug-sufficiency")
+            initial_sufficiency_document = sufficiency_document
+            adaptive_operation = None
         debug_references.insert(0, self._ref(witness_path, "mncs-debug-witness", WITNESS_SCHEMA))
         expected_queries = 1 + sum(
             1 for label, _command, _path in self._debug_commands(
@@ -1518,8 +1567,6 @@ class MncsDevelopmentService:
             )
             if label != "debug-import"
         )
-        if adaptive_operation in {"trace", "provenance", "replay", "minimization"}:
-            expected_queries += 2
         debug_status = "ESTABLISHED" if len(debug_references) == expected_queries else "UNKNOWN"
         if isinstance(sufficiency_document, dict) and sufficiency_document.get("sufficient") is False:
             debug_status = "UNKNOWN"
@@ -1561,7 +1608,7 @@ class MncsDevelopmentService:
                     else None,
                     "reused": ["witness", "validation", "inspection"],
                     "resolved_by": (
-                        "debug-sufficiency-after"
+                        "debug-diagnosis"
                         if isinstance(sufficiency_document, dict)
                         and sufficiency_document.get("sufficient") is True
                         else None

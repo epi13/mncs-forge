@@ -1,0 +1,14 @@
+{
+  "schema_version": "commons.mncs.semantic-contract-declarations/v1",
+  "repository_id": "mncs-forge-mcp",
+  "revision": "1",
+  "provides": [],
+  "consumes": [
+    {
+      "contract_identity": "mncs.verification-plan/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge-mcp:mncs_failure_loop",
+      "evidence": "src/mncs_forge/verification_plan_contract.py"
+    }
+  ]
+}
