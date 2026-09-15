@@ -8,7 +8,13 @@
       "contract_identity": "mncs.verification-plan/1",
       "contract_revision": "1",
       "consumer_identity": "mncs-forge-mcp:mncs_failure_loop",
-      "evidence": "src/mncs_forge/verification_plan_contract.py"
+      "evidence": "src/mncs_forge/verification_plan_contract.py",
+      "verification": {
+        "check_identity": "mncs-forge-mcp:verification-plan-routing",
+        "executor": "mncs-forge-mcp",
+        "surface": "selected-consumer-routing",
+        "evidence": "family-verification-checks-v1.json"
+      }
     }
   ]
 }
