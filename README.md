@@ -1,6 +1,6 @@
-# MNCS Forge MCP
+# MNCS Forge
 
-MNCS Forge is an experimental, non-normative Model Context Protocol server and CLI for
+MNCS Forge is an experimental, non-normative CLI for
 machine-native development and evidence control. It makes project authority, candidate lineage,
 declared checks, provider capabilities, evidence gaps, selection, freeze, and evaluator-mode
 boundaries explicit.
