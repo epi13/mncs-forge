@@ -453,6 +453,26 @@
           "namespace": "actions_evidence_files"
         },
         {
+          "decoder": "json-value",
+          "input": "actions_command",
+          "namespace": "actions_command"
+        },
+        {
+          "decoder": "value",
+          "input": "family_graph_file",
+          "namespace": "family_graph_file"
+        },
+        {
+          "decoder": "value",
+          "input": "family_workspace_root",
+          "namespace": "family_workspace_root"
+        },
+        {
+          "decoder": "value",
+          "input": "family_proof_directory",
+          "namespace": "family_proof_directory"
+        },
+        {
           "decoder": "value",
           "input": "repair_path",
           "namespace": "repair_path"
@@ -1713,6 +1733,42 @@
           },
           {
             "default": null,
+            "destination": "actions_command",
+            "nargs": null,
+            "options": [
+              "--actions-command"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "family_graph_file",
+            "nargs": null,
+            "options": [
+              "--family-graph-file"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "family_workspace_root",
+            "nargs": null,
+            "options": [
+              "--family-workspace-root"
+            ],
+            "required": false
+          },
+          {
+            "default": ".mncs-forge/family-proof",
+            "destination": "family_proof_directory",
+            "nargs": null,
+            "options": [
+              "--family-proof-directory"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
             "destination": "repair_path",
             "nargs": null,
             "options": [
@@ -2309,7 +2365,7 @@
       "version",
       "workflows"
     ],
-    "semantic_sha256": "7e88cd19d68549a4fd90bf7927d83db9e7159ad483916786562d3c65cdb57235"
+    "semantic_sha256": "8096d4be995f1e18c4bfcbd8de32145fa2eaaaf62c57efe574e63f4818d92805"
   },
   "intentional_exclusions": [
     "human-readable help and error prose",
@@ -2771,6 +2827,7 @@
         },
         "mncs_forge_mncs_failure_loop": {
           "input_properties": [
+            "actions_command",
             "actions_evidence_files",
             "capture_policy",
             "debug_artifacts_directory",
@@ -2779,6 +2836,9 @@
             "debug_witness_file",
             "diagnostic_depth",
             "embed_library",
+            "family_graph_file",
+            "family_proof_directory",
+            "family_workspace_root",
             "library_paths",
             "manifest",
             "max_events",
@@ -2803,7 +2863,7 @@
             "verification_plan_file",
             "working_directory"
           ],
-          "input_schema_sha256": "a9a93e1872fcadf3504f8f364bff9121460529702d6995fe9b0c2289c89ccab0",
+          "input_schema_sha256": "5cbf5c56ca5e8fddf2e213df3789057f8e5dffeb4a70f50862d3f87e0df7a294",
           "output_schema_sha256": "82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
           "required_inputs": [
             "manifest"
@@ -3505,7 +3565,7 @@
       "learned_specialist_shadow": "(self, artifact_path: 'str', provider_command: 'list[str]', source_records: 'list[dict[str, object]]', *, context_observations: 'list[dict[str, object]] | None' = None, lineage_identity: 'str | None' = None, timeout_seconds: 'float' = 5.0) -> 'dict[str, object]'",
       "ledger_verify": "(self) -> 'dict[str, object]'",
       "license_evidence_scan": "(self) -> 'dict[str, object]'",
-      "mncs_failure_loop": "(self, *, manifest: 'str', test_command: 'list[str] | None' = None, debug_command: 'list[str] | None' = None, mncs_binary: 'str | None' = None, library_paths: 'list[str] | None' = None, embed_library: 'str | None' = None, working_directory: 'str' = '.', test_result_file: 'str' = '.mncs-forge/mncs-test-result.json', test_check_file: 'str' = '.mncs-forge/mncs-test-check.json', test_artifacts_directory: 'str' = '.mncs-forge/mncs-test-artifacts', debug_witness_file: 'str' = '.mncs-forge/mncs-debug-witness.json', debug_artifacts_directory: 'str' = '.mncs-forge/mncs-debug-artifacts', capture_policy: 'str' = 'failure-only', max_events: 'int' = 256, max_values: 'int' = 1024, max_value_bytes: 'int' = 4096, selected_operations: 'list[str] | None' = None, timeout_seconds: 'float | None' = None, minimize: 'bool' = False, test_id: 'str | None' = None, provider_mode: 'str' = 'invoke', debug_check_file: 'str | None' = None, actions_evidence_files: 'list[str] | None' = None, repair_path: 'str | None' = None, repair_from: 'str | None' = None, repair_to: 'str | None' = None, verification_plan_file: 'str | None' = None, post_repair_verification_plan_file: 'str | None' = None, ravel_command: 'list[str] | None' = None, diagnostic_depth: 'str' = 'minimal', output_file: 'str | None' = None) -> 'dict[str, object]'",
+      "mncs_failure_loop": "(self, *, manifest: 'str', test_command: 'list[str] | None' = None, debug_command: 'list[str] | None' = None, mncs_binary: 'str | None' = None, library_paths: 'list[str] | None' = None, embed_library: 'str | None' = None, working_directory: 'str' = '.', test_result_file: 'str' = '.mncs-forge/mncs-test-result.json', test_check_file: 'str' = '.mncs-forge/mncs-test-check.json', test_artifacts_directory: 'str' = '.mncs-forge/mncs-test-artifacts', debug_witness_file: 'str' = '.mncs-forge/mncs-debug-witness.json', debug_artifacts_directory: 'str' = '.mncs-forge/mncs-debug-artifacts', capture_policy: 'str' = 'failure-only', max_events: 'int' = 256, max_values: 'int' = 1024, max_value_bytes: 'int' = 4096, selected_operations: 'list[str] | None' = None, timeout_seconds: 'float | None' = None, minimize: 'bool' = False, test_id: 'str | None' = None, provider_mode: 'str' = 'invoke', debug_check_file: 'str | None' = None, actions_evidence_files: 'list[str] | None' = None, actions_command: 'list[str] | None' = None, family_graph_file: 'str | None' = None, family_workspace_root: 'str | None' = None, family_proof_directory: 'str' = '.mncs-forge/family-proof', repair_path: 'str | None' = None, repair_from: 'str | None' = None, repair_to: 'str | None' = None, verification_plan_file: 'str | None' = None, post_repair_verification_plan_file: 'str | None' = None, ravel_command: 'list[str] | None' = None, diagnostic_depth: 'str' = 'minimal', output_file: 'str | None' = None) -> 'dict[str, object]'",
       "project_inspect": "(self) -> 'dict[str, object]'",
       "provider_list": "(self) -> 'dict[str, object]'",
       "provider_probe": "(self, provider_id: 'str') -> 'dict[str, object]'",

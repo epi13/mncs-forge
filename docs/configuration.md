@@ -8,9 +8,10 @@ evaluator authority, selection/objective references, providers, and workflows.
 
 For the structured MNCS development loop, the optional `[commands]` entries
 `mncs_test` and `mncs_debug` declare argv prefixes for the canonical test and
-debug providers. Forge passes explicit artifact paths and bounded limits to
-those providers; it does not discover them from terminal summaries or turn
-debug evidence into a replacement test verdict.
+debug providers. `mncs_actions` optionally declares the trusted selective
+family-proof adapter. Forge passes explicit plan, graph, workspace, and
+bounded output paths to that adapter; it does not discover topology, select
+tests, or turn debug evidence into a replacement test verdict.
 
 A provider can declare name, identity/version, argv command, `stdio-jsonl` transport,
 capabilities, required/optional status, supported and unsupported constructs, limitations,

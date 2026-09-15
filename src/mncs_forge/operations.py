@@ -252,6 +252,10 @@ class MncsFailureLoopInput(OperationInput):
     provider_mode: str = "invoke"
     debug_check_file: str | None = None
     actions_evidence_files: list[str] | None = None
+    actions_command: list[str] | None = None
+    family_graph_file: str | None = None
+    family_workspace_root: str | None = None
+    family_proof_directory: str = ".mncs-forge/family-proof"
     repair_path: str | None = None
     repair_from: str | None = None
     repair_to: str | None = None
@@ -521,6 +525,10 @@ class ForgeOperationTarget(Protocol):
         provider_mode: str = "invoke",
         debug_check_file: str | None = None,
         actions_evidence_files: list[str] | None = None,
+        actions_command: list[str] | None = None,
+        family_graph_file: str | None = None,
+        family_workspace_root: str | None = None,
+        family_proof_directory: str = ".mncs-forge/family-proof",
         repair_path: str | None = None,
         repair_from: str | None = None,
         repair_to: str | None = None,
@@ -856,6 +864,10 @@ def _mncs_failure_loop(forge: ForgeOperationTarget, value: OperationInput) -> Js
         provider_mode=request.provider_mode,
         debug_check_file=request.debug_check_file,
         actions_evidence_files=request.actions_evidence_files,
+        actions_command=request.actions_command,
+        family_graph_file=request.family_graph_file,
+        family_workspace_root=request.family_workspace_root,
+        family_proof_directory=request.family_proof_directory,
         repair_path=request.repair_path,
         repair_from=request.repair_from,
         repair_to=request.repair_to,
@@ -1486,6 +1498,10 @@ _OPERATIONS = (
                 _binding("provider_mode", "provider_mode"),
                 _binding("debug_check_file", "debug_check_file"),
                 _binding("actions_evidence_files", "actions_evidence_files", CliDecoder.JSON_VALUE),
+                _binding("actions_command", "actions_command", CliDecoder.JSON_VALUE),
+                _binding("family_graph_file", "family_graph_file"),
+                _binding("family_workspace_root", "family_workspace_root"),
+                _binding("family_proof_directory", "family_proof_directory"),
                 _binding("repair_path", "repair_path"),
                 _binding("repair_from", "repair_from"),
                 _binding("repair_to", "repair_to"),
