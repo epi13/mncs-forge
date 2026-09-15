@@ -151,8 +151,10 @@ def test_failure_loop_preserves_lineage_and_verifies_exact_repair(config, projec
     assert continuity["debug_witness_id"] == output["debug"]["witness_id"]
     assert continuity["before_test_run_id"] == output["test"]["run_id"]
     assert continuity["after_test_run_id"] == output["verification"]["run_id"]
-    assert len(output["debug"]["references"]) == 9
-    assert output["debug"]["references"][-1]["schema_revision"] == "mncs.debug-minimization/1"
+    assert len(output["debug"]["references"]) == 10
+    assert output["debug"]["references"][-1]["schema_revision"] == "mncs.debug-diagnosis/1"
+    assert output["debug"]["diagnostic_sufficiency"]["schema_version"] == "mncs.debug-sufficiency/1"
+    assert output["debug"]["diagnostic_sufficiency"]["sufficient"] is True
 
     persisted = json.loads((project / "output/mncs-failure-loop.json").read_text(encoding="utf-8"))
     assert persisted["output_identity"] == output["output_identity"]
@@ -191,7 +193,7 @@ def test_failure_loop_consumes_ravel_plan_and_rebinds_after_repair(config, proje
     assert output["impact"]["plan"]["level"] == "direct_dependents"
     assert output["impact"]["after_plan"]["plan_id"] != output["impact"]["plan"]["plan_id"]
     assert output["debug"]["diagnostic_depth"] == "minimal"
-    assert output["debug"]["diagnostic_operations"] == ["validation", "inspection", "sufficiency"]
+    assert output["debug"]["diagnostic_operations"] == ["validation", "inspection", "diagnosis"]
     assert output["observability"]["selected_test_count"] == 1
     assert output["observability"]["reused_evidence"]["post_repair_plan"] is False
     assert output["verification"]["selection"]["selected_count"] == 1
