@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
+from mncs_forge.application.mncs_development import MncsDevelopmentService
 from mncs_forge.engine import Forge
 
 PROJECTS = Path(__file__).resolve().parents[2]
@@ -110,6 +111,46 @@ def _write_ravel_plan(project: Path, source: Path) -> Path:
     assert result.returncode == 0, result.stderr + result.stdout
     assert plan.is_file()
     return plan
+
+
+def test_replan_binds_supplied_graph_owner_as_commons_root(config, project: Path, monkeypatch) -> None:
+    graph = project / "family" / "semantic-edges-v1.json"
+    graph.parent.mkdir()
+    graph.write_text("{}\n", encoding="utf-8")
+    source = project / "candidate" / "changed.mncs"
+    source.write_text("current\n", encoding="utf-8")
+    output = project / "output" / "verification-plan.after.json"
+    service = MncsDevelopmentService(config=config, executor=object())
+    observed: dict[str, object] = {}
+
+    def fake_run(command, cwd, *, label, timeout):
+        observed["command"] = command
+        output.write_text("{}\n", encoding="utf-8")
+        return {"label": label, "cwd": str(cwd), "timeout": timeout}
+
+    monkeypatch.setattr(service, "_run", fake_run)
+    monkeypatch.setattr(service, "_read", lambda path, *, label, byte_cap=None: {})
+    monkeypatch.setattr(service, "_validate_verification_plan", lambda value: None)
+
+    service._regenerate_verification_plan(
+        plan={
+            "source": {"path": str(source)},
+            "impact": {"roots": ["mncs:fn:changed"]},
+            "provenance": {},
+        },
+        ravel_command=["ravel-impact"],
+        mncs_binary="mncs",
+        library_paths=[],
+        family_graph_file="family/semantic-edges-v1.json",
+        output_path=output,
+        cwd=project,
+        timeout=5.0,
+    )
+
+    command = observed["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--family-graph") + 1] == str(graph.resolve())
+    assert command[command.index("--commons-root") + 1] == str(graph.parent.parent.resolve())
 
 
 def test_failure_loop_preserves_lineage_and_verifies_exact_repair(config, project: Path) -> None:

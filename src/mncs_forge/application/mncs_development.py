@@ -1170,6 +1170,11 @@ class MncsDevelopmentService:
         if family_graph_file is not None:
             graph_path = self._family_path(family_graph_file, label="family graph")
             command.extend(("--family-graph", str(graph_path)))
+            # The graph and the Commons contract validator are one semantic
+            # snapshot.  Pass the owning root explicitly so post-repair RAVEL
+            # replanning cannot silently validate the graph against an
+            # unrelated ambient checkout.
+            command.extend(("--commons-root", str(graph_path.parent.parent)))
         provenance = _mapping(plan.get("provenance"))
         change_class = provenance.get("change_class")
         if isinstance(change_class, str) and change_class:
