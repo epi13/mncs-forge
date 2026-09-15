@@ -115,7 +115,13 @@ def project(tmp_path: Path) -> Path:
     )
     config = f"""
 version = 1
-environment_allowlist = ["PATH", "LANG", "LC_ALL"]
+environment_allowlist = [
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "MNCS_COMMONS_ROOT",
+    "MNCS_VERIFICATION_POLICY",
+]
 
 [project]
 name = "fixture"
