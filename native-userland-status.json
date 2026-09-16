@@ -1,0 +1,13 @@
+{
+  "schema_version": "mncs.native-userland-status/1",
+  "repository_id": "mncs-forge",
+  "status": "hybrid",
+  "canonical_entrypoint": "mncs-forge",
+  "native_sources": {},
+  "canonical_mncs_surfaces": [
+    "assurance semantics",
+    "failure-loop contracts",
+    "verification-plan routing declarations"
+  ],
+  "next_migration_slice": "native internal verification-loop orchestration after Actions and Debug cutovers"
+}

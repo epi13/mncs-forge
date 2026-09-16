@@ -1,6 +1,18 @@
 {
   "schema_version": "mncs.native-userland-audit/1",
   "repository": "mncs-forge",
+  "canonical_identity": "mncs-forge",
+  "compatibility_alias": {
+    "identity": "mncs-forge-mcp",
+    "scope": "bounded_external_installation_and_historical_provenance_only",
+    "internal_dependency_allowed": false,
+    "retirement_criteria": [
+      "no canonical family reference",
+      "no current CI dependency",
+      "no current install documentation",
+      "only backward-compatibility tests remain"
+    ]
+  },
   "status": "hybrid",
   "canonical_mncs_surfaces": [
     "assurance semantics",
