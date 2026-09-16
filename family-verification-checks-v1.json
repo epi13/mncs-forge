@@ -1,9 +1,9 @@
 {
   "schema_version": "commons.mncs.family-verification-checks/v1",
-  "repository_id": "mncs-forge-mcp",
+  "repository_id": "mncs-forge",
   "checks": [
     {
-      "identity": "mncs-forge-mcp:verification-plan-routing",
+      "identity": "mncs-forge:verification-plan-routing",
       "contract_identity": "mncs.verification-plan/1",
       "runner": "declaration",
       "surface": "selected-consumer-routing"

@@ -1,0 +1,34 @@
+{
+  "schema_version": "mncs.native-userland-audit/1",
+  "repository": "mncs-forge",
+  "status": "hybrid",
+  "canonical_mncs_surfaces": [
+    "assurance semantics",
+    "failure-loop contracts",
+    "verification-plan routing declarations"
+  ],
+  "host_canonical_responsibilities": [
+    {
+      "area": "provider orchestration and execution supervision",
+      "classification": "missing_reusable_runtime_capability",
+      "eliminating_capability": "typed process, deadline, filesystem, and receipt effects"
+    },
+    {
+      "area": "MCP/server and external provider transport",
+      "classification": "external_interoperability_only",
+      "eliminating_capability": "none; retain as a thin adapter"
+    },
+    {
+      "area": "internal diagnose-fix-verify policy composition",
+      "classification": "small_application_refactor",
+      "eliminating_capability": "direct native Actions, Debug, Doctor, and Ravel module calls"
+    }
+  ],
+  "existing_pressures": [
+    "MNCS-LANG-52A5E0C72A39",
+    "MNCS-TOOLING-B665F138D324",
+    "MNCS-VERIFY-54B12B4A78DF"
+  ],
+  "migration_order": 7,
+  "next_native_slice": "native internal verification-loop orchestration after Actions and Debug cutovers"
+}

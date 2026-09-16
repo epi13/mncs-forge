@@ -15,10 +15,10 @@ from mncs_forge.edgestream import inspect
 
 
 def installed_mcp_executable() -> Path:
-    executable = shutil.which("mncs-forge-mcp")
+    executable = shutil.which("mncs-forge-server")
     if executable is not None:
         return Path(executable)
-    return Path(__file__).parents[1] / ".venv" / "bin" / "mncs-forge-mcp"
+    return Path(__file__).parents[1] / ".venv" / "bin" / "mncs-forge-server"
 
 
 def test_cli_smoke(project: Path) -> None:

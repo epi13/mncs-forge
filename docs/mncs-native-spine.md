@@ -67,7 +67,7 @@ With sibling checkouts at the workspace root:
 
 ```bash
 MNCS_LANGUAGE_ROOT=/absolute/path/to/mncs-language \
-python -c 'from pathlib import Path; from mncs_forge.mncs_native import NativeForgeAdapter; a=NativeForgeAdapter(Path("/absolute/path/to/mncs-forge-mcp")); print(a.execute(a.native_source, Path("/absolute/path/to/mncs-forge-mcp/examples/execution/native-status-probe.json")).payload)'
+python -c 'from pathlib import Path; from mncs_forge.mncs_native import NativeForgeAdapter; a=NativeForgeAdapter(Path("/absolute/path/to/mncs-forge")); print(a.execute(a.native_source, Path("/absolute/path/to/mncs-forge/examples/execution/native-status-probe.json")).payload)'
 ```
 
 The adapter invokes `mncs-language` through Forge’s existing bounded, no-shell

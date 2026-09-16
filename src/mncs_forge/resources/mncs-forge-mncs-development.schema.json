@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/epi13/mncs-forge-mcp/schemas/mncs-forge-mncs-development.schema.json",
+  "$id": "https://github.com/epi13/mncs-forge/schemas/mncs-forge-mncs-development.schema.json",
   "title": "Forge structured MNCS development loop",
   "description": "Forge's orchestration projection over mncs-test and mncs-debug. Provider semantics remain owned by those providers.",
   "type": "object",

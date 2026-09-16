@@ -3515,11 +3515,12 @@
       "mcp>=1.29,<2",
       "rfc8785>=0.1.4,<1"
     ],
-    "name": "mncs-forge-mcp",
+    "name": "mncs-forge",
     "requires_python": ">=3.11",
     "scripts": {
       "mncs-forge": "mncs_forge.cli:main",
-      "mncs-forge-mcp": "mncs_forge.server:main"
+      "mncs-forge-mcp": "mncs_forge.server:main",
+      "mncs-forge-server": "mncs_forge.server:main"
     }
   },
   "python_facade": {

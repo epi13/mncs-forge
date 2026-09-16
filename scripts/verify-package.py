@@ -142,6 +142,7 @@ def audit_wheel(wheel: Path) -> dict[str, Any]:
         entry_points = archive.read(entry_points_name).decode("utf-8")
         expected_entries = {
             "mncs-forge = mncs_forge.cli:main",
+            "mncs-forge-server = mncs_forge.server:main",
             "mncs-forge-mcp = mncs_forge.server:main",
         }
         if not expected_entries.issubset(set(entry_points.splitlines())):
@@ -396,7 +397,7 @@ def verify_installation(*, artifact: Path, label: str, root: Path, full: bool) -
         project = temporary_root / "minimal"
         shutil.copytree(root / "examples/minimal", project)
         cli = command_path(venv, "mncs-forge")
-        mcp = command_path(venv, "mncs-forge-mcp")
+        mcp = command_path(venv, "mncs-forge-server")
         run_cli_smoke(cli, project / "mncs-forge.toml", cwd=temporary_root, env=environment)
         native_required = environment.get("MNCS_FORGE_NATIVE_MODE") == "required"
         if full or native_required:

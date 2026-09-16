@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/epi13/mncs-forge-mcp/schemas/mncs-forge-config.schema.json",
+  "$id": "https://github.com/epi13/mncs-forge/schemas/mncs-forge-config.schema.json",
   "title": "MNCS Forge project configuration",
   "type": "object",
   "additionalProperties": false,

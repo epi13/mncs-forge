@@ -1,6 +1,8 @@
 # CLI and MCP interfaces
 
-Run `mncs-forge --help` and `mncs-forge-mcp --help` for the installed interface.
+Run `mncs-forge --help` and `mncs-forge-server --help` for the installed
+interfaces. `mncs-forge-mcp` is retained only as a temporary compatibility
+alias for older Codex registrations.
 
 MCP tools:
 

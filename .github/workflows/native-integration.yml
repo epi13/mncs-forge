@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          path: mncs-forge-mcp
+          path: mncs-forge
       - uses: actions/checkout@v5
         with:
           repository: epi13/mncs-language
@@ -30,10 +30,10 @@ jobs:
         working-directory: mncs-language
         run: cargo test --locked --workspace
       - name: Install Forge with development dependencies
-        working-directory: mncs-forge-mcp
+        working-directory: mncs-forge
         run: python -m pip install -e '.[dev]'
       - name: Verify the native Forge lane without skips
-        working-directory: mncs-forge-mcp
+        working-directory: mncs-forge
         env:
           MNCS_LANGUAGE_ROOT: ${{ github.workspace }}/mncs-language
           MNCS_CLI: ${{ github.workspace }}/mncs-language/target/release/mncs
@@ -44,7 +44,7 @@ jobs:
           mypy src
           pytest -m native --strict-markers -ra
       - name: Build and verify both Forge distributions through native mode
-        working-directory: mncs-forge-mcp
+        working-directory: mncs-forge
         env:
           MNCS_LANGUAGE_ROOT: ${{ github.workspace }}/mncs-language
           MNCS_CLI: ${{ github.workspace }}/mncs-language/target/release/mncs

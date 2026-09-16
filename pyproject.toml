@@ -3,7 +3,7 @@ requires = ["setuptools>=75", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mncs-forge-mcp"
+name = "mncs-forge"
 version = "0.1.0a3"
 description = "Experimental MNCS-native development and evidence control plane for Codex"
 readme = "README.md"
@@ -37,11 +37,14 @@ dev = [
 
 [project.scripts]
 mncs-forge = "mncs_forge.cli:main"
+mncs-forge-server = "mncs_forge.server:main"
+# Temporary compatibility alias for pre-rename installations.  Internal
+# family coordination and documentation use `mncs-forge` exclusively.
 mncs-forge-mcp = "mncs_forge.server:main"
 
 [project.urls]
-Repository = "https://github.com/epi13/mncs-forge-mcp"
-Issues = "https://github.com/epi13/mncs-forge-mcp/issues"
+Repository = "https://github.com/epi13/mncs-forge"
+Issues = "https://github.com/epi13/mncs-forge/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

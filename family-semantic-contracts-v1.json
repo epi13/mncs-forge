@@ -1,17 +1,17 @@
 {
   "schema_version": "commons.mncs.semantic-contract-declarations/v1",
-  "repository_id": "mncs-forge-mcp",
+  "repository_id": "mncs-forge",
   "revision": "1",
   "provides": [],
   "consumes": [
     {
       "contract_identity": "mncs.verification-plan/1",
       "contract_revision": "1",
-      "consumer_identity": "mncs-forge-mcp:mncs_failure_loop",
+      "consumer_identity": "mncs-forge:mncs_failure_loop",
       "evidence": "src/mncs_forge/verification_plan_contract.py",
       "verification": {
-        "check_identity": "mncs-forge-mcp:verification-plan-routing",
-        "executor": "mncs-forge-mcp",
+        "check_identity": "mncs-forge:verification-plan-routing",
+        "executor": "mncs-forge",
         "surface": "selected-consumer-routing",
         "evidence": "family-verification-checks-v1.json"
       }

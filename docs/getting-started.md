@@ -25,7 +25,7 @@ Confirm the installation:
 
 ```bash
 mncs-forge --help
-mncs-forge-mcp --help
+mncs-forge-server --help
 ```
 
 ## Inspect the minimal example

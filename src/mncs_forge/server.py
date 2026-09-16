@@ -243,7 +243,7 @@ def build_server(forge: Forge) -> FastMCP:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="mncs-forge-mcp")
+    parser = argparse.ArgumentParser(prog="mncs-forge-server")
     parser.add_argument("--config", type=Path, default=Path("mncs-forge.toml"))
     parser.add_argument("--mode", choices=("development", "evaluator"), default="development")
     return parser.parse_args(argv)

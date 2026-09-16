@@ -29,7 +29,7 @@ fi
 existing="$(mktemp)"
 trap 'rm -f "$existing"' EXIT
 if codex mcp get mncs-forge --json >"$existing" 2>/dev/null; then
-  if ! "$venv/bin/python" - "$existing" "$server" "$venv/bin/mncs-forge-mcp" "$project_config" <<'PY'
+  if ! "$venv/bin/python" - "$existing" "$server" "$venv/bin/mncs-forge-server" "$project_config" <<'PY'
 import json
 import sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))

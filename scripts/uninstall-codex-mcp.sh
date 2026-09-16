@@ -3,7 +3,7 @@
 set -euo pipefail
 
 repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-server="$repository_root/.venv/bin/mncs-forge-mcp"
+server="$repository_root/.venv/bin/mncs-forge-server"
 existing="$(mktemp)"
 trap 'rm -f "$existing"' EXIT
 
