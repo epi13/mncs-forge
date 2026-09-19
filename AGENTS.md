@@ -45,6 +45,12 @@ there) with the language mirror in mncs-language. Enforced by
   semantics is a language-pressure event routed to mncs-language as
   development-pressure evidence; fix upstream, re-run that suite, then
   resume here.
+- At entry, obtain bounded family context and current language/Commons
+  identities before broad search. Query the language capability index and
+  existing Commons pressures before adding evaluator or provider scaffolding.
+- If a missing generic capability is the reason for host code, route pressure
+  to the owning language/stdlib/runtime layer and keep local code an explicit
+  transport, compatibility, differential, or reference boundary.
 - Missing or unsupported evidence remains `UNKNOWN`; a green evaluation
   with no evidence behind it is a defect in the check, not a success.
 - This repository currently carries no MNCS conformance badge in its

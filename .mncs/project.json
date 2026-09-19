@@ -1,0 +1,29 @@
+{
+  "schema_version": "mncs-family.repository-manifest/v0alpha1",
+  "repository": "mncs-forge",
+  "revision": 1,
+  "manifest_location": "in-repository",
+  "authority": {
+    "note": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority."
+  },
+  "organization": {
+    "layout": "mncs.repository-layout/1",
+    "surfaces": [
+      {"path": "src/mncs_forge/", "class": "host-boundary", "note": "Candidate/evidence orchestration and external provider adapters."},
+      {"path": "src/mncs_forge/resources/native/", "class": "canonical", "note": "Native Forge semantic provider sources."},
+      {"path": "tests/fixtures/", "class": "differential-oracle", "note": "Bounded provider and workflow evidence fixtures."}
+    ]
+  },
+  "contracts": {
+    "provides": [
+      {"contract": "assurance-workflow", "version": "1", "kind": "candidate-evidence-workflow", "stability": "experimental", "fingerprint_sources": ["src/", "schemas/", "tests/"]}
+    ],
+    "consumes": [
+      {"contract": "mncs-language.cli-toolchain", "envelope": {"op": "any"}, "required": false},
+      {"contract": "mncs-commons.pressure-registry", "envelope": {"op": "any"}, "required": false}
+    ],
+    "tests": [
+      {"test": "forge-tests", "covers": ["assurance-workflow"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest", "tests", "-q"]}}
+    ]
+  }
+}
