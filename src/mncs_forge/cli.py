@@ -201,9 +201,7 @@ def _common_parser() -> argparse.ArgumentParser:
     failure_loop.add_argument("--actions-command", default=None)
     failure_loop.add_argument("--family-graph-file", default=None)
     failure_loop.add_argument("--family-workspace-root", default=None)
-    failure_loop.add_argument(
-        "--family-proof-directory", default=".mncs-forge/family-proof"
-    )
+    failure_loop.add_argument("--family-proof-directory", default=".mncs-forge/family-proof")
     failure_loop.add_argument("--repair-path", default=None)
     failure_loop.add_argument("--repair-from", default=None)
     failure_loop.add_argument("--repair-to", default=None)

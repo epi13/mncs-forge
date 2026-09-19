@@ -516,8 +516,7 @@ class MncsDevelopmentService:
                 "status": "UNKNOWN",
                 "boundary": "selected_repositories",
                 "reason": (
-                    "selected family proof requires family_graph_file and "
-                    "family_workspace_root"
+                    "selected family proof requires family_graph_file and family_workspace_root"
                 ),
             }
         graph_path = self._family_path(family_graph_file, label="family graph")
@@ -783,9 +782,7 @@ class MncsDevelopmentService:
         add("debug-diagnosis", diagnosis_command, artifacts / "diagnosis.json")
         return commands
 
-    def _reusable_debug_queries(
-        self, check: dict[str, Any] | None, cwd: Path
-    ) -> dict[str, Path]:
+    def _reusable_debug_queries(self, check: dict[str, Any] | None, cwd: Path) -> dict[str, Path]:
         """Return integrity-checked query artifacts from an Actions handoff.
 
         Actions references are evidence, not instructions.  A query is reused
@@ -817,7 +814,10 @@ class MncsDevelopmentService:
         for reference in check["references"]:
             if not isinstance(reference, dict):
                 continue
-            label = labels.get(reference.get("kind"))
+            kind = reference.get("kind")
+            if not isinstance(kind, str):
+                continue
+            label = labels.get(kind)
             raw_path = reference.get("path")
             expected_digest = reference.get("digest") or reference.get("sha256")
             if label is None or not isinstance(raw_path, str) or not raw_path:
@@ -1150,7 +1150,8 @@ class MncsDevelopmentService:
         if not isinstance(configured, list) or not configured:
             raise ForgeError(
                 "MNCS_PROVIDER_UNAVAILABLE",
-                "a post-repair verification plan is required; declare ravel_impact to regenerate it",
+                "a post-repair verification plan is required; declare "
+                "ravel_impact to regenerate it",
             )
         if not mncs_binary:
             raise ForgeError(
@@ -1160,7 +1161,9 @@ class MncsDevelopmentService:
         impact = _mapping(plan.get("impact"))
         roots = impact.get("roots")
         if not isinstance(roots, list) or not all(isinstance(root, str) and root for root in roots):
-            raise ForgeError("PROVIDER_CONTRACT_INVALID", "verification plan has no compiler roots to rebind")
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "verification plan has no compiler roots to rebind"
+            )
         source_path = self._plan_source(plan)
         command = [*configured, str(source_path), "--mncs", mncs_binary]
         for root in roots:
@@ -1327,14 +1330,18 @@ class MncsDevelopmentService:
             self._validate_verification_plan(post_verification_plan_template)
 
         effective_diagnostic_depth = "deep" if minimize else diagnostic_depth
-        if repair_path is not None and verification_plan_path is not None:
-            if post_verification_plan_path is None and not (
-                isinstance(ravel_command, list) and ravel_command
-            ) and not self.config.public_commands().get("ravel_impact"):
-                raise ForgeError(
-                    "REPAIR_INVALID",
-                    "repair with a verification plan requires a post-repair plan or declared ravel_impact command",
-                )
+        if (
+            repair_path is not None
+            and verification_plan_path is not None
+            and post_verification_plan_path is None
+            and not (isinstance(ravel_command, list) and ravel_command)
+            and not self.config.public_commands().get("ravel_impact")
+        ):
+            raise ForgeError(
+                "REPAIR_INVALID",
+                "repair with a verification plan requires a post-repair plan or "
+                "declared ravel_impact command",
+            )
 
         test_prefix = self._command_prefix(test_command, "mncs_test")
         if provider_mode == "invoke":
@@ -1584,9 +1591,7 @@ class MncsDevelopmentService:
                 }
                 return self._persist(base, output_file)
             try:
-                handoff_debug_check = self._read(
-                    debug_check_path, label="mncs-debug action check"
-                )
+                handoff_debug_check = self._read(debug_check_path, label="mncs-debug action check")
                 self._validate_check(handoff_debug_check, "mncs-debug")
             except ForgeError:
                 base["verdict"] = "FAIL"
@@ -1811,34 +1816,43 @@ class MncsDevelopmentService:
                 REPLAY_SCHEMA: "replay",
                 MINIMIZATION_SCHEMA: "minimization",
             }
-            adaptive_operation = next(
-                (
-                    item.get("operation")
-                    for item in diagnosis_document.get("requested_projections", [])
-                    if isinstance(item, dict)
-                    and projection_operation.get(item.get("schema_version"))
-                ),
-                None,
-            )
+            adaptive_operation: str | None = None
+            requested_projections = diagnosis_document.get("requested_projections", [])
+            if isinstance(requested_projections, list):
+                for item in requested_projections:
+                    if not isinstance(item, dict):
+                        continue
+                    schema_version = item.get("schema_version")
+                    operation = item.get("operation")
+                    if (
+                        isinstance(schema_version, str)
+                        and projection_operation.get(schema_version)
+                        and isinstance(operation, str)
+                    ):
+                        adaptive_operation = operation
+                        break
             for projection in diagnosis_document.get("projections", []):
                 if not isinstance(projection, dict):
                     continue
                 schema = projection.get("schema_version")
-                label = {
+                if not isinstance(schema, str):
+                    continue
+                projection_label = {
                     TRACE_SCHEMA: "debug-trace",
                     PROVENANCE_SCHEMA: "debug-provenance",
                     REPLAY_SCHEMA: "debug-replay",
                     MINIMIZATION_SCHEMA: "debug-minimization",
                 }.get(schema)
-                if label and label not in query_documents:
-                    query_documents[label] = projection
+                if projection_label and projection_label not in query_documents:
+                    query_documents[projection_label] = projection
         else:
             sufficiency_document = query_documents.get("debug-sufficiency")
             initial_sufficiency_document = sufficiency_document
             adaptive_operation = None
         debug_references.insert(0, self._ref(witness_path, "mncs-debug-witness", WITNESS_SCHEMA))
         expected_queries = 1 + sum(
-            1 for label, _command, _path in self._debug_commands(
+            1
+            for label, _command, _path in self._debug_commands(
                 list(debug_prefix),
                 test_result=result_path,
                 test_id=selected_id,
@@ -1860,7 +1874,10 @@ class MncsDevelopmentService:
             if label != "debug-import"
         )
         debug_status = "ESTABLISHED" if len(debug_references) == expected_queries else "UNKNOWN"
-        if isinstance(sufficiency_document, dict) and sufficiency_document.get("sufficient") is False:
+        if (
+            isinstance(sufficiency_document, dict)
+            and sufficiency_document.get("sufficient") is False
+        ):
             debug_status = "UNKNOWN"
         base["debug"] = {
             "status": debug_status,
@@ -1916,8 +1933,7 @@ class MncsDevelopmentService:
         base["diagnosis"] = self._native_diagnosis(
             witness,
             query_documents.get("debug-inspection", {}),
-            query_documents.get("debug-trace")
-            or query_documents.get("debug-trace-adaptive", {}),
+            query_documents.get("debug-trace") or query_documents.get("debug-trace-adaptive", {}),
             query_documents.get("debug-provenance")
             or query_documents.get("debug-provenance-adaptive", {}),
             selected,
@@ -1948,7 +1964,9 @@ class MncsDevelopmentService:
         after_plan_path: Path | None = None
         if verification_plan is not None and post_verification_plan_template is not None:
             expected_after_sha = hashlib.sha256(after_text.encode("utf-8")).hexdigest()
-            declared_after_sha = _mapping(post_verification_plan_template.get("source")).get("sha256")
+            declared_after_sha = _mapping(post_verification_plan_template.get("source")).get(
+                "sha256"
+            )
             if declared_after_sha != expected_after_sha:
                 raise ForgeError(
                     "REPAIR_INVALID",
@@ -1957,7 +1975,15 @@ class MncsDevelopmentService:
         source_path.write_text(after_text, encoding="utf-8")
         after_source_sha = _sha256(source_path)
         if verification_plan is not None:
-            if post_verification_plan_template is not None and post_verification_plan_path is not None:
+            if verification_plan_path is None:
+                raise ForgeError(
+                    "REPAIR_INVALID",
+                    "verification plan state is missing its source path",
+                )
+            if (
+                post_verification_plan_template is not None
+                and post_verification_plan_path is not None
+            ):
                 after_plan = post_verification_plan_template
                 after_plan_path = post_verification_plan_path
                 after_plan_ref = self._ref(
@@ -2020,7 +2046,9 @@ class MncsDevelopmentService:
                 "selected_test_identities", []
             )
             after_observed_values = after_selection.get("selected_test_identities", [])
-            if not isinstance(after_planned_values, list) or not isinstance(after_observed_values, list):
+            if not isinstance(after_planned_values, list) or not isinstance(
+                after_observed_values, list
+            ):
                 raise ForgeError(
                     "PROVIDER_CONTRACT_INVALID",
                     "post-repair mncs-test selection identities are not lists",

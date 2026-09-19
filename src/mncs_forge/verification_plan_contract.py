@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 
 def _module() -> ModuleType:
@@ -36,4 +36,4 @@ def _module() -> ModuleType:
 
 
 def validate_plan(value: Any, **kwargs: Any) -> dict[str, Any]:
-    return _module().validate_plan(value, **kwargs)
+    return cast(dict[str, Any], _module().validate_plan(value, **kwargs))

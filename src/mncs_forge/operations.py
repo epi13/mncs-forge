@@ -1506,7 +1506,9 @@ _OPERATIONS = (
                 _binding("repair_from", "repair_from"),
                 _binding("repair_to", "repair_to"),
                 _binding("verification_plan_file", "verification_plan_file"),
-                _binding("post_repair_verification_plan_file", "post_repair_verification_plan_file"),
+                _binding(
+                    "post_repair_verification_plan_file", "post_repair_verification_plan_file"
+                ),
                 _binding("ravel_command", "ravel_command", CliDecoder.JSON_VALUE),
                 _binding("diagnostic_depth", "diagnostic_depth"),
                 _binding("output_file", "output_file"),

@@ -113,7 +113,9 @@ def _write_ravel_plan(project: Path, source: Path) -> Path:
     return plan
 
 
-def test_replan_binds_supplied_graph_owner_as_commons_root(config, project: Path, monkeypatch) -> None:
+def test_replan_binds_supplied_graph_owner_as_commons_root(
+    config, project: Path, monkeypatch
+) -> None:
     graph = project / "family" / "semantic-edges-v1.json"
     graph.parent.mkdir()
     graph.write_text("{}\n", encoding="utf-8")
@@ -207,7 +209,7 @@ def test_failure_loop_preserves_lineage_and_verifies_exact_repair(config, projec
 
 def test_failure_loop_consumes_ravel_plan_and_rebinds_after_repair(config, project: Path) -> None:
     _require_native_toolchain()
-    manifest = _fixture_manifest(project)
+    _fixture_manifest(project)
     source = project / "candidate" / "first_class_failing.mncs"
     plan = _write_ravel_plan(project, source)
     test_command, debug_command = _commands()
