@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-forge",
-  "revision": 1,
+  "revision": 3,
   "manifest_location": "in-repository",
   "authority": {
     "note": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority."
@@ -9,9 +9,11 @@
   "organization": {
     "layout": "mncs.repository-layout/1",
     "surfaces": [
-      {"path": "src/mncs_forge/", "class": "host-boundary", "note": "Candidate/evidence orchestration and external provider adapters."},
-      {"path": "src/mncs_forge/resources/native/", "class": "canonical", "note": "Native Forge semantic provider sources."},
-      {"path": "tests/fixtures/", "class": "differential-oracle", "note": "Bounded provider and workflow evidence fixtures."}
+      {"path": "src/mncs_forge/application/", "class": "canonical", "authority": "mncs-forge", "note": "Current assurance/workflow semantic implementation; native Forge providers are canonical only for the bounded surfaces they implement.", "classification": {"authority": "canonical", "lifecycle": "temporary", "boundary_kind": "none", "semantic_role": "canonical-host-semantic"}},
+      {"path": "src/mncs_forge/verification_plan_contract.py", "class": "canonical", "authority": "mncs-forge", "note": "Temporary host assurance-plan validation policy; Commons remains architecture/pressure authority and the native provider is the migration target.", "classification": {"authority": "canonical", "lifecycle": "temporary", "boundary_kind": "none", "semantic_role": "temporary-host-semantic"}},
+      {"path": "src/mncs_forge/mncs_native.py", "class": "host-boundary", "note": "Compiler/process adapter for native Forge providers.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "process", "semantic_role": "platform-adapter"}},
+      {"path": "src/mncs_forge/resources/native/", "class": "canonical", "note": "Native Forge semantic provider sources.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
+      {"path": "tests/fixtures/", "class": "differential-oracle", "note": "Bounded provider and workflow evidence fixtures.", "classification": {"authority": "reference", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "differential-oracle"}}
     ]
   },
   "contracts": {
