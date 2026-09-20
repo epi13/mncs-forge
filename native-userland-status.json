@@ -2,12 +2,31 @@
   "schema_version": "mncs.native-userland-status/1",
   "repository_id": "mncs-forge",
   "status": "hybrid",
-  "canonical_entrypoint": "mncs-forge",
-  "native_sources": {},
+  "canonical_entrypoint": "mncs run-app assurance-application.json",
+  "native_sources": {
+    "assurance-loop": "src/mncs_forge/resources/native/forge/assurance.mncs",
+    "assurance-application": "src/mncs_forge/resources/native/forge/assurance_application.mncs",
+    "assurance-application-descriptor": "src/mncs_forge/resources/native/forge/assurance-application.json",
+    "forge-core": "src/mncs_forge/resources/native/forge/core.mncs"
+  },
+  "native_application_descriptor": "src/mncs_forge/resources/native/forge/assurance-application.json",
   "canonical_mncs_surfaces": [
-    "assurance semantics",
-    "failure-loop contracts",
-    "verification-plan routing declarations"
+    "assurance-loop state machine",
+    "repair and verification eligibility policy",
+    "FAIL > UNKNOWN > PASS verdict composition",
+    "provider-fact identity and freshness gates",
+    "identity, lifecycle, readiness, reconciliation, and bundle projections"
   ],
-  "next_migration_slice": "native internal verification-loop orchestration after Actions and Debug cutovers"
+  "host_boundaries": [
+    "provider command and MCP transport",
+    "process, filesystem, environment, and deadline mechanics",
+    "provider document admission and artifact publication",
+    "exact source replacement and external file hashing"
+  ],
+  "compatibility_surfaces": {
+    "retained_host_adaptation": "src/mncs_forge/application/mncs_development.py",
+    "retained_differential_oracle": "tests/test_mncs_assurance.py",
+    "semantic_fallback": "explicit native_mode=off or unavailable runtime in prefer mode"
+  },
+  "next_migration_slice": "no current Forge semantic blocker; consider only a concrete provider-boundary reduction"
 }

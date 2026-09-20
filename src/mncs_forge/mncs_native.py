@@ -218,6 +218,56 @@ NATIVE_LIFECYCLE_PROJECTION_CONTRACT = "mncs-forge.lifecycle-projection.v1"
 NATIVE_RECONCILIATION_CONTRACT = "mncs-forge.reconciliation-projection.v1"
 NATIVE_READINESS_CONTRACT = "mncs-forge.readiness-projection.v1"
 NATIVE_BUNDLE_CONTRACT = "mncs-forge.bundle-preconditions.v1"
+NATIVE_ASSURANCE_CONTRACT = "mncs-forge.assurance-loop.v1"
+_ASSURANCE_WIRE_LENGTH = 24
+_ASSURANCE_DECISIONS = {
+    0: "StopPass",
+    1: "StopFail",
+    2: "StopUnknown",
+    3: "RequestDiagnosis",
+    4: "RequestRepair",
+    5: "RequireReboundPlan",
+    6: "RunSelectedVerification",
+    7: "RequireFamilyProof",
+    8: "Finalize",
+}
+_ASSURANCE_NEXT_ACTIONS = {
+    0: "None",
+    1: "Diagnose",
+    2: "Repair",
+    3: "ReboundPlan",
+    4: "SelectedVerification",
+    5: "FamilyProof",
+}
+_ASSURANCE_REASONS = {
+    0: "None",
+    1: "InitialPass",
+    2: "InitialFail",
+    3: "InitialEvidenceMissing",
+    4: "FailingExecutionMissing",
+    5: "DiagnosisMissing",
+    6: "DiagnosisInsufficient",
+    7: "RepairNotRequested",
+    8: "RepairArgumentsIncomplete",
+    9: "RepairInadmissible",
+    10: "PlanStale",
+    11: "SourceChangeMissing",
+    12: "ReboundPlanMissing",
+    13: "ReboundPlanStale",
+    14: "PostRepairVerificationMissing",
+    15: "PostRepairVerificationFail",
+    16: "PostRepairVerificationUnknown",
+    17: "FamilyProofMissing",
+    18: "FamilyProofFail",
+    19: "FamilyProofUnknown",
+    20: "FamilyProofInsufficient",
+    21: "IdentityBindingInvalid",
+    22: "EvidenceStale",
+    23: "ProviderEvidenceMissing",
+    24: "AssuranceComplete",
+    25: "InvalidInput",
+}
+_ASSURANCE_PHASES = {0: "InitialVerification", 1: "AfterRepair"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,10 +279,53 @@ class NativeInvocation:
     stdout: bytes
     stderr: bytes
     payload: dict[str, Any] | None
+    duration_seconds: float = 0.0
 
     @property
     def ok(self) -> bool:
         return self.returncode == 0 and self.payload is not None
+
+
+@dataclass(frozen=True, slots=True)
+class NativeAssuranceInput:
+    """Normalized, bounded facts crossing the Forge assurance membrane."""
+
+    phase: str
+    test_status: str
+    post_repair_test_status: str
+    debug_status: str
+    family_proof_status: str
+    test_present: bool
+    failing_execution_present: bool
+    post_repair_test_present: bool
+    family_proof_present: bool
+    plan_present: bool
+    plan_current: bool
+    repair_requested: bool
+    repair_arguments_complete: bool
+    repair_admissible: bool
+    source_changed: bool
+    rebound_plan_present: bool
+    rebound_plan_current: bool
+    proof_required: bool
+    proof_sufficient: bool
+    identity_binding_valid: bool
+    evidence_fresh: bool
+    provider_evidence_present: bool
+
+
+@dataclass(frozen=True, slots=True)
+class NativeAssuranceDecision:
+    """Typed Forge-owned assurance result returned by the native application."""
+
+    status: str
+    decision: str
+    next_action: str
+    stop_reason: str
+    phase: str
+    terminal: bool
+    valid: bool
+    duration_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,6 +535,7 @@ class NativeForgeAdapter:
         self.language_root = self._discover_language_root(language_root)
         self.timeout_seconds = timeout_seconds
         self.output_bytes = output_bytes
+        self._assurance_cache_option_supported: bool | None = None
         self._resource_stack = ExitStack()
         configured_source = os.environ.get("MNCS_FORGE_NATIVE_SOURCE")
         if configured_source:
@@ -451,6 +545,7 @@ class NativeForgeAdapter:
             resource_root = files("mncs_forge.resources").joinpath("native", "forge")
             self.native_root = self._resource_stack.enter_context(as_file(resource_root))
             self.native_source = self.native_root / "core.mncs"
+        self.assurance_descriptor = self.native_root / "assurance-application.json"
 
     def __del__(self) -> None:
         # ``as_file`` normally resolves to the installed filesystem.  The
@@ -490,6 +585,8 @@ class NativeForgeAdapter:
         return all(
             (self.native_root / name).is_file()
             for name in (
+                "assurance.mncs",
+                "assurance_application.mncs",
                 "core.mncs",
                 "bundle.mncs",
                 "identity.mncs",
@@ -499,7 +596,7 @@ class NativeForgeAdapter:
                 "records.mncs",
                 "serialization.mncs",
             )
-        )
+        ) and self.assurance_descriptor.is_file()
 
     def ensure_available(self) -> None:
         """Fail closed when required native execution cannot be selected."""
@@ -624,7 +721,7 @@ class NativeForgeAdapter:
             "--",
         ]
 
-    def invoke(self, arguments: list[str]) -> NativeInvocation:
+    def invoke(self, arguments: list[str], *, stdin: bytes = b"") -> NativeInvocation:
         if self.language_root is None:
             raise ForgeError(
                 "NATIVE_UNAVAILABLE",
@@ -643,6 +740,7 @@ class NativeForgeAdapter:
             output_cap=self.output_bytes,
             stderr_cap=self.output_bytes,
             environment=environment,
+            stdin=stdin,
         )
         payload: dict[str, Any] | None = None
         try:
@@ -658,6 +756,7 @@ class NativeForgeAdapter:
             stdout=result.stdout,
             stderr=result.stderr,
             payload=payload,
+            duration_seconds=result.duration_seconds,
         )
 
     @staticmethod
@@ -704,6 +803,132 @@ class NativeForgeAdapter:
     def execute(self, source: Path, request: Path, *, backend: bool = False) -> NativeInvocation:
         command = "execute-backend" if backend else "execute"
         return self.invoke([command, str(source.resolve()), str(request.resolve())])
+
+    @staticmethod
+    def _assurance_wire(value: NativeAssuranceInput) -> bytes:
+        """Encode the fixed transport membrane for the generic run-app entrypoint."""
+
+        if value.phase not in _ASSURANCE_PHASES.values():
+            raise ForgeError("NATIVE_ASSURANCE_INPUT", "assurance phase is invalid")
+        status_codes = _STATUS_VARIANTS
+        statuses = (
+            value.test_status,
+            value.post_repair_test_status,
+            value.debug_status,
+            value.family_proof_status,
+        )
+        if any(status not in status_codes for status in statuses):
+            raise ForgeError("NATIVE_ASSURANCE_INPUT", "assurance status is invalid")
+        flags = (
+            value.test_present,
+            value.failing_execution_present,
+            value.post_repair_test_present,
+            value.family_proof_present,
+            value.plan_present,
+            value.plan_current,
+            value.repair_requested,
+            value.repair_arguments_complete,
+            value.repair_admissible,
+            value.source_changed,
+            value.rebound_plan_present,
+            value.rebound_plan_current,
+            value.proof_required,
+            value.proof_sufficient,
+            value.identity_binding_valid,
+            value.evidence_fresh,
+            value.provider_evidence_present,
+        )
+        if not all(isinstance(flag, bool) for flag in flags):
+            raise ForgeError("NATIVE_ASSURANCE_INPUT", "assurance presence flags are invalid")
+        phase_code = 0 if value.phase == "InitialVerification" else 1
+        wire = bytes(
+            (
+                70,
+                1,
+                phase_code,
+                status_codes[value.test_status],
+                status_codes[value.post_repair_test_status],
+                status_codes[value.debug_status],
+                status_codes[value.family_proof_status],
+                *(1 if flag else 0 for flag in flags),
+            )
+        )
+        if len(wire) != _ASSURANCE_WIRE_LENGTH:
+            raise ForgeError("NATIVE_ASSURANCE_INPUT", "assurance wire shape is invalid")
+        return wire
+
+    def _assurance_cache_dir(self) -> Path:
+        configured = os.environ.get("MNCS_NATIVE_APPLICATION_CACHE_DIR")
+        if configured:
+            path = Path(configured).expanduser()
+            return path if path.is_absolute() else self.forge_root / path
+        return self.forge_root / ".mncs" / "cache" / "native-applications"
+
+    def assurance_loop(self, value: NativeAssuranceInput) -> NativeAssuranceDecision:
+        """Run the canonical Forge assurance state machine through ``mncs run-app``."""
+
+        if not isinstance(value, NativeAssuranceInput):
+            raise ForgeError("NATIVE_ASSURANCE_INPUT", "assurance input is not typed")
+        self.ensure_available()
+        wire = self._assurance_wire(value)
+        cache_dir = self._assurance_cache_dir()
+        arguments = [
+            "run-app",
+            str(self.assurance_descriptor.resolve()),
+            "--library",
+            str((self.language_root / "library").resolve()),
+            "--library",
+            str(self.native_root.resolve()),
+        ]
+        if self._assurance_cache_option_supported is not False:
+            arguments.extend(("--cache-dir", str(cache_dir)))
+        invocation = self.invoke(arguments, stdin=wire)
+        if (
+            self._assurance_cache_option_supported is not False
+            and invocation.returncode == 2
+            and not invocation.stdout
+            and b"unknown launcher option" in invocation.stderr
+            and b"--cache-dir" in invocation.stderr
+        ):
+            # Older already-built CLIs predate the generic cache flag but still
+            # expose the same run-app contract. Keep this compatibility path
+            # bounded; current CLIs take the cache-enabled path above.
+            self._assurance_cache_option_supported = False
+            invocation = self.invoke(arguments[:6], stdin=wire)
+        elif invocation.returncode == 0:
+            self._assurance_cache_option_supported = True
+        if invocation.returncode != 0 or len(invocation.stdout) != 6:
+            raise ForgeError(
+                "NATIVE_ASSURANCE_UNKNOWN",
+                "native Forge assurance application did not return its bounded decision "
+                f"(returncode {invocation.returncode}, bytes {len(invocation.stdout)})",
+            )
+        result = invocation.stdout
+        if result[0] != 1:
+            raise ForgeError(
+                "NATIVE_ASSURANCE_UNKNOWN", "native assurance result schema is invalid"
+            )
+        status = {0: "PASS", 1: "FAIL", 2: "UNKNOWN"}.get(result[1])
+        decision = _ASSURANCE_DECISIONS.get(result[2])
+        next_action = _ASSURANCE_NEXT_ACTIONS.get(result[3])
+        stop_reason = _ASSURANCE_REASONS.get(result[4])
+        phase = _ASSURANCE_PHASES.get(result[5])
+        if None in (status, decision, next_action, stop_reason, phase):
+            raise ForgeError(
+                "NATIVE_ASSURANCE_UNKNOWN",
+                "native assurance result contains an unknown code",
+            )
+        terminal = decision in {"StopPass", "StopFail", "StopUnknown", "Finalize"}
+        return NativeAssuranceDecision(
+            status=str(status),
+            decision=str(decision),
+            next_action=str(next_action),
+            stop_reason=str(stop_reason),
+            phase=str(phase),
+            terminal=terminal,
+            valid=True,
+            duration_seconds=invocation.duration_seconds,
+        )
 
     @staticmethod
     def _abi_shape(abi: NativeAbi, kind: str, name: str, *, context: str) -> Mapping[str, object]:

@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-forge",
-  "revision": 3,
+  "revision": 4,
   "manifest_location": "in-repository",
   "authority": {
     "note": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority."
@@ -9,11 +9,13 @@
   "organization": {
     "layout": "mncs.repository-layout/1",
     "surfaces": [
-      {"path": "src/mncs_forge/application/", "class": "canonical", "authority": "mncs-forge", "note": "Current assurance/workflow semantic implementation; native Forge providers are canonical only for the bounded surfaces they implement.", "classification": {"authority": "canonical", "lifecycle": "temporary", "boundary_kind": "none", "semantic_role": "canonical-host-semantic"}},
-      {"path": "src/mncs_forge/verification_plan_contract.py", "class": "canonical", "authority": "mncs-forge", "note": "Temporary host assurance-plan validation policy; Commons remains architecture/pressure authority and the native provider is the migration target.", "classification": {"authority": "canonical", "lifecycle": "temporary", "boundary_kind": "none", "semantic_role": "temporary-host-semantic"}},
-      {"path": "src/mncs_forge/mncs_native.py", "class": "host-boundary", "note": "Compiler/process adapter for native Forge providers.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "process", "semantic_role": "platform-adapter"}},
-      {"path": "src/mncs_forge/resources/native/", "class": "canonical", "note": "Native Forge semantic provider sources.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
-      {"path": "tests/fixtures/", "class": "differential-oracle", "note": "Bounded provider and workflow evidence fixtures.", "classification": {"authority": "reference", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "differential-oracle"}}
+      {"path": "src/mncs_forge/application/mncs_development.py", "class": "host-boundary", "authority": "none", "note": "Acquires and validates provider documents, invokes external providers, performs repair mechanics, and adapts normalized facts; it does not own the final assurance disposition when native mode is enabled.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "process", "semantic_role": "platform-adapter"}},
+      {"path": "src/mncs_forge/verification_plan_contract.py", "class": "host-boundary", "authority": "none", "note": "Provider-plan membrane and structural admission remain host-side; Forge assurance policy consumes the resulting typed facts.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "external-provider", "semantic_role": "compatibility-adapter"}},
+      {"path": "src/mncs_forge/mncs_native.py", "class": "host-boundary", "authority": "none", "note": "Bounded compiler, process, stdin/stdout, and generic compiled-application adapter for native Forge modules.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "process", "semantic_role": "platform-adapter"}},
+      {"path": "src/mncs_forge/resources/native/forge/", "class": "canonical", "authority": "mncs-forge", "note": "Native Forge semantic providers, including the canonical typed assurance loop and its generic run-app descriptor.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
+      {"path": "src/mncs_forge/resources/native/forge/assurance-application.json", "class": "canonical", "authority": "mncs-forge", "note": "Canonical native Forge assurance application descriptor for mncs run-app and the generic compiled application cache.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
+      {"path": "tests/test_mncs_assurance.py", "class": "differential-oracle", "authority": "reference", "note": "Bounded parity vectors for the former host failure-loop policy and the native assurance state machine.", "classification": {"authority": "reference", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "differential-oracle"}},
+      {"path": "tests/fixtures/", "class": "differential-oracle", "authority": "reference", "note": "Bounded provider and workflow evidence fixtures.", "classification": {"authority": "reference", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "differential-oracle"}}
     ]
   },
   "contracts": {

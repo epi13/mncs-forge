@@ -15,6 +15,7 @@ from typing import Any
 
 from ..config import ForgeConfig
 from ..errors import ForgeError
+from ..mncs_native import NativeAssuranceDecision, NativeAssuranceInput, NativeForgeAdapter
 from ..paths import is_within, resolve_contained
 from ..ports import Runner
 from ..serialization import canonical_bytes, local_json_identity, pretty_json, read_json
@@ -63,9 +64,18 @@ def _sha256(path: Path) -> str:
 class MncsDevelopmentService:
     """Run an explicit, bounded, evidence-preserving MNCS development loop."""
 
-    def __init__(self, *, config: ForgeConfig, executor: Runner) -> None:
+    def __init__(
+        self,
+        *,
+        config: ForgeConfig,
+        executor: Runner,
+        native: NativeForgeAdapter | None = None,
+        native_mode: str | None = None,
+    ) -> None:
         self.config = config
         self.executor = executor
+        self.native = native
+        self.native_mode = native_mode or config.native_execution_mode
 
     def _path(self, value: str, *, must_exist: bool = False) -> Path:
         return resolve_contained(self.config.root, value, must_exist=must_exist)
@@ -73,6 +83,94 @@ class MncsDevelopmentService:
     def _environment(self) -> dict[str, str]:
         allowed = self.config.raw.get("environment_allowlist", [])
         return {key: os.environ[key] for key in allowed if key in os.environ}
+
+    def _assurance_decision(
+        self, value: NativeAssuranceInput
+    ) -> NativeAssuranceDecision | None:
+        """Interpret normalized provider facts through the one Forge policy owner."""
+
+        if self.native_mode == "off":
+            return None
+        if self.native is None:
+            candidate = NativeForgeAdapter(self.config.root)
+            try:
+                candidate.ensure_available()
+            except ForgeError:
+                if self.native_mode == "required":
+                    raise
+                return None
+            self.native = candidate
+        return self.native.assurance_loop(value)
+
+    @staticmethod
+    def _record_assurance(
+        base: dict[str, Any], decision: NativeAssuranceDecision | None
+    ) -> NativeAssuranceDecision | None:
+        if decision is None:
+            return None
+        base["assurance"] = {
+            "status": decision.status,
+            "decision": decision.decision,
+            "next_action": decision.next_action,
+            "stop_reason": decision.stop_reason,
+            "phase": decision.phase,
+            "terminal": decision.terminal,
+            "native": decision.valid,
+            "duration_seconds": decision.duration_seconds,
+        }
+        base["verdict"] = decision.status
+        return decision
+
+    @staticmethod
+    def _loop_facts(
+        *,
+        phase: str,
+        test_status: str,
+        post_repair_test_status: str = "UNKNOWN",
+        debug_status: str = "UNKNOWN",
+        family_proof_status: str = "UNKNOWN",
+        test_present: bool = True,
+        failing_execution_present: bool = False,
+        post_repair_test_present: bool = False,
+        family_proof_present: bool = False,
+        plan_present: bool = False,
+        plan_current: bool = True,
+        repair_requested: bool = False,
+        repair_arguments_complete: bool = False,
+        repair_admissible: bool = False,
+        source_changed: bool = False,
+        rebound_plan_present: bool = False,
+        rebound_plan_current: bool = True,
+        proof_required: bool = False,
+        proof_sufficient: bool = True,
+        identity_binding_valid: bool = True,
+        evidence_fresh: bool = True,
+        provider_evidence_present: bool = True,
+    ) -> NativeAssuranceInput:
+        return NativeAssuranceInput(
+            phase=phase,
+            test_status=test_status,
+            post_repair_test_status=post_repair_test_status,
+            debug_status=debug_status,
+            family_proof_status=family_proof_status,
+            test_present=test_present,
+            failing_execution_present=failing_execution_present,
+            post_repair_test_present=post_repair_test_present,
+            family_proof_present=family_proof_present,
+            plan_present=plan_present,
+            plan_current=plan_current,
+            repair_requested=repair_requested,
+            repair_arguments_complete=repair_arguments_complete,
+            repair_admissible=repair_admissible,
+            source_changed=source_changed,
+            rebound_plan_present=rebound_plan_present,
+            rebound_plan_current=rebound_plan_current,
+            proof_required=proof_required,
+            proof_sufficient=proof_sufficient,
+            identity_binding_valid=identity_binding_valid,
+            evidence_fresh=evidence_fresh,
+            provider_evidence_present=provider_evidence_present,
+        )
 
     def _command_prefix(self, supplied: list[str] | None, configured_name: str) -> list[str]:
         value = supplied
@@ -1330,18 +1428,17 @@ class MncsDevelopmentService:
             self._validate_verification_plan(post_verification_plan_template)
 
         effective_diagnostic_depth = "deep" if minimize else diagnostic_depth
-        if (
-            repair_path is not None
+        repair_requested = any(value is not None for value in (repair_path, repair_from, repair_to))
+        repair_arguments_complete = all(
+            value is not None for value in (repair_path, repair_from, repair_to)
+        )
+        repair_plan_admissible = not (
+            repair_requested
             and verification_plan_path is not None
             and post_verification_plan_path is None
             and not (isinstance(ravel_command, list) and ravel_command)
             and not self.config.public_commands().get("ravel_impact")
-        ):
-            raise ForgeError(
-                "REPAIR_INVALID",
-                "repair with a verification plan requires a post-repair plan or "
-                "declared ravel_impact command",
-            )
+        )
 
         test_prefix = self._command_prefix(test_command, "mncs_test")
         if provider_mode == "invoke":
@@ -1487,6 +1584,29 @@ class MncsDevelopmentService:
                 },
             },
         }
+
+        assurance_defaults: dict[str, object] = {
+            "phase": "InitialVerification",
+            "test_status": str(test_result["verdict"]),
+            "test_present": True,
+            "failing_execution_present": selected is not None,
+            "plan_present": verification_plan is not None,
+            "plan_current": True,
+            "repair_requested": repair_requested,
+            "repair_arguments_complete": repair_arguments_complete,
+            "repair_admissible": repair_plan_admissible,
+            "identity_binding_valid": True,
+            "evidence_fresh": True,
+            "provider_evidence_present": True,
+        }
+
+        def apply_assurance(**updates: object) -> NativeAssuranceDecision | None:
+            facts = {**assurance_defaults, **updates}
+            return self._record_assurance(
+                base,
+                self._assurance_decision(self._loop_facts(**facts)),  # type: ignore[arg-type]
+            )
+
         if plan_projection is not None:
             plan_level = plan_projection.get("level")
             plan_reasons = plan_projection.get("escalation_reasons", [])
@@ -1536,22 +1656,59 @@ class MncsDevelopmentService:
                     "receipts_reused", 0
                 )
                 family_status = family_proof.get("status")
+                family_present = family_status in VERDICTS
+                family_proof_details = _mapping(family_proof.get("proof"))
+                decision = self._record_assurance(
+                    base,
+                    self._assurance_decision(
+                        self._loop_facts(
+                            phase="InitialVerification",
+                            test_status=str(test_result["verdict"]),
+                            family_proof_status=(
+                                str(family_status) if family_present else "UNKNOWN"
+                            ),
+                            family_proof_present=family_present,
+                            plan_present=True,
+                            plan_current=True,
+                            proof_required=True,
+                            proof_sufficient=(
+                                family_proof_details.get("sufficient_to_stop") is True
+                                or family_status == "PASS"
+                            ),
+                        )
+                    ),
+                )
+                if decision is not None:
+                    return self._persist(base, output_file)
                 base["verdict"] = (
                     family_status
                     if family_status in {"FAIL", "UNKNOWN"}
                     else test_result["verdict"]
                 )
                 return self._persist(base, output_file)
-            if verification_plan is not None and not _mapping(verification_plan.get("proof")).get(
-                "sufficient_to_stop", False
-            ):
-                base["verdict"] = "UNKNOWN"
+            proof_required = verification_plan is not None and not _mapping(
+                verification_plan.get("proof")
+            ).get("sufficient_to_stop", False)
+            if proof_required:
                 base["verification"] = {
                     "status": "NOT_ESTABLISHED",
                     "reason": "selected local result is not the required family proof boundary",
                 }
-            else:
-                base["verdict"] = test_result["verdict"]
+            decision = self._record_assurance(
+                base,
+                self._assurance_decision(
+                    self._loop_facts(
+                        phase="InitialVerification",
+                        test_status=str(test_result["verdict"]),
+                        plan_present=verification_plan is not None,
+                        plan_current=True,
+                        proof_required=proof_required,
+                        proof_sufficient=not proof_required,
+                    )
+                ),
+            )
+            if decision is None:
+                base["verdict"] = "UNKNOWN" if proof_required else test_result["verdict"]
             return self._persist(base, output_file)
 
         if selected is None:  # pragma: no cover - guarded by _selected_test
@@ -1560,6 +1717,20 @@ class MncsDevelopmentService:
         if debug_prefix is None:
             debug_prefix = self.config.public_commands().get("mncs_debug")
         if not isinstance(debug_prefix, list) or not debug_prefix:
+            decision = apply_assurance(debug_status="UNKNOWN")
+            if decision is not None:
+                base["debug"] = {
+                    "status": "UNKNOWN",
+                    "reason": "mncs-debug command is not declared",
+                    "test_verdict": "FAIL",
+                    "references": [],
+                }
+                base["diagnosis"] = {
+                    "status": "UNKNOWN",
+                    "confidence": "none",
+                    "statement": "test FAIL is established; debug evidence is unavailable",
+                }
+                return self._persist(base, output_file)
             base["verdict"] = "FAIL"
             base["debug"] = {
                 "status": "UNKNOWN",
@@ -1577,6 +1748,22 @@ class MncsDevelopmentService:
         handoff_debug_check: dict[str, Any] | None = None
         if provider_mode == "consume":
             if debug_check_path is None or not debug_check_path.is_file():
+                decision = apply_assurance(debug_status="UNKNOWN")
+                if decision is not None:
+                    base["debug"] = {
+                        "status": "UNKNOWN",
+                        "reason": "mncs-actions did not provide a debug check artifact",
+                        "test_verdict": "FAIL",
+                        "references": [],
+                    }
+                    base["diagnosis"] = {
+                        "status": "UNKNOWN",
+                        "confidence": "none",
+                        "statement": (
+                            "test FAIL is established; the Actions debug claim is unavailable"
+                        ),
+                    }
+                    return self._persist(base, output_file)
                 base["verdict"] = "FAIL"
                 base["debug"] = {
                     "status": "UNKNOWN",
@@ -1594,6 +1781,25 @@ class MncsDevelopmentService:
                 handoff_debug_check = self._read(debug_check_path, label="mncs-debug action check")
                 self._validate_check(handoff_debug_check, "mncs-debug")
             except ForgeError:
+                decision = apply_assurance(debug_status="UNKNOWN")
+                if decision is not None:
+                    base["debug"] = {
+                        "status": "UNKNOWN",
+                        "reason": "mncs-actions emitted a malformed debug check artifact",
+                        "test_verdict": "FAIL",
+                        "references": [
+                            self._ref(debug_check_path, "mncs-debug-check", CHECK_RESULT_SCHEMA)
+                        ],
+                    }
+                    base["diagnosis"] = {
+                        "status": "UNKNOWN",
+                        "confidence": "none",
+                        "statement": (
+                            "test FAIL is established; malformed Actions debug evidence "
+                            "remains INVALID"
+                        ),
+                    }
+                    return self._persist(base, output_file)
                 base["verdict"] = "FAIL"
                 base["debug"] = {
                     "status": "UNKNOWN",
@@ -1612,6 +1818,25 @@ class MncsDevelopmentService:
                 }
                 return self._persist(base, output_file)
             if handoff_debug_check.get("verdict") != "PASS":
+                decision = apply_assurance(debug_status="UNKNOWN")
+                if decision is not None:
+                    base["debug"] = {
+                        "status": "UNKNOWN",
+                        "reason": "mncs-actions did not establish debug evidence",
+                        "test_verdict": "FAIL",
+                        "transport_check": self._ref(
+                            debug_check_path, "mncs-debug-check", CHECK_RESULT_SCHEMA
+                        ),
+                        "references": [],
+                    }
+                    base["diagnosis"] = {
+                        "status": "UNKNOWN",
+                        "confidence": "none",
+                        "statement": (
+                            "test FAIL is established; the Actions debug claim is unavailable"
+                        ),
+                    }
+                    return self._persist(base, output_file)
                 base["verdict"] = "FAIL"
                 base["debug"] = {
                     "status": "UNKNOWN",
@@ -1630,7 +1855,9 @@ class MncsDevelopmentService:
                 return self._persist(base, output_file)
 
             if not witness_path.is_file():
-                base["verdict"] = "FAIL"
+                decision = apply_assurance(debug_status="UNKNOWN")
+                if decision is None:
+                    base["verdict"] = "FAIL"
                 base["debug"] = {
                     "status": "UNKNOWN",
                     "reason": "mncs-actions did not provide a debug witness",
@@ -1693,7 +1920,9 @@ class MncsDevelopmentService:
                 debug_query_paths.append((label, path, ""))
 
         if not witness_path.is_file():
-            base["verdict"] = "FAIL"
+            decision = apply_assurance(debug_status="UNKNOWN")
+            if decision is None:
+                base["verdict"] = "FAIL"
             base["debug"] = {
                 "status": "UNKNOWN",
                 "reason": "mncs-debug did not produce a witness",
@@ -1725,7 +1954,9 @@ class MncsDevelopmentService:
             or validation.get("valid") is not True
             or witness.get("schema_version") != WITNESS_SCHEMA
         ):
-            base["verdict"] = "FAIL"
+            decision = apply_assurance(debug_status="UNKNOWN")
+            if decision is None:
+                base["verdict"] = "FAIL"
             base["debug"] = {
                 "status": "UNKNOWN",
                 "reason": "mncs-debug witness validation did not establish a valid witness",
@@ -1746,7 +1977,9 @@ class MncsDevelopmentService:
             integration.get("run_id") != test_result.get("run_id")
             or integration.get("test_id") != selected_id
         ):
-            base["verdict"] = "FAIL"
+            decision = apply_assurance(debug_status="UNKNOWN", identity_binding_valid=False)
+            if decision is None:
+                base["verdict"] = "FAIL"
             base["debug"] = {
                 "status": "UNKNOWN",
                 "reason": "debug witness identity does not match the selected test execution",
@@ -1941,22 +2174,75 @@ class MncsDevelopmentService:
         )
         base["diagnosis"]["sufficiency"] = sufficiency_document
         if debug_status != "ESTABLISHED":
-            base["verdict"] = "FAIL"
+            decision = apply_assurance(debug_status="UNKNOWN")
+            if decision is None:
+                base["verdict"] = "FAIL"
             return self._persist(base, output_file)
 
-        repair_requested = any(value is not None for value in (repair_path, repair_from, repair_to))
         if not repair_requested:
-            base["verdict"] = "FAIL"
+            decision = apply_assurance(debug_status="PASS", repair_requested=False)
+            if decision is None:
+                base["verdict"] = "FAIL"
             base["repair"] = {"status": "CANDIDATE_NOT_REQUESTED"}
             return self._persist(base, output_file)
-        if repair_path is None or repair_from is None or repair_to is None:
+        if not repair_arguments_complete:
+            decision = apply_assurance(
+                debug_status="PASS",
+                repair_requested=True,
+                repair_arguments_complete=False,
+                repair_admissible=False,
+            )
+            if decision is not None:
+                base["repair"] = {"status": "NOT_ADMISSIBLE", "reason": "incomplete_arguments"}
+                return self._persist(base, output_file)
             raise ForgeError(
                 "REPAIR_INVALID",
                 "repair_path, repair_from, and repair_to must be supplied together",
             )
-        source_path, _before_text, after_text = self._source_change(
-            repair_path, repair_from, repair_to
+        if not repair_plan_admissible:
+            decision = apply_assurance(
+                debug_status="PASS",
+                repair_requested=True,
+                repair_arguments_complete=True,
+                repair_admissible=False,
+            )
+            if decision is not None:
+                base["repair"] = {
+                    "status": "NOT_ADMISSIBLE",
+                    "reason": "rebound_plan_required",
+                }
+                return self._persist(base, output_file)
+            raise ForgeError(
+                "REPAIR_INVALID",
+                "repair with a verification plan requires a post-repair plan or "
+                "declared ravel_impact command",
+            )
+        decision = apply_assurance(
+            debug_status="PASS",
+            repair_requested=True,
+            repair_arguments_complete=True,
+            repair_admissible=True,
+            source_changed=False,
         )
+        if decision is not None and decision.decision != "RequestRepair":
+            base["repair"] = {"status": "NOT_ADMISSIBLE", "reason": decision.stop_reason}
+            return self._persist(base, output_file)
+        assert repair_path is not None and repair_from is not None and repair_to is not None
+        try:
+            source_path, _before_text, after_text = self._source_change(
+                repair_path, repair_from, repair_to
+            )
+        except ForgeError as exc:
+            decision = apply_assurance(
+                debug_status="PASS",
+                repair_requested=True,
+                repair_arguments_complete=True,
+                repair_admissible=False,
+            )
+            if decision is not None:
+                base["repair"] = {"status": "NOT_ADMISSIBLE", "reason": exc.code}
+                return self._persist(base, output_file)
+            raise
         before_source_sha = _sha256(source_path)
         after_plan: dict[str, Any] | None = None
         after_plan_ref: dict[str, object] | None = None
@@ -2082,6 +2368,9 @@ class MncsDevelopmentService:
             "proof_sufficient": proof_sufficient,
         }
         base["verification"] = local_verification
+        family_proof_present = False
+        family_proof_status = "UNKNOWN"
+        family_proof_sufficient = False
         if (
             after_plan is not None
             and after_plan_path is not None
@@ -2108,10 +2397,11 @@ class MncsDevelopmentService:
                 "receipts_reused", 0
             )
             family_status = family_proof.get("status")
-            if family_status in {"FAIL", "UNKNOWN"}:
-                base["verdict"] = family_status
-            else:
-                base["verdict"] = after_test.get("verdict")
+            family_proof_status = str(family_status) if family_status in VERDICTS else "UNKNOWN"
+            family_proof_present = family_status in VERDICTS
+            family_proof_sufficient = _mapping(family_proof.get("proof")).get(
+                "sufficient_to_stop"
+            ) is True or family_status == "PASS"
         base["provenance"]["identity_continuity"] = {
             "before_test_run_id": test_result.get("run_id"),
             "before_test_id": selected_id,
@@ -2122,7 +2412,30 @@ class MncsDevelopmentService:
             "source_before_sha256": before_source_sha,
             "source_after_sha256": after_source_sha,
         }
-        if "selected_family_proof" not in base["observability"]:
+        after_proof_required = after_plan is not None and (
+            _mapping(after_plan.get("selection")).get("routing_scope")
+            == "selected_repositories"
+            or not proof_sufficient
+        )
+        decision = apply_assurance(
+            phase="AfterRepair",
+            post_repair_test_status=str(after_test.get("verdict")),
+            post_repair_test_present=True,
+            debug_status="PASS",
+            source_changed=True,
+            rebound_plan_present=after_plan is not None,
+            rebound_plan_current=after_plan is not None,
+            proof_required=after_proof_required,
+            family_proof_status=family_proof_status,
+            family_proof_present=family_proof_present,
+            proof_sufficient=(
+                family_proof_sufficient if after_proof_required else proof_sufficient
+            ),
+            repair_requested=True,
+            repair_arguments_complete=True,
+            repair_admissible=True,
+        )
+        if decision is None and "selected_family_proof" not in base["observability"]:
             base["verdict"] = after_test.get("verdict") if proof_sufficient else "UNKNOWN"
         return self._persist(base, output_file)
 

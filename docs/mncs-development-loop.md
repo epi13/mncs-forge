@@ -59,6 +59,42 @@ semantics, provenance algorithms, or replay guarantees. A test `FAIL` remains
 `FAIL` when debug evidence is unavailable; debug unavailability is represented
 as `UNKNOWN` in the debug and diagnosis projections.
 
+## Native Forge assurance authority
+
+The development service now normalizes owner-produced documents into bounded
+typed facts and calls the packaged `mncs.forge.assurance.v1` state machine
+through the generic `mncs run-app` application surface. The state machine is
+the single Forge authority for workflow disposition:
+
+```text
+provider facts + lifecycle/readiness/reconciliation facts
+        -> ForgeLoopInput
+        -> mncs.forge.assurance.v1
+        -> ForgeLoopDecision
+        -> host performs the requested external action
+```
+
+The loop has explicit initial-verification and after-repair phases. Its
+decisions are bounded to stopping with `PASS`, `FAIL`, or `UNKNOWN`, or asking
+for diagnosis, repair, a rebound plan, selected verification, or family proof.
+The status join is `FAIL > UNKNOWN > PASS`; missing evidence, stale plan
+bindings, invalid identity bindings, and insufficient proof remain
+`UNKNOWN`. Repair eligibility, source-change invalidation, rebound-plan
+requirements, post-repair verification requirements, and family-proof
+sufficiency are Forge-owned policy and are evaluated natively.
+
+Provider ownership is preserved at the membrane. mncs-test supplies test
+verdicts and selected executions, Ravel supplies the verification plan,
+mncs-debug supplies diagnosis/sufficiency, and Actions supplies selected-family
+proof. Forge consumes those facts and does not recreate their semantics.
+
+The host still owns process invocation, deadlines, environment and path
+containment, external provider commands, artifact ingress/egress, defensive
+schema admission, exact source replacement, and publication. These are real
+transport/mechanics boundaries. `tests/test_mncs_assurance.py` keeps the former
+Python behavior as a bounded differential oracle while the native path is
+enabled; it is not a second canonical implementation.
+
 The operation accepts an exact replacement only inside the configured
 candidate/generated scopes and only after a valid debugger witness has been
 established. The replacement must match once. When a plan was supplied, a

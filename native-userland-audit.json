@@ -15,25 +15,32 @@
   },
   "status": "hybrid",
   "canonical_mncs_surfaces": [
-    "assurance semantics",
-    "failure-loop contracts",
-    "verification-plan routing declarations"
+    "assurance-loop state machine",
+    "repair and verification eligibility policy",
+    "FAIL > UNKNOWN > PASS verdict composition",
+    "provider-fact identity and freshness gates",
+    "identity, lifecycle, readiness, reconciliation, and bundle projections"
   ],
   "host_canonical_responsibilities": [
     {
-      "area": "provider orchestration and execution supervision",
-      "classification": "missing_reusable_runtime_capability",
-      "eliminating_capability": "typed process, deadline, filesystem, and receipt effects"
-    },
-    {
-      "area": "MCP/server and external provider transport",
+      "area": "provider command, MCP, and external artifact transport",
       "classification": "external_interoperability_only",
-      "eliminating_capability": "none; retain as a thin adapter"
+      "eliminating_capability": "none; retain as a bounded adapter"
     },
     {
-      "area": "internal diagnose-fix-verify policy composition",
-      "classification": "small_application_refactor",
-      "eliminating_capability": "direct native Actions, Debug, Doctor, and Ravel module calls"
+      "area": "process, filesystem, environment, deadline, source-replacement, and publication mechanics",
+      "classification": "platform_boundary",
+      "eliminating_capability": "none required for Forge assurance semantics; current generic effects are sufficient"
+    },
+    {
+      "area": "provider document admission and structural schema validation",
+      "classification": "boundary_adapter",
+      "eliminating_capability": "typed structured-artifact ingress only where it naturally replaces transport checks"
+    },
+    {
+      "area": "legacy compatibility and differential comparison",
+      "classification": "reference_surface",
+      "eliminating_capability": "native assurance parity across the bounded fixture set"
     }
   ],
   "existing_pressures": [
@@ -42,5 +49,21 @@
     "MNCS-VERIFY-54B12B4A78DF"
   ],
   "migration_order": 7,
-  "next_native_slice": "native internal verification-loop orchestration after Actions and Debug cutovers"
+  "native_application_descriptor": "src/mncs_forge/resources/native/forge/assurance-application.json",
+  "runtime_effect_dogfood": {
+    "process": "the generic compiled native-application cache executes the bounded assurance decision; external provider invocation remains host-owned",
+    "structured_data": "typed normalized provider facts cross a fixed wire membrane; provider-owned JSON semantics remain provider-owned",
+    "filesystem": "source and provider artifact acquisition remain host-owned mechanics"
+  },
+  "pressure_revalidation": {
+    "forge_relevant_open_pressures": [],
+    "unrelated_existing_pressures": [
+      "MNCS-LANG-52A5E0C72A39",
+      "MNCS-TOOLING-B665F138D324",
+      "MNCS-VERIFY-54B12B4A78DF",
+      "MNCS-LANG-5E290D20B90B"
+    ],
+    "cache_result": "generic compiled application cache is sufficient; no persistent-session runtime pressure reproduced"
+  },
+  "next_native_slice": "no current Forge semantic blocker; consider only a concrete provider-boundary reduction"
 }

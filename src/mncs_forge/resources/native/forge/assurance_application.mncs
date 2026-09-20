@@ -1,0 +1,16 @@
+mncs 0.16;
+
+// Generic run-app entrypoint for the Forge assurance state machine. The
+// launcher owns process/stdin/stdout transport; Forge owns the decision
+// returned by the imported MNCS assurance module.
+module mncs.forge.assurance_application.v1;
+
+use mncs.forge.assurance as assurance;
+use mncs.std.application.v1 as app;
+
+fn main(context: app.ApplicationContext) -> (result: app.ApplicationExit) {
+    if !app.context_is_bounded(context) {
+        return app.failure([98, 111, 117, 110, 100, 115], 2);
+    }
+    return app.success(assurance.wire_decision(context.stdin));
+}

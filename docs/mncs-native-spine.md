@@ -25,7 +25,26 @@ claim.
 | `mncs.forge.reconciliation.v1` | Bounded per-category status counts, conflict classification, unsupported-count accounting, and aggregate technical status |
 | `mncs.forge.readiness.v1` | Bounded per-requirement status summaries, freshness/comparability classification, readiness reason, and aggregate counts |
 | `mncs.forge.bundle.v1` | Deterministic development/evaluator bundle preconditions over opaque candidate identities and explicit freeze/selection/evidence observations |
+| `mncs.forge.assurance.v1` | Typed development-loop state machine for diagnosis, repair eligibility, rebound verification, family proof, and fail-closed disposition |
 | `mncs.forge.core.v1` | Public entrypoints used by the adapter and service drift fixture |
+
+The assurance loop is the canonical Forge semantic entrypoint for the
+development workflow. `assurance.mncs` consumes normalized provider facts and
+returns one bounded decision (`StopPass`, `StopFail`, `StopUnknown`, or a
+bounded next action). Test, Debug, Actions, and Ravel remain the authorities
+for their own verdict, diagnosis, proof, and plan facts; Forge only composes
+those facts under its assurance contract. The native status lattice is
+`FAIL > UNKNOWN > PASS`, and missing, stale, or identity-invalid evidence is
+never promoted to `PASS`.
+
+`assurance-application.json` is the canonical `mncs run-app` descriptor for
+that state machine. `assurance_application.mncs` adapts the fixed typed input
+membrane to the generic `mncs.std.application.v1` context and returns a bounded
+six-byte decision. The adapter passes both the language library and Forge's
+native source directory as library identities, so changes to Forge semantics
+cannot reuse a stale generic compiled artifact. The cache is the shared
+MNCS-native application cache; Forge has no compiler cache, daemon, or second
+runtime.
 
 The authoritative Forge source files are package data under
 `src/mncs_forge/resources/native/forge/`; installed wheels and sdists expose the
@@ -122,3 +141,21 @@ CLI command, and semantic inputs. They do not persist evidence or lifecycle
 authority and never rely on source mtime alone. The projection input is a fixed
 32-event typed array; histories outside that declared bound remain
 `NATIVE_LIFECYCLE_UNKNOWN` rather than being truncated or guessed.
+
+## Development-loop boundary
+
+The Python development service remains the external boundary for process
+invocation, environment allowlisting, filesystem/path containment, provider
+artifact reads and writes, MCP/server transport, exact source replacement,
+and publication. It also performs defensive provider-schema admission. Those
+operations are transport and mechanics, not a second assurance authority.
+
+The native assurance application owns the Forge decisions that were previously
+interleaved through the host failure loop: whether diagnosis is requested,
+whether repair is admissible, whether a source change invalidates the old plan,
+whether a rebound plan and selected verification are required, whether family
+proof is sufficient, and whether the final Forge result is `PASS`, `FAIL`, or
+`UNKNOWN`. Differential fixtures remain only as a migration oracle; native mode
+is the canonical path and `native_mode=off` is the explicit compatibility
+surface; an unavailable runtime in `prefer` mode may use the same explicit
+compatibility path.
