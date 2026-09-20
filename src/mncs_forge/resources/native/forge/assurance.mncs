@@ -1,0 +1,517 @@
+mncs 0.16;
+
+// Forge-owned assurance/workflow semantics.
+//
+// Provider implementations remain outside this module. Test supplies the
+// test verdict, Debug supplies diagnosis sufficiency, RAVEL supplies plan
+// freshness/selection, and Actions supplies selected-family proof. Forge
+// consumes those normalized facts and decides only its own development-loop
+// disposition. The input is fixed and bounded so this is a state machine, not
+// a dynamically interpreted workflow engine.
+module mncs.forge.assurance.v1;
+
+use mncs.core.status as statlib;
+use mncs.core.logic as boollib;
+
+enum LoopPhase { InitialVerification, AfterRepair }
+
+enum LoopDecision {
+    StopPass,
+    StopFail,
+    StopUnknown,
+    RequestDiagnosis,
+    RequestRepair,
+    RequireReboundPlan,
+    RunSelectedVerification,
+    RequireFamilyProof,
+    Finalize
+}
+
+enum NextAction { None, Diagnose, Repair, ReboundPlan, SelectedVerification, FamilyProof }
+
+enum StopReason {
+    None,
+    InitialPass,
+    InitialFail,
+    InitialEvidenceMissing,
+    FailingExecutionMissing,
+    DiagnosisMissing,
+    DiagnosisInsufficient,
+    RepairNotRequested,
+    RepairArgumentsIncomplete,
+    RepairInadmissible,
+    PlanStale,
+    SourceChangeMissing,
+    ReboundPlanMissing,
+    ReboundPlanStale,
+    PostRepairVerificationMissing,
+    PostRepairVerificationFail,
+    PostRepairVerificationUnknown,
+    FamilyProofMissing,
+    FamilyProofFail,
+    FamilyProofUnknown,
+    FamilyProofInsufficient,
+    IdentityBindingInvalid,
+    EvidenceStale,
+    ProviderEvidenceMissing,
+    AssuranceComplete,
+    InvalidInput
+}
+
+// Facts have already crossed the provider membranes. A status field is a
+// provider-owned verdict/sufficiency projection; booleans describe only
+// presence, freshness, and identity binding at the Forge boundary.
+record ForgeEvidenceState {
+    test_status: statlib.Status,
+    post_repair_test_status: statlib.Status,
+    debug_status: statlib.Status,
+    family_proof_status: statlib.Status,
+    test_present: bool,
+    failing_execution_present: bool,
+    post_repair_test_present: bool,
+    family_proof_present: bool,
+    plan_present: bool,
+    plan_current: bool,
+    repair_requested: bool,
+    repair_arguments_complete: bool,
+    repair_admissible: bool,
+    source_changed: bool,
+    rebound_plan_present: bool,
+    rebound_plan_current: bool,
+    proof_required: bool,
+    proof_sufficient: bool,
+    identity_binding_valid: bool,
+    evidence_fresh: bool,
+    provider_evidence_present: bool
+}
+
+record ForgeLoopInput {
+    phase: LoopPhase,
+    evidence: ForgeEvidenceState,
+    valid: bool
+}
+
+record ForgeLoopState {
+    phase: LoopPhase,
+    status: statlib.Status,
+    decision: LoopDecision,
+    next_action: NextAction,
+    stop_reason: StopReason
+}
+
+record ForgeLoopDecision {
+    state: ForgeLoopState,
+    status: statlib.Status,
+    decision: LoopDecision,
+    next_action: NextAction,
+    stop_reason: StopReason,
+    terminal: bool,
+    valid: bool
+}
+
+// The wire envelope is deliberately not the semantic API. It is only the
+// bounded application adapter used by the generic run-app launcher. Each
+// field is one byte: status codes are 0=PASS, 1=FAIL, 2=UNKNOWN and boolean
+// fields are exactly 0/1. The host must not use this as a JSON reflection
+// layer or add fields without a new native contract.
+record WireEnvelope { input: ForgeLoopInput, valid: bool }
+
+fn status_from_code(value: byte) -> (result: statlib.Status) {
+    if value == 0 { return statlib.Status.PASS; }
+    if value == 1 { return statlib.Status.FAIL; }
+    return statlib.Status.UNKNOWN;
+}
+
+fn status_code(value: statlib.Status) -> (result: byte) {
+    return match value {
+        PASS => 0,
+        FAIL => 1,
+        UNKNOWN => 2,
+    };
+}
+
+fn bool_from_code(value: byte) -> (result: bool) {
+    return value == 1;
+}
+
+fn status_code_valid(value: byte) -> (result: bool) {
+    return value <= 2;
+}
+
+fn bool_code_valid(value: byte) -> (result: bool) {
+    return value <= 1;
+}
+
+fn phase_is_after(value: LoopPhase) -> (result: bool) {
+    return match value {
+        InitialVerification => false,
+        AfterRepair => true,
+    };
+}
+
+fn evidence_status(input: ForgeLoopInput) -> (result: statlib.Status) {
+    let evidence: ForgeEvidenceState = input.evidence;
+    let initial: statlib.Status = statlib.dominate(
+        evidence.test_status,
+        select(evidence.test_present, statlib.Status.PASS, statlib.Status.UNKNOWN)
+    );
+    let identity: statlib.Status = select(
+        evidence.identity_binding_valid,
+        statlib.Status.PASS,
+        statlib.Status.UNKNOWN
+    );
+    let freshness: statlib.Status = select(
+        evidence.evidence_fresh,
+        statlib.Status.PASS,
+        statlib.Status.UNKNOWN
+    );
+    let provider: statlib.Status = select(
+        evidence.provider_evidence_present,
+        statlib.Status.PASS,
+        statlib.Status.UNKNOWN
+    );
+    let post_status: statlib.Status = select(
+        boollib.bool_not(phase_is_after(input.phase)),
+        statlib.Status.PASS,
+        select(evidence.post_repair_test_present, evidence.post_repair_test_status, statlib.Status.UNKNOWN)
+    );
+    let plan_status: statlib.Status = select(
+        evidence.plan_present && boollib.bool_not(evidence.plan_current),
+        statlib.Status.UNKNOWN,
+        statlib.Status.PASS
+    );
+    let rebound_status: statlib.Status = select(
+        phase_is_after(input.phase) && evidence.plan_present && boollib.bool_not(evidence.rebound_plan_present),
+        statlib.Status.UNKNOWN,
+        select(
+            phase_is_after(input.phase) && evidence.plan_present && boollib.bool_not(evidence.rebound_plan_current),
+            statlib.Status.UNKNOWN,
+            statlib.Status.PASS
+        )
+    );
+    let proof: statlib.Status = select(
+        boollib.bool_not(evidence.proof_required),
+        statlib.Status.PASS,
+        select(evidence.family_proof_present, evidence.family_proof_status, statlib.Status.UNKNOWN)
+    );
+    return statlib.dominate4(
+        statlib.dominate4(initial, identity, freshness, provider),
+        post_status,
+        statlib.dominate(proof, plan_status),
+        rebound_status
+    );
+}
+
+fn terminal(
+    phase: LoopPhase,
+    status_value: statlib.Status,
+    decision_value: LoopDecision,
+    reason_value: StopReason
+) -> (result: ForgeLoopDecision) {
+    let state: ForgeLoopState = ForgeLoopState {
+        phase: phase,
+        status: status_value,
+        decision: decision_value,
+        next_action: NextAction.None,
+        stop_reason: reason_value
+    };
+    return ForgeLoopDecision {
+        state: state,
+        status: status_value,
+        decision: decision_value,
+        next_action: NextAction.None,
+        stop_reason: reason_value,
+        terminal: true,
+        valid: true
+    };
+}
+
+fn action(
+    phase: LoopPhase,
+    status_value: statlib.Status,
+    decision_value: LoopDecision,
+    next_action_value: NextAction,
+    reason_value: StopReason
+) -> (result: ForgeLoopDecision) {
+    let state: ForgeLoopState = ForgeLoopState {
+        phase: phase,
+        status: status_value,
+        decision: decision_value,
+        next_action: next_action_value,
+        stop_reason: reason_value
+    };
+    return ForgeLoopDecision {
+        state: state,
+        status: status_value,
+        decision: decision_value,
+        next_action: next_action_value,
+        stop_reason: reason_value,
+        terminal: false,
+        valid: true
+    };
+}
+
+fn invalid(input: ForgeLoopInput) -> (result: ForgeLoopDecision) {
+    return terminal(input.phase, statlib.Status.UNKNOWN, LoopDecision.StopUnknown, StopReason.InvalidInput);
+}
+
+fn initial_decision(input: ForgeLoopInput) -> (result: ForgeLoopDecision) {
+    let evidence: ForgeEvidenceState = input.evidence;
+    let status_value: statlib.Status = evidence_status(input);
+    if boollib.bool_not(evidence.identity_binding_valid) {
+        return terminal(input.phase, status_value, LoopDecision.StopUnknown, StopReason.IdentityBindingInvalid);
+    }
+    if boollib.bool_not(evidence.evidence_fresh) {
+        return terminal(input.phase, status_value, LoopDecision.StopUnknown, StopReason.EvidenceStale);
+    }
+    if boollib.bool_not(evidence.provider_evidence_present) || boollib.bool_not(evidence.test_present) {
+        return terminal(input.phase, status_value, LoopDecision.StopUnknown, StopReason.ProviderEvidenceMissing);
+    }
+    if status_code(evidence.test_status) == 1 {
+        if boollib.bool_not(evidence.failing_execution_present) {
+            return terminal(input.phase, status_value, LoopDecision.StopFail, StopReason.FailingExecutionMissing);
+        }
+        if status_code(evidence.debug_status) != 0 {
+            return action(
+                input.phase,
+                status_value,
+                LoopDecision.RequestDiagnosis,
+                NextAction.Diagnose,
+                select(status_code(evidence.debug_status) == 2, StopReason.DiagnosisMissing, StopReason.DiagnosisInsufficient)
+            );
+        }
+        if boollib.bool_not(evidence.repair_requested) {
+            return terminal(input.phase, status_value, LoopDecision.StopFail, StopReason.RepairNotRequested);
+        }
+        if boollib.bool_not(evidence.repair_arguments_complete) {
+            return terminal(input.phase, status_value, LoopDecision.StopFail, StopReason.RepairArgumentsIncomplete);
+        }
+        if boollib.bool_not(evidence.repair_admissible) {
+            return terminal(input.phase, status_value, LoopDecision.StopFail, StopReason.RepairInadmissible);
+        }
+        if boollib.bool_not(evidence.source_changed) {
+            return action(input.phase, status_value, LoopDecision.RequestRepair, NextAction.Repair, StopReason.None);
+        }
+        return terminal(input.phase, status_value, LoopDecision.StopUnknown, StopReason.SourceChangeMissing);
+    }
+    if status_code(evidence.test_status) == 2 {
+        return terminal(input.phase, status_value, LoopDecision.StopUnknown, StopReason.InitialEvidenceMissing);
+    }
+    if evidence.plan_present && boollib.bool_not(evidence.plan_current) {
+        return terminal(input.phase, status_value, LoopDecision.StopUnknown, StopReason.PlanStale);
+    }
+    if evidence.proof_required {
+        if boollib.bool_not(evidence.family_proof_present) {
+            return action(input.phase, status_value, LoopDecision.RequireFamilyProof, NextAction.FamilyProof, StopReason.FamilyProofMissing);
+        }
+        if status_code(evidence.family_proof_status) == 1 {
+            return terminal(input.phase, status_value, LoopDecision.StopFail, StopReason.FamilyProofFail);
+        }
+        if status_code(evidence.family_proof_status) != 0 || boollib.bool_not(evidence.proof_sufficient) {
+            return terminal(input.phase, status_value, LoopDecision.StopUnknown, select(status_code(evidence.family_proof_status) == 0, StopReason.FamilyProofInsufficient, StopReason.FamilyProofUnknown));
+        }
+    }
+    return terminal(input.phase, status_value, LoopDecision.StopPass, StopReason.InitialPass);
+}
+
+fn after_repair_decision(input: ForgeLoopInput) -> (result: ForgeLoopDecision) {
+    let evidence: ForgeEvidenceState = input.evidence;
+    let status_value: statlib.Status = evidence_status(input);
+    if boollib.bool_not(evidence.identity_binding_valid) {
+        return terminal(input.phase, status_value, LoopDecision.StopUnknown, StopReason.IdentityBindingInvalid);
+    }
+    if boollib.bool_not(evidence.evidence_fresh) {
+        return terminal(input.phase, status_value, LoopDecision.StopUnknown, StopReason.EvidenceStale);
+    }
+    if boollib.bool_not(evidence.source_changed) {
+        return terminal(input.phase, status_value, LoopDecision.StopUnknown, StopReason.SourceChangeMissing);
+    }
+    if evidence.plan_present {
+        if boollib.bool_not(evidence.rebound_plan_present) {
+            return action(input.phase, status_value, LoopDecision.RequireReboundPlan, NextAction.ReboundPlan, StopReason.ReboundPlanMissing);
+        }
+        if boollib.bool_not(evidence.rebound_plan_current) {
+            return terminal(input.phase, status_value, LoopDecision.StopUnknown, StopReason.ReboundPlanStale);
+        }
+    }
+    if boollib.bool_not(evidence.post_repair_test_present) {
+        return action(input.phase, status_value, LoopDecision.RunSelectedVerification, NextAction.SelectedVerification, StopReason.PostRepairVerificationMissing);
+    }
+    if status_code(evidence.post_repair_test_status) == 1 {
+        return terminal(input.phase, status_value, LoopDecision.StopFail, StopReason.PostRepairVerificationFail);
+    }
+    if status_code(evidence.post_repair_test_status) == 2 {
+        return terminal(input.phase, status_value, LoopDecision.StopUnknown, StopReason.PostRepairVerificationUnknown);
+    }
+    if evidence.proof_required {
+        if boollib.bool_not(evidence.family_proof_present) {
+            return action(input.phase, status_value, LoopDecision.RequireFamilyProof, NextAction.FamilyProof, StopReason.FamilyProofMissing);
+        }
+        if status_code(evidence.family_proof_status) == 1 {
+            return terminal(input.phase, status_value, LoopDecision.StopFail, StopReason.FamilyProofFail);
+        }
+        if status_code(evidence.family_proof_status) != 0 || boollib.bool_not(evidence.proof_sufficient) {
+            return terminal(input.phase, status_value, LoopDecision.StopUnknown, select(status_code(evidence.family_proof_status) == 0, StopReason.FamilyProofInsufficient, StopReason.FamilyProofUnknown));
+        }
+    }
+    return terminal(input.phase, statlib.Status.PASS, LoopDecision.Finalize, StopReason.AssuranceComplete);
+}
+
+fn decide(input: ForgeLoopInput) -> (result: ForgeLoopDecision) {
+    if boollib.bool_not(input.valid) {
+        return invalid(input);
+    }
+    return match input.phase {
+        InitialVerification => initial_decision(input),
+        AfterRepair => after_repair_decision(input),
+    };
+}
+
+fn phase_from_code(value: byte) -> (result: LoopPhase) {
+    if value == 1 {
+        return LoopPhase.AfterRepair;
+    }
+    return LoopPhase.InitialVerification;
+}
+
+fn decode_wire(data: [byte; up_to 1024]) -> (result: WireEnvelope) {
+    let shape_valid: bool = data.len == 24
+        && data[0] == 70
+        && data[1] == 1
+        && data[2] <= 1;
+    let statuses_valid: bool = data.len == 24
+        && status_code_valid(data[3])
+        && status_code_valid(data[4])
+        && status_code_valid(data[5])
+        && status_code_valid(data[6]);
+    let flags_valid: bool = data.len == 24
+        && bool_code_valid(data[7])
+        && bool_code_valid(data[8])
+        && bool_code_valid(data[9])
+        && bool_code_valid(data[10])
+        && bool_code_valid(data[11])
+        && bool_code_valid(data[12])
+        && bool_code_valid(data[13])
+        && bool_code_valid(data[14])
+        && bool_code_valid(data[15])
+        && bool_code_valid(data[16])
+        && bool_code_valid(data[17])
+        && bool_code_valid(data[18])
+        && bool_code_valid(data[19])
+        && bool_code_valid(data[20])
+        && bool_code_valid(data[21])
+        && bool_code_valid(data[22])
+        && bool_code_valid(data[23]);
+    let wire_valid: bool = shape_valid && statuses_valid && flags_valid;
+    let evidence: ForgeEvidenceState = ForgeEvidenceState {
+        test_status: status_from_code(select(data.len == 24, data[3], 2)),
+        post_repair_test_status: status_from_code(select(data.len == 24, data[4], 2)),
+        debug_status: status_from_code(select(data.len == 24, data[5], 2)),
+        family_proof_status: status_from_code(select(data.len == 24, data[6], 2)),
+        test_present: bool_from_code(select(data.len == 24, data[7], 0)),
+        failing_execution_present: bool_from_code(select(data.len == 24, data[8], 0)),
+        post_repair_test_present: bool_from_code(select(data.len == 24, data[9], 0)),
+        family_proof_present: bool_from_code(select(data.len == 24, data[10], 0)),
+        plan_present: bool_from_code(select(data.len == 24, data[11], 0)),
+        plan_current: bool_from_code(select(data.len == 24, data[12], 0)),
+        repair_requested: bool_from_code(select(data.len == 24, data[13], 0)),
+        repair_arguments_complete: bool_from_code(select(data.len == 24, data[14], 0)),
+        repair_admissible: bool_from_code(select(data.len == 24, data[15], 0)),
+        source_changed: bool_from_code(select(data.len == 24, data[16], 0)),
+        rebound_plan_present: bool_from_code(select(data.len == 24, data[17], 0)),
+        rebound_plan_current: bool_from_code(select(data.len == 24, data[18], 0)),
+        proof_required: bool_from_code(select(data.len == 24, data[19], 0)),
+        proof_sufficient: bool_from_code(select(data.len == 24, data[20], 0)),
+        identity_binding_valid: bool_from_code(select(data.len == 24, data[21], 0)),
+        evidence_fresh: bool_from_code(select(data.len == 24, data[22], 0)),
+        provider_evidence_present: bool_from_code(select(data.len == 24, data[23], 0))
+    };
+    let phase: LoopPhase = phase_from_code(select(data.len == 24, data[2], 0));
+    return WireEnvelope {
+        input: ForgeLoopInput { phase: phase, evidence: evidence, valid: wire_valid },
+        valid: wire_valid
+    };
+}
+
+fn decision_code(value: LoopDecision) -> (result: byte) {
+    return match value {
+        StopPass => 0,
+        StopFail => 1,
+        StopUnknown => 2,
+        RequestDiagnosis => 3,
+        RequestRepair => 4,
+        RequireReboundPlan => 5,
+        RunSelectedVerification => 6,
+        RequireFamilyProof => 7,
+        Finalize => 8,
+    };
+}
+
+fn next_action_code(value: NextAction) -> (result: byte) {
+    return match value {
+        None => 0,
+        Diagnose => 1,
+        Repair => 2,
+        ReboundPlan => 3,
+        SelectedVerification => 4,
+        FamilyProof => 5,
+    };
+}
+
+fn reason_code(value: StopReason) -> (result: byte) {
+    return match value {
+        None => 0,
+        InitialPass => 1,
+        InitialFail => 2,
+        InitialEvidenceMissing => 3,
+        FailingExecutionMissing => 4,
+        DiagnosisMissing => 5,
+        DiagnosisInsufficient => 6,
+        RepairNotRequested => 7,
+        RepairArgumentsIncomplete => 8,
+        RepairInadmissible => 9,
+        PlanStale => 10,
+        SourceChangeMissing => 11,
+        ReboundPlanMissing => 12,
+        ReboundPlanStale => 13,
+        PostRepairVerificationMissing => 14,
+        PostRepairVerificationFail => 15,
+        PostRepairVerificationUnknown => 16,
+        FamilyProofMissing => 17,
+        FamilyProofFail => 18,
+        FamilyProofUnknown => 19,
+        FamilyProofInsufficient => 20,
+        IdentityBindingInvalid => 21,
+        EvidenceStale => 22,
+        ProviderEvidenceMissing => 23,
+        AssuranceComplete => 24,
+        InvalidInput => 25,
+    };
+}
+
+fn phase_code(value: LoopPhase) -> (result: byte) {
+    return match value {
+        InitialVerification => 0,
+        AfterRepair => 1,
+    };
+}
+
+// Fixed six-byte application result: schema, status, decision, next action,
+// stop reason, phase. The host adapter validates all six positions before it
+// projects the result into Forge's JSON assurance document.
+fn encode_decision(value: ForgeLoopDecision) -> (result: [byte; 6]) {
+    return [
+        1,
+        status_code(value.status),
+        decision_code(value.decision),
+        next_action_code(value.next_action),
+        reason_code(value.stop_reason),
+        phase_code(value.state.phase)
+    ];
+}
+
+fn wire_decision(data: [byte; up_to 1024]) -> (result: [byte; 6]) {
+    let envelope: WireEnvelope = decode_wire(data);
+    let decision: ForgeLoopDecision = decide(envelope.input);
+    return encode_decision(decision);
+}

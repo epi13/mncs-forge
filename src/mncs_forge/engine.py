@@ -100,6 +100,8 @@ class Forge:
         self._mncs_development_service = MncsDevelopmentService(
             config=config,
             executor=self._executor,
+            native=self._native,
+            native_mode=native_mode,
         )
         self._development_service = DevelopmentWorkflowService(
             config=config,

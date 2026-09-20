@@ -10,6 +10,7 @@ use mncs.core.status as statlib;
 use mncs.core.version as verlib;
 use mncs.forge.lifecycle as lifelib;
 use mncs.forge.bundle as bundlelib;
+use mncs.forge.assurance as assurancelib;
 use mncs.forge.reconciliation as reconlib;
 use mncs.forge.records as recslib;
 use mncs.forge.readiness as readylib;
@@ -88,6 +89,12 @@ fn evidence_readiness(input: readylib.ReadinessInput) -> (result: readylib.Readi
 
 fn bundle_preconditions(input: bundlelib.BundleInput) -> (result: bundlelib.BundleResult) {
     return bundlelib.project(input);
+}
+
+// Canonical Forge assurance entrypoint. Provider facts are normalized at the
+// host membrane; this function owns Forge's bounded workflow disposition.
+fn assurance_loop(input: assurancelib.ForgeLoopInput) -> (result: assurancelib.ForgeLoopDecision) {
+    return assurancelib.decide(input);
 }
 
 fn status_join(first: statlib.Status, second: statlib.Status, third: statlib.Status, fourth: statlib.Status) -> (result: statlib.Status) {

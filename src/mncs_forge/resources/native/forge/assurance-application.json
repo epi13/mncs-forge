@@ -1,0 +1,11 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-forge.assurance-loop",
+  "source": "assurance_application.mncs",
+  "module": "mncs.forge.assurance_application.v1",
+  "entry_function": "main",
+  "profile": "0.16",
+  "libraries": [],
+  "environment_keys": [],
+  "required_capabilities": []
+}
