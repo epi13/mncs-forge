@@ -1,10 +1,14 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-forge",
-  "revision": 4,
+  "revision": 5,
   "manifest_location": "in-repository",
   "authority": {
     "note": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority."
+  },
+  "verification": {
+    "schema_version": "mncs-family.verification-obligation-inventory/v1",
+    "obligation_inventory": ".mncs/verification-obligations.json"
   },
   "organization": {
     "layout": "mncs.repository-layout/1",
@@ -20,14 +24,19 @@
   },
   "contracts": {
     "provides": [
-      {"contract": "assurance-workflow", "version": "1", "kind": "candidate-evidence-workflow", "stability": "experimental", "fingerprint_sources": ["src/", "schemas/", "tests/"]}
+      {"contract": "assurance-workflow", "version": "1", "kind": "candidate-evidence-workflow", "stability": "experimental", "fingerprint_sources": ["src/", "schemas/"]}
     ],
     "consumes": [
+      {"contract": "ravel.verification-plan", "envelope": {"op": "any"}, "required": true},
+      {"contract": "mncs-test.test-provider", "envelope": {"op": "any"}, "required": true},
+      {"contract": "mncs-debug.debugger", "envelope": {"op": "any"}, "required": false},
+      {"contract": "mncs-actions.family-verification", "envelope": {"op": "any"}, "required": false},
       {"contract": "mncs-language.cli-toolchain", "envelope": {"op": "any"}, "required": false},
       {"contract": "mncs-commons.pressure-registry", "envelope": {"op": "any"}, "required": false}
     ],
     "tests": [
-      {"test": "forge-tests", "covers": ["assurance-workflow"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest", "tests", "-q"]}}
+      {"test": "forge-assurance-regressions", "covers": ["assurance-workflow"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest", "tests", "-q", "--ignore=tests/test_mncs_assurance.py"]}},
+      {"test": "forge-assurance-differential-oracle", "covers": ["assurance-workflow"], "obligation": "family-integration", "command": {"argv": ["python3", "-m", "pytest", "tests/test_mncs_assurance.py", "-q"]}}
     ]
   }
 }

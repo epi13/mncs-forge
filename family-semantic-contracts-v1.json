@@ -2,7 +2,14 @@
   "schema_version": "commons.mncs.semantic-contract-declarations/v1",
   "repository_id": "mncs-forge",
   "revision": "1",
-  "provides": [],
+  "provides": [
+    {
+      "contract_identity": "mncs.assurance-workflow/1",
+      "contract_revision": "1",
+      "exported_identity": "mncs-forge:assurance-workflow",
+      "evidence": "src/mncs_forge/resources/native/forge/assurance-application.json"
+    }
+  ],
   "consumes": [
     {
       "contract_identity": "mncs.verification-plan/1",
@@ -13,6 +20,66 @@
         "check_identity": "mncs-forge:verification-plan-routing",
         "executor": "mncs-forge",
         "surface": "selected-consumer-routing",
+        "evidence": "family-verification-checks-v1.json"
+      }
+    },
+    {
+      "contract_identity": "mncs.test-result/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge:test-result",
+      "evidence": "src/mncs_forge/application/mncs_development.py",
+      "verification": {
+        "check_identity": "mncs-forge:test-result-input",
+        "executor": "mncs-forge",
+        "surface": "provider-test-evidence",
+        "evidence": "family-verification-checks-v1.json"
+      }
+    },
+    {
+      "contract_identity": "mncs.debugger/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge:debugger",
+      "evidence": "src/mncs_forge/application/mncs_development.py",
+      "verification": {
+        "check_identity": "mncs-forge:debugger-input",
+        "executor": "mncs-forge",
+        "surface": "failure-diagnostic-evidence",
+        "evidence": "family-verification-checks-v1.json"
+      }
+    },
+    {
+      "contract_identity": "mncs.family-verification/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge:family-verification",
+      "evidence": "src/mncs_forge/application/mncs_development.py",
+      "verification": {
+        "check_identity": "mncs-forge:family-verification-input",
+        "executor": "mncs-forge",
+        "surface": "affected-family-proof",
+        "evidence": "family-verification-checks-v1.json"
+      }
+    },
+    {
+      "contract_identity": "mncs.cli-toolchain/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge:cli-toolchain",
+      "evidence": "src/mncs_forge/mncs_native.py",
+      "verification": {
+        "check_identity": "mncs-forge:cli-toolchain-input",
+        "executor": "mncs-forge",
+        "surface": "native-compiler-invocation",
+        "evidence": "family-verification-checks-v1.json"
+      }
+    },
+    {
+      "contract_identity": "mncs.pressure-registry/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge:pressure-registry",
+      "evidence": "src/mncs_forge/application/mncs_development.py",
+      "verification": {
+        "check_identity": "mncs-forge:pressure-registry-input",
+        "executor": "mncs-forge",
+        "surface": "pressure-routing",
         "evidence": "family-verification-checks-v1.json"
       }
     }
