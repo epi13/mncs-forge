@@ -1,0 +1,52 @@
+{
+  "schema_version": "mncs-family.verification-obligation-inventory/v1",
+  "repository": "mncs-forge",
+  "revision": 1,
+  "obligations": [
+    {
+      "identity": "mncs-forge.assurance.native-state-machine",
+      "title": "Forge native assurance consumes provider evidence and owns Forge disposition",
+      "guarantee_domain": "family_contract",
+      "evidence_role": "canonical_regression",
+      "lifecycle": "permanent",
+      "scope": "local",
+      "subjects": ["mncs-forge:assurance", "assurance-workflow"],
+      "invalidation_dependencies": ["src/mncs_forge/", "schemas/", "ravel.verification-plan", "mncs-test.test-provider"],
+      "executor": {
+        "provider": "mncs-forge",
+        "kind": "external_integration",
+        "entrypoint": "mncs-forge native assurance"
+      },
+      "evidence_identity": {
+        "subject_fields": ["candidate_identity", "provider_evidence_identity"],
+        "definition_fields": ["production_contract_identity", "assurance_application_identity"],
+        "execution_fields": ["assurance_run_identity", "disposition_identity"]
+      }
+    },
+    {
+      "identity": "mncs-forge.assurance.differential-vectors",
+      "title": "Former host/native parity vectors remain available as explicit differential evidence",
+      "guarantee_domain": "family_contract",
+      "evidence_role": "differential_oracle",
+      "lifecycle": "reference_only",
+      "scope": "local",
+      "subjects": ["mncs-forge:assurance-differential"],
+      "invalidation_dependencies": ["tests/test_mncs_assurance.py", "tests/fixtures/"],
+      "executor": {
+        "provider": "mncs-forge",
+        "kind": "differential_oracle",
+        "entrypoint": "python3 -m pytest tests/test_mncs_assurance.py -q"
+      },
+      "evidence_identity": {
+        "subject_fields": ["fixture_identity", "native_subject_identity"],
+        "definition_fields": ["differential_definition_identity"],
+        "execution_fields": ["oracle_observation_identity"]
+      },
+      "retirement": {
+        "trigger": "native assurance state machine remains canonical and provider evidence contracts are current",
+        "replacement": "mncs-forge.assurance.native-state-machine",
+        "retain_as": "scheduled"
+      }
+    }
+  ]
+}

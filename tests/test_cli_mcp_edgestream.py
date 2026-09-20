@@ -21,6 +21,16 @@ def installed_mcp_executable() -> Path:
     return Path(__file__).parents[1] / ".venv" / "bin" / "mncs-forge-server"
 
 
+def required_mcp_executable() -> Path:
+    executable = installed_mcp_executable()
+    if not executable.is_file():
+        pytest.skip(
+            "INFRASTRUCTURE_FAILURE: missing prerequisite mncs-forge-server; "
+            "provision the Forge environment before running MCP integration tests"
+        )
+    return executable
+
+
 def test_cli_smoke(project: Path) -> None:
     code, result = run(["--config", str(project / "mncs-forge.toml"), "config", "validate"])
     assert code == 0
@@ -35,7 +45,7 @@ def test_cli_smoke(project: Path) -> None:
 # headroom while a wedged server still fails loudly.
 def test_direct_mcp_protocol_smoke(project: Path) -> None:
     root = Path(__file__).parents[1]
-    executable = installed_mcp_executable()
+    executable = required_mcp_executable()
     result = subprocess.run(
         [
             sys.executable,
@@ -53,7 +63,7 @@ def test_direct_mcp_protocol_smoke(project: Path) -> None:
 
 def test_mcp_health_probe_reports_healthy(project: Path) -> None:
     root = Path(__file__).parents[1]
-    executable = installed_mcp_executable()
+    executable = required_mcp_executable()
     result = subprocess.run(
         [
             sys.executable,
@@ -71,7 +81,7 @@ def test_mcp_health_probe_reports_healthy(project: Path) -> None:
 
 
 def test_mcp_startup_reports_missing_configuration(tmp_path: Path) -> None:
-    executable = installed_mcp_executable()
+    executable = required_mcp_executable()
     result = subprocess.run(
         [str(executable), "--config", str(tmp_path / "missing.toml"), "--mode", "development"],
         input="",
@@ -205,7 +215,7 @@ async def _provider_mcp_calls(executable: Path, config: Path) -> None:
 
 
 def test_mcp_provider_list_probe_and_blockers(project: Path) -> None:
-    executable = installed_mcp_executable()
+    executable = required_mcp_executable()
     asyncio.run(_provider_mcp_calls(executable, project / "mncs-forge.toml"))
 
 
