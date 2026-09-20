@@ -74,6 +74,8 @@ development planning. The root README remains a short project entrypoint.
   full quality gate and comparative provider evidence for the language-owned compiler consumer.
 - [Compiler experiment persistence validation](development-evidence/compiler-experiment-persistence-2026-08.md) —
   record/ledger/operation validation and comparative provider evidence for durable experiments.
+- [Store migration readiness](store-migration-readiness.md) — Forge's measured
+  persistence mapping and gates before `mncs-store` can become canonical.
 
 ## Documentation rules
 
