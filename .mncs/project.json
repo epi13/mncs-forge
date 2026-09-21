@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-forge",
-  "revision": 5,
+  "revision": 6,
   "manifest_location": "in-repository",
   "authority": {
     "note": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority."
@@ -18,9 +18,11 @@
       {"path": "src/mncs_forge/mncs_native.py", "class": "host-boundary", "authority": "none", "note": "Bounded compiler, process, stdin/stdout, and generic compiled-application adapter for native Forge modules.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "process", "semantic_role": "platform-adapter"}},
       {"path": "src/mncs_forge/resources/native/forge/", "class": "canonical", "authority": "mncs-forge", "note": "Native Forge semantic providers, including the canonical typed assurance loop and its generic run-app descriptor.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
       {"path": "src/mncs_forge/resources/native/forge/assurance-application.json", "class": "canonical", "authority": "mncs-forge", "note": "Canonical native Forge assurance application descriptor for mncs run-app and the generic compiled application cache.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
+      {"path": "src/mncs_forge/store_record_store.py", "class": "canonical", "authority": "mncs-forge", "note": "Forge domain binding over the supported mncs-store embedded consumer boundary.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "storage", "semantic_role": "canonical-adapter"}},
+      {"path": "src/mncs_forge/migration.py", "class": "migration-only", "authority": "reference", "note": "Authenticates historical Forge JSONL and imports typed records with source and transformation provenance.", "classification": {"authority": "reference", "lifecycle": "active", "boundary_kind": "migration", "semantic_role": "compatibility-adapter"}},
       {"path": "tests/test_mncs_assurance.py", "class": "differential-oracle", "authority": "reference", "note": "Bounded parity vectors for the former host failure-loop policy and the native assurance state machine.", "classification": {"authority": "reference", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "differential-oracle"}},
       {"path": "tests/fixtures/", "class": "differential-oracle", "authority": "reference", "note": "Bounded provider and workflow evidence fixtures.", "classification": {"authority": "reference", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "differential-oracle"}},
-      {"path": "docs/store-migration-readiness.md", "class": "differential-oracle", "authority": "reference", "note": "Measured Forge-to-Store mapping and executable parity gates; it does not declare Store canonical before proof.", "classification": {"authority": "reference", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "differential-oracle"}}
+      {"path": "docs/store-migration-readiness.md", "class": "canonical", "authority": "mncs-forge", "note": "Current Forge Store-backed persistence boundary, proof surface, and narrow historical migration boundary.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "storage", "semantic_role": "architecture"}}
     ]
   },
   "contracts": {
@@ -34,10 +36,17 @@
       {"contract": "mncs-actions.family-verification", "envelope": {"op": "any"}, "required": false},
       {"contract": "mncs-language.cli-toolchain", "envelope": {"op": "any"}, "required": false},
       {"contract": "mncs-commons.pressure-registry", "envelope": {"op": "any"}, "required": false}
+      ,{"contract": "mncs-store.persistent-object", "version": "1", "kind": "storage-contract", "required": true, "scope": "native Forge persistence"}
+      ,{"contract": "mncs-store.scalable-content", "version": "1", "kind": "storage-contract", "required": true, "scope": "large typed Forge records"}
+      ,{"contract": "mncs-store.durable-publication", "version": "1", "kind": "storage-contract", "required": true, "scope": "generation publication and recovery"}
+      ,{"contract": "mncs-store.provenance", "version": "1", "kind": "storage-contract", "required": true, "scope": "legacy import and native record provenance"}
+      ,{"contract": "mncs-store.typed-relations", "version": "2", "kind": "storage-contract", "required": true, "scope": "Forge lineage and evidence relationships"}
+      ,{"contract": "mncs-store.commit-feed", "version": "1", "kind": "storage-contract", "required": true, "scope": "rebuildable Forge index projection"}
     ],
     "tests": [
       {"test": "forge-assurance-regressions", "covers": ["assurance-workflow"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest", "tests", "-q", "--ignore=tests/test_mncs_assurance.py"]}},
       {"test": "forge-assurance-differential-oracle", "covers": ["assurance-workflow"], "obligation": "family-integration", "command": {"argv": ["python3", "-m", "pytest", "tests/test_mncs_assurance.py", "-q"]}}
+      ,{"test": "forge-store-persistence", "covers": ["mncs-store.persistent-object", "mncs-store.scalable-content", "mncs-store.durable-publication", "mncs-store.provenance", "mncs-store.typed-relations", "mncs-store.commit-feed"], "obligation": "family-integration", "command": {"argv": ["python3", "-m", "pytest", "tests/test_store_backed_record_store.py", "-q"]}}
     ]
   }
 }

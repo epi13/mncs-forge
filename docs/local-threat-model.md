@@ -60,14 +60,14 @@ Process exit zero alone is not verifier `PASS`.
 | Provider/executable/environment identity | integrity, freshness | executable identity, provider identity/version, allowlisted environment and drift checks |
 | Verifier action/result lineage | integrity, freshness | typed records, candidate/provider/configuration/input identities, terminal action rules |
 | Freeze bindings and evaluation records | integrity, authority | selection/evidence/freeze revalidation and evaluator entry authorization |
-| Ledger and immutable record companions | integrity, recoverability | hash chain, immutable companions, transactional publication, verification and recovery |
+| Store objects, generations, and descriptors | integrity, recoverability | content/tree identities, domain bindings, durable publication, verification and recovery |
 | Transaction journals and derived indexes | availability, integrity | durable staging, expected-head checks, startup recovery, rebuildable index |
 | CLI/MCP operation authority | authority, integrity | one canonical registry, mode/mutation metadata, centralized invocation gate |
 | Disclosure boundaries | confidentiality | evaluator status-only policy and redaction-before-identity behavior |
 | Package/runtime installation | integrity | wheel/sdist audit, import-origin check, isolated install, `pip check`, CI matrix |
 | Benchmark/development evidence | classification, interpretation | machine-readable non-normative evidence class and environment metadata |
 
-The local ledger is an integrity detector for the history it can read. It is not external
+The historical local ledger is an integrity detector for the legacy history it can read. It is not external
 timestamping, independent custody, or a guarantee that the current filesystem was not replaced by a
 privileged local attacker.
 
@@ -128,10 +128,10 @@ architecture is needed.
 | Lifecycle bypass or contradictory terminal state | invalid epoch/candidate/freeze/action ordering or duplicate terminal result | centralized projection, lineage, freeze, and terminality rules; prevent | `test_state_machine.py`, `test_state_machine_properties.py` | controlled for modeled transitions |
 | Evaluator disclosure becomes repair feedback | evaluator detail enables same-epoch repair | evaluator-only mode and status-only disclosure; prevent/disclose | evaluator disclosure tests | controlled for declared policy; not secrecy proof |
 | Freeze or authority identity drift | protected material changes after selection/freeze | identity maps and drift checks invalidate authorization; prevent/detect | freeze/evaluator drift tests and provider identity tests | controlled for observed identities |
-| Ledger truncation, reorder, companion replacement, payload mutation, or rehash | local history or immutable files change | hash-chain and companion verification; detect/fail closed | ledger, RecordStore, recovery, and compatibility corruption tests | detected-only against whole-state replacement |
+| Store chunk/node/generation corruption or legacy-history truncation/reorder | current Store state or imported history changes | content/tree/generation verification; legacy hash-chain verification before import; detect/fail closed | Store corruption, recovery, and compatibility tests | detected-only against whole-state replacement |
 | Whole-history replacement | local attacker controls filesystem/root and replaces all state | no external checkpoint or witness exists in current Forge | ledger verification tests | future-control-required |
 | Transaction interruption or partial publication | crash/power loss/process exit during commit | journaled staging, expected-head binding, startup recovery, terminal UNKNOWN recovery | RecordStore/recovery failpoint and process tests | controlled for modeled failures |
-| Concurrent writers or stale index | multiple writers race or derived index is corrupt | locks, sequence/head checks, idempotency, rebuildable index | concurrent RecordStore/Ledger and index tests | controlled for tested concurrency; DoS remains |
+| Concurrent writers or stale index | multiple writers race or derived index is corrupt | Store publication lock, generation checks, idempotency, rebuildable index | concurrent Store and index tests | controlled for tested concurrency; DoS remains |
 | Process escape or incomplete child cleanup | timed-out/overflowing process creates children; platform semantics differ | POSIX process groups; Windows termination is not equivalent process-group proof | execution timeout/overflow/cleanup and Windows collector tests | partially-controlled; Windows weaker |
 | Network access by local provider | configured executable uses ambient network | capability reports network isolation `not-provided`; no isolation | `test_local_runner_capabilities_are_explicit` | future-control-required |
 | Filesystem access by local provider | temporary workspace is mistaken for an access-control boundary | copied/reduced workspace and path policy, but ambient host access remains | config/path/workflow tests | accepted-local-risk; future isolation required |
@@ -159,7 +159,7 @@ the entire unanchored history.
 | Replaceable runner boundary | satisfied | `Runner`, `LocalProcessRunner`, architecture tests |
 | Adversarial Provider Protocol corpus | satisfied | malformed corpus plus Hypothesis tests |
 | Adversarial subprocess corpus | satisfied | validation, bounds, timeout, shell, stdin, cleanup tests |
-| Ledger/concurrency corpus | satisfied | mutation, companion, journal, index, writer tests |
+| Store/recovery/concurrency corpus | satisfied for the Store-backed path | chunk/node/generation mutation, journal, index, writer tests |
 | Wheel/sdist install and historical-state gate | satisfied for this increment | `scripts/verify-package.py`; all 3 OS × 3 Python CI rows passed and Windows artifact logs were confirmed |
 | CLI/MCP inventory stability | satisfied | operation registry and compatibility tests |
 | Reviewed local threat model | this iteration | this document and linked evidence |

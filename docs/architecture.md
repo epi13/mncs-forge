@@ -44,7 +44,7 @@ workflow execution, custody, and file writes.
 ## Control-plane composition
 
 `Forge` is the stable compatibility and composition facade used by both existing interfaces. It
-constructs one shared ledger, transactional store, lifecycle context, project observer, and bounded
+constructs one Store-backed record boundary, lifecycle context, project observer, and bounded
 command executor, then delegates public behavior to cohesive application services:
 
 ```text
@@ -54,11 +54,12 @@ CLI / MCP
     -> project | provider | candidate | workflow | evaluation | evidence | recovery services
     -> typed records and ForgeStateMachine
     -> RecordReader | RecordCommitter | Runner | ProjectObserver ports
-    -> local ledger/store/process/filesystem adapters
+    -> Store-backed record boundary / process / filesystem adapters
 ```
 
 The incremental package layout keeps stable domain and storage modules such as `records.py`,
-`state_machine.py`, `ledger.py`, and `record_store.py` in their established locations. Application
+`state_machine.py`, `record_store.py`, and the explicit legacy `ledger.py` migration reader in
+their established locations. Application
 services live under `application/`; inward-facing protocols live in `ports.py`; local execution and
 filesystem observation implementations live in `adapters.py`. This avoids compatibility churn
 while making dependency direction enforceable.
@@ -82,7 +83,7 @@ Forge extensions attach at explicit inward-facing boundaries:
 | Provider | declared Provider Protocol workflow and capability probe | analyzer authority, conformance, or independence |
 | Micro-verifier | typed verifier declaration over a declared provider method | a whole-program proof, result cache, or normative validator |
 | Application service | focused service with typed ports and shared composition-root dependencies | a replacement lifecycle policy or interface adapter |
-| Storage | `RecordReader`/`RecordCommitter` ports implemented by `LocalRecordStore` | external anchoring, custody, witnessing, or remote storage |
+| Storage | `RecordReader`/`RecordCommitter` ports implemented by `StoreBackedRecordStore` over `mncs_store.EmbeddedStore` | external anchoring, custody, witnessing, or remote storage |
 | Execution | typed `Runner` port, `LocalProcessRunner`, identity-bound receipt bindings, and Fabric adapter seam | sandbox assurance, containers, Fabric scheduling, or attestation |
 | Public operation | frozen definition in `operations.py` with CLI/MCP/resource metadata | lifecycle authorization, which remains in `ForgeStateMachine` |
 
@@ -118,22 +119,23 @@ identities. It checks identity drift before and after each run and withholds rep
 status-only disclosure.
 
 The Forge state directory is `.mncs-forge/`. Epoch, candidate, action, result, selection,
-rejection, freeze, evaluation, and bundle records are immutable files plus a locked hash-linked
-JSONL ledger. Versioned frozen models form the internal domain boundary; filesystem, ledger, CLI,
-MCP, and Provider Protocol boundaries remain JSON-compatible. Supersession and lineage are
-explicit. See [Versioned Forge records](record-schemas.md) for schema, identity, and legacy
-migration rules.
+rejection, freeze, evaluation, and bundle records are typed Store objects projected into the
+Forge reader shape. Versioned frozen models form the internal domain boundary; filesystem, Store,
+CLI, MCP, and Provider Protocol boundaries remain JSON-compatible. Supersession and lineage are
+explicit. Historical JSONL is an import/migration boundary only. See [Versioned Forge records](record-schemas.md)
+for schema, identity, and legacy migration rules.
 
 Authorized persistent transitions pass to `RecordStore` only after state-machine approval and
-typed record construction. The local store stages the immutable record and replacement ledger,
-binds them to the expected ledger predecessor, and publishes them under one exclusive state lock.
-Startup recovery resolves prepared transactions before lifecycle projection. A local derived index
-is rebuildable acceleration data; the ledger and immutable records remain authoritative. See
+typed record construction. The Store adapter stages immutable content and a generation successor,
+binds publication to the expected generation, and publishes the head under one process-shared
+lock. Startup recovery resolves durable Store evidence before lifecycle projection. A local derived index
+is rebuildable acceleration data derived from the current Store generation; Store objects and
+their bindings remain authoritative. See
 [Transactional local storage](storage.md).
 
 `ForgeStateMachine` derives active epoch, candidate lineage/freshness, required-evidence readiness,
 terminal disposition, freeze/evaluation/bundle state, and verifier action terminality from one
-typed ledger snapshot. It authorizes transitions but does not execute providers or write records.
+typed Store projection. It authorizes transitions but does not execute providers or write records.
 There is no mutable current-state file. See [Forge lifecycle state machine](lifecycle.md).
 
 Project-scoped development workflows may run without candidate ledger state. Their subject

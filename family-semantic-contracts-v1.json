@@ -12,6 +12,72 @@
   ],
   "consumes": [
     {
+      "contract_identity": "mncs.store.persistent-object/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge:store-backed-persistence",
+      "required": true,
+      "scope": "ordinary native Forge persistence",
+      "evidence": "src/mncs_forge/store_record_store.py",
+      "verification": {
+        "check_identity": "mncs-forge:store-persistence",
+        "executor": "mncs-forge",
+        "surface": "typed-record-generation-reopen",
+        "evidence": "tests/test_store_backed_record_store.py"
+      }
+    },
+    {
+      "contract_identity": "mncs.store.scalable-content/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge:store-scalable-content",
+      "required": true,
+      "scope": "Forge records up to the existing 4 MB record limit",
+      "evidence": "src/mncs_forge/store_record_store.py"
+    },
+    {
+      "contract_identity": "mncs.store.durable-publication/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge:store-durable-publication",
+      "required": true,
+      "scope": "stale-generation rejection and crash recovery",
+      "evidence": "src/mncs_forge/store_record_store.py"
+    },
+    {
+      "contract_identity": "mncs.store.provenance/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge:store-provenance",
+      "required": true,
+      "scope": "native and legacy-import provenance",
+      "evidence": "src/mncs_forge/migration.py"
+    },
+    {
+      "contract_identity": "mncs.store.typed-relations/2",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge:store-relations",
+      "required": true,
+      "scope": "Forge lineage and evidence relationships",
+      "evidence": "src/mncs_forge/store_record_store.py",
+      "verification": {
+        "check_identity": "mncs-forge:store-persistence",
+        "executor": "mncs-forge",
+        "surface": "generic-relation-projection",
+        "evidence": "tests/test_store_backed_record_store.py"
+      }
+    },
+    {
+      "contract_identity": "mncs.store.commit-feed/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-forge:store-commit-feed",
+      "required": true,
+      "scope": "rebuildable Forge index projection",
+      "evidence": "src/mncs_forge/store_record_store.py",
+      "verification": {
+        "check_identity": "mncs-forge:store-persistence",
+        "executor": "mncs-forge",
+        "surface": "commit-feed-index-rebuild",
+        "evidence": "tests/test_store_backed_record_store.py"
+      }
+    },
+    {
       "contract_identity": "mncs.verification-plan/1",
       "contract_revision": "1",
       "consumer_identity": "mncs-forge:mncs_failure_loop",

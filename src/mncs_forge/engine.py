@@ -33,12 +33,12 @@ from .forge_cell import (
     assess_execution_assurance as assess_cell_execution_assurance,
 )
 from .learned_specialists import invoke_shadow_provider, read_artifact
-from .ledger import Ledger
 from .micro_verifiers import MicroVerifierService
 from .mncs_native import NativeForgeAdapter
-from .record_store import LocalRecordStore, RecordStore
+from .record_store import RecordStore
 from .records import ForgeRecord, LedgerEntry
 from .state_machine import ForgeStateMachine
+from .store_record_store import StoreBackedRecordStore
 
 _redact = redact
 _now = now
@@ -66,8 +66,12 @@ class Forge:
         self.mode = mode
 
         # Intentional public compatibility attributes used by CLI diagnostics and callers.
-        self.ledger = Ledger(config.state_dir)
-        self.record_store = record_store or LocalRecordStore(config.state_dir, self.ledger)
+        self.record_store = record_store or StoreBackedRecordStore(config.state_dir)
+        # ``ledger`` is retained as the public Forge reader name, but the
+        # normal implementation is now the Store-backed projection.  The
+        # old JSONL Ledger is used only by explicit differential/migration
+        # callers and is never constructed on this path.
+        self.ledger = getattr(self.record_store, "ledger", self.record_store)
 
         self._executor = build_runner(config)
         self._observer = LocalProjectObserver(config)
@@ -88,7 +92,7 @@ class Forge:
             root=config.root,
         )
         RecoveryService(records=self.ledger, record_store=self.record_store).recover(
-            recover_storage=record_store is not None
+            recover_storage=record_store is not None or isinstance(self.record_store, StoreBackedRecordStore)
         )
 
         self._workflow_executor = WorkflowExecutor(

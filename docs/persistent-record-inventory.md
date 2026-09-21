@@ -1,9 +1,16 @@
-# Persistent record inventory before Task 2
+# Historical persistent record inventory and current Store projection
 
-This inventory describes the unversioned `0.1.0a2` representation at merged PR #7
+The table below describes the historical unversioned `0.1.0a2` representation at merged PR #7
 (`dbf8d652c531996b24e632f53698b84b2a58fc30`). It was completed before the Task 2
 writers changed. Names in the first two columns are historical storage names; the stable
 Task 2 vocabulary is deliberate and does not infer record types from payload fields.
+
+Ordinary Forge persistence now uses `StoreBackedRecordStore` and the supported
+`mncs_store.EmbeddedStore` boundary. Store objects carry the typed Forge payload, a Forge domain
+schema/identity binding, a descriptor with provenance, and a Store generation. The ledger-shaped
+`LedgerEntry` returned to application services is a derived compatibility projection. The
+historical JSONL ledger and immutable-record files are read only by the explicit migration and
+differential paths documented below.
 
 | Historical ledger `kind` | Immutable group | Stable vocabulary | Writer | Readers | Identity class | Authority and freshness fields | Status and time | Public exposure / dynamic data |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -19,7 +26,7 @@ Task 2 vocabulary is deliberate and does not infer record types from payload fie
 | `evaluation` | `records/evaluations` | `final_evaluation` | `Forge.final_evaluation_run` via `_execution_record` | ledger inspection and returned evaluator summary | historical `output_identity` uses the workflow-result identity rule; candidate, evaluator/provider, and request identities stay distinct | freeze is checked around execution but the historical payload does not contain `freeze_id`; evaluator disclosure is applied before identity | `status`, `recorded_at`, duration, return code | Evaluator-only CLI/MCP operation; status-only workflow redacts witnesses before identity |
 | none | none | `reconciliation` | `Forge.evidence_reconcile` returns a transient derived result | caller only | references workflow-result output identities; no reconciliation record identity in `0.1.0a2` | candidate filter, per-category records, conflicts and stale identities | derived aggregate `required_gate_aggregation`; no timestamp | CLI/MCP/resource output only. Task 2 models and versions this JSON boundary without adding persistence. |
 | `bundle` | `records/bundles` | `bundle` | `Forge.bundle_build` via `_execution_record` | ledger inspection and returned bundle summary | historical `output_identity` uses the workflow-result identity rule | candidate/provider/environment/request identities and workflow category | `status`, `recorded_at`, duration, return code | CLI/MCP bundle result summary; persisted payload is the underlying workflow result, not the summary wrapper |
-| ledger line | `ledger.jsonl` | `ledger_entry` | `Ledger.append` | `Ledger.verify`, `Ledger.records`, all state readers | `entry_hash` is a ledger-chain identity over the exact historical entry body; `previous_hash` is chain lineage | trusted `kind` supplies historical payload context after raw integrity succeeds | `timestamp`; sequence and hash linkage | `ledger verify` exposes summary only; payload contains the record object |
+| ledger line | `ledger.jsonl` | `ledger_entry` | historical `Ledger.append` | explicit migration/differential reader only | `entry_hash` is a historical ledger-chain identity over the exact entry body; `previous_hash` is chain lineage | trusted `kind` supplies historical payload context after raw integrity succeeds | `timestamp`; sequence and hash linkage | authenticated before import; not current authority |
 
 Candidate comparison, claim status/blockers, provider inventory, verifier discovery/matching,
 failure explanations, and bundle/evaluation summary wrappers are derived interface objects rather

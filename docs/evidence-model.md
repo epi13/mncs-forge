@@ -8,7 +8,8 @@ canonical identities.
 Every result binds candidate and provider/evaluator identities, method, scope, environment-key
 names (never values), duration, `PASS`/`FAIL`/`UNKNOWN`, compact witnesses, limitations,
 unsupported constructs, and an output identity. Ledger entries bind sequence, time, kind,
-previous hash, payload, and current hash under a file lock.
+previous hash, payload, and current hash in the derived Forge projection. Current authority is the
+Store generation; the historical chain is verified only before migration.
 
 New persistent records use schema version `"1"` and include their stable record type. Current
 record-derived identities include that metadata through an explicit type-specific projection.
@@ -22,7 +23,8 @@ effects, conflicts, stale identities, limitations, and blockers using
 `FAIL > UNKNOWN > PASS`. MNCS implementation and MNCDS development-process results remain separate
 offline-validator outputs.
 
-Micro-verifier actions and results use the same immutable state and ledger. They additionally bind
+Micro-verifier actions and results use the same immutable Store state and derived Forge history
+projection. They additionally bind
 verifier/configuration/policy/environment identities, exact bounded input identities, provider
 response identity, and a provider-declared dependency envelope. Freshness is `CURRENT`, `STALE`,
 or `UNKNOWN` lineage metadata and is not a conformance status. No verifier result cache is enabled

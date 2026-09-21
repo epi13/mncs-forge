@@ -33,11 +33,11 @@ legacy corpus are not rewritten. Prospective transitions are stricter: successor
 candidates require current parents, dispositions are terminal, selection requires the policy's
 declared candidate evidence, and freeze/evaluator entry requires coherent current selection.
 
-Task 4 makes each ledger-backed typed-record write a single recoverable `RecordStore` transaction.
-The store stages the immutable record and replacement ledger under one exclusive lock, binds the
-commit to the expected sequence and predecessor hash, persists PREPARED/COMMITTED recovery
-metadata, and rebuilds a local derived index. Startup recovery is deterministic and idempotent;
-the ledger and immutable records remain authoritative. Historical unversioned `0.1` bytes are
+The Store cutover replaces the former ledger-backed typed-record transaction with the supported
+`mncs_store.EmbeddedStore` boundary. Store stages bounded immutable content and structural
+metadata, compares the expected generation, publishes a durable new generation, and recovers from
+actual durable evidence. Forge retains typed record and workflow semantics; its `LedgerEntry`
+view and `ledger-index.json` are derived projections. Historical unversioned `0.1` bytes are
 verified before migration and are not rewritten. A stranded durable verifier action receives one
 bound terminal `UNKNOWN` rather than an invented provider result.
 

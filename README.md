@@ -26,7 +26,7 @@ flowchart LR
   Codex[Codex / MCP client] --> Forge[Forge control plane]
   Human[CLI user] --> Forge
   Forge --> Providers[Declared providers and harnesses]
-  Providers --> Records[Immutable records and local hash-linked ledger]
+  Providers --> Records[Typed Store objects and ordered generation projection]
   Forge --> Records
   Records --> Validators[Offline MNCS / MNCDS validators]
 ```
@@ -76,8 +76,8 @@ The next release should stabilize the internal architecture before adding more v
 additional sandbox backends. Distributed execution should consume `mncs-fabric` rather than a second
 Forge fleet. The verifier lifecycle now has one explicit service, and persistent evidence now crosses a
 frozen typed, versioned boundary with deterministic legacy migration. Explicit state transitions
-derive from append-only typed history, authorized record-plus-ledger changes commit through one
-recoverable local transaction boundary, and the compatibility facade delegates to explicit services
+derive from typed Store history, authorized record changes commit through one recoverable
+generation boundary, and the compatibility facade delegates to explicit services
 through typed storage, execution, and identity ports. CLI and MCP dispatch now share one typed
 operation registry and deterministic interface inventory. Declared workflow and verifier-provider
 execution both persist identity-bound receipt bindings that reference the experimental MNCS

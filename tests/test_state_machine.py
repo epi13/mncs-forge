@@ -424,7 +424,13 @@ def test_candidate_parent_must_be_current_and_same_epoch(
 def test_self_parent_and_historical_cycle_are_rejected_or_ambiguous(
     config: ForgeConfig,
 ) -> None:
-    forge = Forge(config)
+    # This intentionally constructs the historical JSONL oracle: the test
+    # injects a deliberately malformed duplicate history entry, which the
+    # canonical Store binding correctly refuses as conflicting content.
+    from mncs_forge.record_store import LocalRecordStore
+
+    legacy_store = LocalRecordStore(config.state_dir)
+    forge = Forge(config, record_store=legacy_store)
     begin(forge)
     candidate = register(forge)
     assert_code(
@@ -439,7 +445,7 @@ def test_self_parent_and_historical_cycle_are_rejected_or_ambiguous(
     raw.pop("schema_version")
     raw["parent_candidate"] = raw["candidate_id"]
     cyclic = new_record(RecordType.CANDIDATE, raw)
-    forge.ledger.append("candidate", cyclic)
+    legacy_store.ledger.append("candidate", cyclic)
     inspected = forge.state_inspect()
     assert inspected["stage"] == "ambiguous_history"
     assert any(item["code"] == "CANDIDATE_LINEAGE_CONFLICT" for item in inspected["limitations"])

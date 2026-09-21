@@ -147,9 +147,9 @@ def test_durable_verifier_action_is_recovered_once_as_terminal_unknown(
     with pytest.raises(InjectedFailure):
         forge.verifier_run("verify-pass", changed_paths=["candidate/main.py"], scope="file")
 
-    reopened = Forge(config)
+    reopened = Forge(config, record_store=LocalRecordStore(config.state_dir))
     results = reopened.ledger.records("verifier_result")
     assert len(results) == 1
     assert results[0].payload["status"] == "UNKNOWN"
     assert results[0].payload["operational_error"]["code"] == "VERIFIER_ACTION_STRANDED"  # type: ignore[index]
-    assert len(Forge(config).ledger.records("verifier_result")) == 1
+    assert len(Forge(config, record_store=LocalRecordStore(config.state_dir)).ledger.records("verifier_result")) == 1

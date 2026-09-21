@@ -8,6 +8,12 @@ Every newly persisted payload contains Forge-assigned `record_type` and `schema_
 Callers cannot supply those fields to a writer. Ledger entries are versioned records too, so their
 current hash projection includes ledger metadata and the versioned payload.
 
+Ordinary writes use `StoreBackedRecordStore` over the supported `mncs_store.EmbeddedStore` API.
+The typed payload remains Forge-owned; Store owns the durable object, domain binding, content
+identity, representation root, generation, publication, and recovery. `LedgerEntry` is a derived
+Forge-facing projection for application compatibility, and `ledger.jsonl` is a legacy import
+boundary rather than current canonical state.
+
 ## Stable vocabulary and historical contexts
 
 | Trusted historical context | Current `record_type` |
@@ -45,7 +51,7 @@ Unversioned PR #7 records are the known historical schema `"0.1-unversioned"`. F
 their type only from a trusted ledger kind, immutable-record group, or explicit expected type. It
 does not infer authority from payload shape.
 
-Ledger loading follows this order:
+Legacy loading follows this order:
 
 ```text
 bounded raw JSON line

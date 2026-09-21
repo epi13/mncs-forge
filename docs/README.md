@@ -75,7 +75,7 @@ development planning. The root README remains a short project entrypoint.
 - [Compiler experiment persistence validation](development-evidence/compiler-experiment-persistence-2026-08.md) —
   record/ledger/operation validation and comparative provider evidence for durable experiments.
 - [Store migration readiness](store-migration-readiness.md) — Forge's measured
-  persistence mapping and gates before `mncs-store` can become canonical.
+  Store cutover, proof surface, and remaining reusable runtime pressure.
 
 ## Documentation rules
 
