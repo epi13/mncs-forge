@@ -58,6 +58,7 @@ minimal controlled workflow.
 - [Canonical operation registry](docs/operation-registry.md)
 - [Provider Protocol integration](docs/provider-protocol.md)
 - [Machine-native micro-verifiers](docs/micro-verifiers.md)
+- [Continuous development supervision](docs/continuous-development.md)
 - [Query-driven micro-debugging](docs/micro-debugging.md)
 - [Compiler evolution observations](docs/compiler-evolution.md)
 - [MNCS-native Forge spine](docs/mncs-native-spine.md)

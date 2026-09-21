@@ -48,7 +48,7 @@ def test_cli_existing_commands_and_inventory_remain_compatible(project: Path) ->
     code, inventory = run(["--config", config, "operations"])
     assert code == 0
     assert inventory["schema_version"] == "1"
-    assert len(inventory["operations"]) == 51
+    assert len(inventory["operations"]) == 53
 
 
 def test_cli_arguments_are_normalized_into_registered_inputs(project: Path) -> None:

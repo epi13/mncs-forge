@@ -43,6 +43,41 @@ Defaults are conservative and existing configurations without verifiers remain v
 [minimal example](../examples/minimal/mncs-forge.toml) and
 [micro-verifier guide](micro-verifiers.md).
 
+Optional `[continuous]` enables the resident workspace supervisor. It names the Language Service
+Unix socket, bounded cursor/debounce limits, the exact Test manifest and working directory, and
+declared `[[continuous.triggers]]`. Triggers are explicit policy data: they filter compiler event
+kinds, semantic impact classifications, guarantee domains, subject kinds, diagnostics, risk flags,
+and optional exact/patterned contract and obligation identities, then select one bounded action and
+a maximum cost. `escalation = "attention"` surfaces FAIL/UNKNOWN results, `"unknown"` surfaces
+only UNKNOWN, and `"silent"` keeps the result in the bounded status projection. A typical
+development declaration is:
+
+```toml
+[continuous]
+enabled = true
+language_service_socket = ".mncs/mnls-language-service.sock"
+test_manifest = "tests/self_suite.toml"
+test_working_directory = "."
+
+[[continuous.triggers]]
+id = "safe-language-repair"
+action = "doctor_safe"
+maximum_cost = "low"
+event_kinds = ["diagnostic_added"]
+diagnostics = ["E-MODULE-*"]
+
+[[continuous.triggers]]
+id = "semantic-verification"
+action = "verification_plan"
+maximum_cost = "medium"
+change_kinds = ["private_implementation", "public_contract", "shared_type"]
+```
+
+The supervisor never infers a verifier or widens a stale/incomplete plan to a full suite. Security
+triggers use the same declaration with `action = "security_micro_verifier"`, `security = true`,
+and explicit `verifier_ids`. `candidate_identity` is required for candidate-scoped micro-verifier
+execution. Safe Doctor is the only automatic mutation; Review and Manual fixes remain explicit.
+
 Optional `[native]` selects the MNCS-native Forge runtime with `mode = "off"`, `"prefer"`, or
 `"required"`; the default is `"prefer"`. `MNCS_FORGE_NATIVE_MODE` is a narrow environment
 override for CI and release checks. `off` disables native selection, `prefer` uses the packaged

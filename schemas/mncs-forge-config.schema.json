@@ -100,7 +100,51 @@
         "mncs_test": {"$ref": "#/$defs/command"},
         "mncs_debug": {"$ref": "#/$defs/command"},
         "ravel_impact": {"$ref": "#/$defs/command"},
-        "mncs_actions": {"$ref": "#/$defs/command"}
+        "mncs_actions": {"$ref": "#/$defs/command"},
+        "mncs_doctor": {"$ref": "#/$defs/command"}
+      }
+    },
+    "continuous": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean", "default": false},
+        "language_service_socket": {"$ref": "#/$defs/relativePath"},
+        "poll_max_events": {"type": "integer", "minimum": 1, "maximum": 256},
+        "poll_interval_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 60},
+        "debounce_ms": {"type": "integer", "minimum": 0, "maximum": 5000},
+        "candidate_identity": {"type": "string", "minLength": 1},
+        "test_manifest": {"$ref": "#/$defs/relativePath"},
+        "test_working_directory": {"$ref": "#/$defs/relativePath"},
+        "library_paths": {"$ref": "#/$defs/pathList"},
+        "max_run_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
+        "triggers": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "action", "maximum_cost"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+              "action": {"enum": ["doctor_safe", "verification_plan", "micro_verifier", "security_micro_verifier"]},
+              "change_kinds": {"$ref": "#/$defs/stringList"},
+              "guarantee_domains": {"$ref": "#/$defs/stringList"},
+              "subject_kinds": {"$ref": "#/$defs/stringList"},
+              "contract_identities": {"$ref": "#/$defs/stringList"},
+              "obligation_identities": {"$ref": "#/$defs/stringList"},
+              "diagnostics": {"$ref": "#/$defs/stringList"},
+              "event_kinds": {"$ref": "#/$defs/stringList"},
+              "risk_flags": {"$ref": "#/$defs/stringList"},
+              "verifier_ids": {"$ref": "#/$defs/stringList"},
+              "maximum_cost": {"enum": ["low", "medium", "high"]},
+              "debounce_ms": {"type": "integer", "minimum": 0, "maximum": 5000},
+              "escalation": {"enum": ["silent", "unknown", "attention"]},
+              "security": {"type": "boolean"},
+              "complete_dependency_envelope": {"type": "boolean"}
+            }
+          }
+        }
       }
     },
     "environment_allowlist": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}},

@@ -92,7 +92,8 @@ class Forge:
             root=config.root,
         )
         RecoveryService(records=self.ledger, record_store=self.record_store).recover(
-            recover_storage=record_store is not None or isinstance(self.record_store, StoreBackedRecordStore)
+            recover_storage=record_store is not None
+            or isinstance(self.record_store, StoreBackedRecordStore)
         )
 
         self._workflow_executor = WorkflowExecutor(
@@ -425,6 +426,28 @@ class Forge:
 
     def failure_explain(self, output_identity: str | None = None) -> dict[str, object]:
         return self._development_service.explain(output_identity)
+
+    def continuous_run(
+        self,
+        *,
+        once: bool = False,
+        max_events: int | None = None,
+        after_cursor: int | None = None,
+        poll_interval_seconds: float | None = None,
+    ) -> dict[str, object]:
+        from .continuous import ContinuousSupervisor
+
+        return ContinuousSupervisor(self).run(
+            once=once,
+            max_events=max_events,
+            after_cursor=after_cursor,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+
+    def continuous_status(self) -> dict[str, object]:
+        from .continuous import ContinuousSupervisor
+
+        return ContinuousSupervisor(self).read_status()
 
     def mncs_failure_loop(
         self,

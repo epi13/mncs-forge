@@ -74,6 +74,8 @@ development planning. The root README remains a short project entrypoint.
   full quality gate and comparative provider evidence for the language-owned compiler consumer.
 - [Compiler experiment persistence validation](development-evidence/compiler-experiment-persistence-2026-08.md) —
   record/ledger/operation validation and comparative provider evidence for durable experiments.
+- [Continuous semantic observation evidence](development-evidence/continuous-semantic-observation-2026-09.md) —
+  resident-service measurements, Safe repair, exact verification, Debug reuse, and current limits.
 - [Store migration readiness](store-migration-readiness.md) — Forge's measured
   Store cutover, proof surface, and remaining reusable runtime pressure.
 
