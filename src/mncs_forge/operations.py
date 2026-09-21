@@ -223,6 +223,19 @@ class DevelopmentChecksInput(OperationInput):
 
 
 @dataclass(frozen=True, slots=True)
+class ContinuousRunInput(OperationInput):
+    once: bool = False
+    max_events: int | None = None
+    after_cursor: int | None = None
+    poll_interval_seconds: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuousStatusInput(OperationInput):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class FailureExplainInput(OperationInput):
     output_identity: str | None = None
 
@@ -498,6 +511,15 @@ class ForgeOperationTarget(Protocol):
     def development_checks_run(
         self, workflow_names: list[str], candidate_id: str | None = None
     ) -> JsonObject: ...
+    def continuous_run(
+        self,
+        *,
+        once: bool = False,
+        max_events: int | None = None,
+        after_cursor: int | None = None,
+        poll_interval_seconds: float | None = None,
+    ) -> JsonObject: ...
+    def continuous_status(self) -> JsonObject: ...
     def failure_explain(self, output_identity: str | None = None) -> JsonObject: ...
     def mncs_failure_loop(
         self,
@@ -831,6 +853,21 @@ def _candidate_refresh(forge: ForgeOperationTarget, value: OperationInput) -> Js
 def _development_checks(forge: ForgeOperationTarget, value: OperationInput) -> JsonObject:
     request = _typed(value, DevelopmentChecksInput)
     return forge.development_checks_run(request.workflow_names, request.candidate_identity)
+
+
+def _continuous_run(forge: ForgeOperationTarget, value: OperationInput) -> JsonObject:
+    request = _typed(value, ContinuousRunInput)
+    return forge.continuous_run(
+        once=request.once,
+        max_events=request.max_events,
+        after_cursor=request.after_cursor,
+        poll_interval_seconds=request.poll_interval_seconds,
+    )
+
+
+def _continuous_status(forge: ForgeOperationTarget, value: OperationInput) -> JsonObject:
+    _typed(value, ContinuousStatusInput)
+    return forge.continuous_status()
 
 
 def _failure_explain(forge: ForgeOperationTarget, value: OperationInput) -> JsonObject:
@@ -1447,6 +1484,42 @@ _OPERATIONS = (
             ),
         ),
         mcp=_mcp("mncs_forge_development_checks_run"),
+    ),
+    _operation(
+        "development.continuous.run",
+        modes=DEVELOPMENT_ONLY,
+        mutation=MutationClass.MUTATING,
+        input_model=ContinuousRunInput,
+        output=OutputContract.RESULT_SET,
+        handler=_continuous_run,
+        authority=AuthorityRequirement.DEVELOPMENT,
+        lifecycle=LifecycleRequirement.PROJECTION,
+        disclosure=DisclosureClass.DEVELOPMENT_EVIDENCE,
+        description=(
+            "Consume the resident Language Service event cursor and run only declared, "
+            "generation-bound continuous development checks."
+        ),
+        cli=_cli(
+            "continuous",
+            "run",
+            bindings=(
+                _binding("once"),
+                _binding("max_events", "max_events"),
+                _binding("after_cursor", "after_cursor"),
+                _binding("poll_interval_seconds", "poll_interval_seconds"),
+            ),
+        ),
+        mcp=_mcp("mncs_forge_continuous_run", DEVELOPMENT_ONLY),
+    ),
+    _operation(
+        "development.continuous.status",
+        input_model=ContinuousStatusInput,
+        output=OutputContract.RESULT_SET,
+        handler=_continuous_status,
+        disclosure=DisclosureClass.DEVELOPMENT_EVIDENCE,
+        description="Return compact current continuous-development status and attention events.",
+        cli=_cli("continuous", "status"),
+        mcp=_mcp("mncs_forge_continuous_status"),
     ),
     _operation(
         "development.failure.explain",

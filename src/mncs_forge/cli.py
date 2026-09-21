@@ -159,6 +159,21 @@ def _common_parser() -> argparse.ArgumentParser:
     development.add_argument("workflows", nargs="+")
     development.add_argument("--candidate")
 
+    continuous = commands.add_parser(_cli_command("development.continuous.run", 0))
+    continuous_commands = continuous.add_subparsers(dest="continuous_command", required=True)
+    continuous_run = _register(
+        continuous_commands.add_parser(_cli_command("development.continuous.run")),
+        "development.continuous.run",
+    )
+    continuous_run.add_argument("--once", action="store_true")
+    continuous_run.add_argument("--max-events", type=int, default=None)
+    continuous_run.add_argument("--after-cursor", type=int, default=None)
+    continuous_run.add_argument("--poll-interval-seconds", type=float, default=None)
+    _register(
+        continuous_commands.add_parser(_cli_command("development.continuous.status")),
+        "development.continuous.status",
+    )
+
     mncs = commands.add_parser(_cli_command("development.mncs.failure-loop", 0))
     mncs_commands = mncs.add_subparsers(dest="mncs_command", required=True)
     failure_loop = _register(

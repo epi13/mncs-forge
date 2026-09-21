@@ -329,6 +329,29 @@
           "namespace": "candidate"
         }
       ],
+      "development.continuous.run": [
+        {
+          "decoder": "value",
+          "input": "once",
+          "namespace": "once"
+        },
+        {
+          "decoder": "value",
+          "input": "max_events",
+          "namespace": "max_events"
+        },
+        {
+          "decoder": "value",
+          "input": "after_cursor",
+          "namespace": "after_cursor"
+        },
+        {
+          "decoder": "value",
+          "input": "poll_interval_seconds",
+          "namespace": "poll_interval_seconds"
+        }
+      ],
+      "development.continuous.status": [],
       "development.failure.explain": [
         {
           "decoder": "value",
@@ -1367,6 +1390,55 @@
         "arguments": [],
         "operation_id": "config.validate"
       },
+      "continuous run": {
+        "arguments": [
+          {
+            "const": true,
+            "default": false,
+            "destination": "once",
+            "nargs": 0,
+            "options": [
+              "--once"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "max_events",
+            "nargs": null,
+            "options": [
+              "--max-events"
+            ],
+            "required": false,
+            "value_type": "int"
+          },
+          {
+            "default": null,
+            "destination": "after_cursor",
+            "nargs": null,
+            "options": [
+              "--after-cursor"
+            ],
+            "required": false,
+            "value_type": "int"
+          },
+          {
+            "default": null,
+            "destination": "poll_interval_seconds",
+            "nargs": null,
+            "options": [
+              "--poll-interval-seconds"
+            ],
+            "required": false,
+            "value_type": "float"
+          }
+        ],
+        "operation_id": "development.continuous.run"
+      },
+      "continuous status": {
+        "arguments": [],
+        "operation_id": "development.continuous.status"
+      },
       "doctor": {
         "arguments": [],
         "operation_id": "project.doctor"
@@ -2341,6 +2413,7 @@
     "root_properties": [
       "authority",
       "commands",
+      "continuous",
       "environment_allowlist",
       "limits",
       "native",
@@ -2365,7 +2438,7 @@
       "version",
       "workflows"
     ],
-    "semantic_sha256": "8096d4be995f1e18c4bfcbd8de32145fa2eaaaf62c57efe574e63f4818d92805"
+    "semantic_sha256": "7cfe17d86395720304fd7ba69602e3f83559f5e0405680c7fdd4966982d53aad"
   },
   "intentional_exclusions": [
     "human-readable help and error prose",
@@ -2715,6 +2788,23 @@
           ]
         },
         "mncs_forge_concept_evaluations_list": {
+          "input_properties": [],
+          "input_schema_sha256": "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+          "output_schema_sha256": "82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+          "required_inputs": []
+        },
+        "mncs_forge_continuous_run": {
+          "input_properties": [
+            "after_cursor",
+            "max_events",
+            "once",
+            "poll_interval_seconds"
+          ],
+          "input_schema_sha256": "6c1107c10e61dd8010ace2f6906b6c0cf32e1727b9f02114d747897cbd02689c",
+          "output_schema_sha256": "82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+          "required_inputs": []
+        },
+        "mncs_forge_continuous_status": {
           "input_properties": [],
           "input_schema_sha256": "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
           "output_schema_sha256": "82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
@@ -3239,6 +3329,12 @@
           "output_schema_sha256": "82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
           "required_inputs": []
         },
+        "mncs_forge_continuous_status": {
+          "input_properties": [],
+          "input_schema_sha256": "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+          "output_schema_sha256": "82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+          "required_inputs": []
+        },
         "mncs_forge_development_checks_run": {
           "input_properties": [
             "candidate_identity",
@@ -3479,6 +3575,8 @@
       "concept.evaluations.record",
       "config.validate",
       "development.checks.run",
+      "development.continuous.run",
+      "development.continuous.status",
       "development.failure.explain",
       "development.mncs.failure-loop",
       "epochs.begin",
@@ -3506,7 +3604,7 @@
       "verifiers.run"
     ],
     "schema_version": "1",
-    "semantic_sha256": "6668efeff1f7513fba61342484881dfacda01544d9fe68bdfdbeda3f6cab19bb"
+    "semantic_sha256": "955e3fb96e4ff64025029537a3085ddf013c491422e31ac82c44b2cfe943c0c4"
   },
   "packaging": {
     "dependencies": [
@@ -3553,6 +3651,8 @@
       "concept_evaluation_record": "(self, evaluation: 'Mapping[str, object]') -> 'dict[str, object]'",
       "concept_evaluations_list": "(self) -> 'dict[str, object]'",
       "config_validate": "(self) -> 'dict[str, object]'",
+      "continuous_run": "(self, *, once: 'bool' = False, max_events: 'int | None' = None, after_cursor: 'int | None' = None, poll_interval_seconds: 'float | None' = None) -> 'dict[str, object]'",
+      "continuous_status": "(self) -> 'dict[str, object]'",
       "development_checks_run": "(self, workflow_names: 'list[str]', candidate_id: 'str | None' = None) -> 'dict[str, object]'",
       "doctor": "(self) -> 'dict[str, object]'",
       "epoch_begin": "(self, *, generator_identity: 'str', evaluator_identity: 'str', parent_epoch: 'str | None' = None, authority_overlap: 'list[str] | None' = None) -> 'dict[str, object]'",

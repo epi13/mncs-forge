@@ -242,6 +242,18 @@ class ForgeConfig:
         commands = self.raw.get("commands", {})
         return {name: list(value) for name, value in commands.items()}
 
+    @property
+    def continuous_settings(self) -> dict[str, Any]:
+        """Explicit continuous-development declarations.
+
+        The supervisor consumes this projection but does not infer actions
+        from source text or provider output.  An absent table means the mode
+        is disabled.
+        """
+
+        value = self.raw.get("continuous", {})
+        return dict(value) if isinstance(value, dict) else {}
+
 
 def _schema() -> dict[str, Any]:
     path = files("mncs_forge.resources").joinpath("mncs-forge-config.schema.json")
@@ -468,6 +480,37 @@ def load_config(path: Path | str = Path("mncs-forge.toml")) -> ForgeConfig:
             parameter_keys=tuple(str(value) for value in item.get("parameter_keys", [])),
             disclosure=disclosure,
         )
+    continuous = raw.get("continuous", {})
+    if isinstance(continuous, dict):
+        for key in (
+            "language_service_socket",
+            "test_manifest",
+            "test_working_directory",
+        ):
+            if key in continuous:
+                resolve_contained(root, str(continuous[key]), must_exist=False)
+        for value in continuous.get("library_paths", []):
+            resolve_contained(root, str(value), must_exist=False)
+        if (
+            continuous.get("candidate_identity") is not None
+            and not str(continuous["candidate_identity"]).strip()
+        ):
+            raise ForgeError("CONFIG_INVALID", "continuous candidate_identity must not be empty")
+        trigger_ids: set[str] = set()
+        for trigger in continuous.get("triggers", []):
+            trigger_id = str(trigger["id"])
+            if trigger_id in trigger_ids:
+                raise ForgeError("CONFIG_INVALID", f"duplicate continuous trigger id: {trigger_id}")
+            trigger_ids.add(trigger_id)
+            action = str(trigger["action"])
+            if action in {"micro_verifier", "security_micro_verifier"}:
+                for verifier_id in trigger.get("verifier_ids", []):
+                    if str(verifier_id) not in verifiers:
+                        raise ForgeError(
+                            "CONFIG_INVALID",
+                            f"continuous trigger {trigger_id} references undeclared "
+                            f"verifier {verifier_id}",
+                        )
     return ForgeConfig(
         config_path=config_path,
         root=root,

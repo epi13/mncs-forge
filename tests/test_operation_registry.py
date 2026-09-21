@@ -38,6 +38,8 @@ EXPECTED_CLI = {
     "candidate reject",
     "candidate select",
     "check development",
+    "continuous run",
+    "continuous status",
     "config validate",
     "compiler candidate-attach",
     "compiler candidate-compare",
@@ -108,6 +110,8 @@ EXPECTED_DEVELOPMENT_MCP = {
     "mncs_forge_concept_evaluation_record",
     "mncs_forge_concept_evaluations_list",
     "mncs_forge_development_checks_run",
+    "mncs_forge_continuous_run",
+    "mncs_forge_continuous_status",
     "mncs_forge_mncs_failure_loop",
     "mncs_forge_evidence_reconcile",
     "mncs_forge_epoch_begin",
@@ -151,7 +155,7 @@ def semantic_snapshot() -> list[tuple[object, ...]]:
 def test_registry_is_unique_validated_and_deterministically_ordered() -> None:
     operation_ids = [item.operation_id for item in DEFAULT_OPERATION_REGISTRY.operations]
     assert operation_ids == sorted(operation_ids)
-    assert len(operation_ids) == len(set(operation_ids)) == 51
+    assert len(operation_ids) == len(set(operation_ids)) == 53
     assert all(callable(item.handler) for item in DEFAULT_OPERATION_REGISTRY.operations)
     assert all(
         fields(item.input_model) is not None for item in DEFAULT_OPERATION_REGISTRY.operations
@@ -182,7 +186,7 @@ def test_inventory_is_canonical_json_and_omits_unstable_handler_details() -> Non
     assert first == second
     inventory = canonical_operation_inventory()
     assert inventory["schema_version"] == "1"
-    assert len(inventory["operations"]) == 51
+    assert len(inventory["operations"]) == 53
     assert "0x" not in first
     assert "handler" not in first
     semantic = json.dumps(
@@ -200,7 +204,7 @@ def test_inventory_is_canonical_json_and_omits_unstable_handler_details() -> Non
         separators=(",", ":"),
     )
     assert hashlib.sha256(semantic.encode()).hexdigest() == (
-        "6668efeff1f7513fba61342484881dfacda01544d9fe68bdfdbeda3f6cab19bb"
+        "955e3fb96e4ff64025029537a3085ddf013c491422e31ac82c44b2cfe943c0c4"
     )
 
 
@@ -223,6 +227,7 @@ def test_cli_and_mcp_coverage_and_intentional_asymmetry() -> None:
             "mncs_forge_compiler_candidate_select",
             "mncs_forge_execution_assurance_assess",
             "mncs_forge_mncs_failure_loop",
+            "mncs_forge_continuous_run",
         }
         | {"mncs_forge_final_evaluation_run"}
     )
@@ -342,6 +347,7 @@ def test_mutation_metadata_matches_persisted_operation_set() -> None:
         "compiler.experiments.record",
         "concept.evaluations.record",
         "development.checks.run",
+        "development.continuous.run",
         "development.mncs.failure-loop",
         "epochs.begin",
         "evaluation.final.run",
