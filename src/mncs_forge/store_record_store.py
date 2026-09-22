@@ -325,6 +325,9 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
         return {
             **result,
             "canonical": "mncs-store",
+            # Preserve the inward-facing Ledger verification contract while
+            # keeping Store's generation/object fields authoritative.
+            "entries": len(entries),
             "forge_records": len(entries),
             "ledger": "derived projection; not authoritative",
         }
