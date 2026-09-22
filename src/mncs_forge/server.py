@@ -13,7 +13,7 @@ from typing import get_type_hints
 
 from mcp.server.fastmcp import FastMCP
 
-from .config import load_config
+from .config import ForgeConfig, load_config
 from .engine import Forge
 from .errors import ForgeError
 from .operations import (
@@ -23,7 +23,26 @@ from .operations import (
 )
 
 
-def _mcp_callable(forge: Forge, operation: OperationDefinition) -> Callable[..., dict[str, object]]:
+class _LazyForge:
+    """Construct Forge only when a request actually needs application state."""
+
+    def __init__(self, factory: Callable[[], Forge], *, mode: str) -> None:
+        self._factory = factory
+        self.mode = mode
+        self._forge: Forge | None = None
+
+    def _instance(self) -> Forge:
+        if self._forge is None:
+            self._forge = self._factory()
+        return self._forge
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._instance(), name)
+
+
+def _mcp_callable(
+    forge: Forge | _LazyForge, operation: OperationDefinition
+) -> Callable[..., dict[str, object]]:
     """Create a flat-signature FastMCP adapter from one typed input model."""
 
     def invoke(**values: object) -> dict[str, object]:
@@ -61,7 +80,7 @@ def _mcp_callable(forge: Forge, operation: OperationDefinition) -> Callable[...,
     return invoke
 
 
-def build_server(forge: Forge) -> FastMCP:
+def build_server(forge: Forge | _LazyForge) -> FastMCP:
     server = FastMCP(
         "MNCS Forge",
         instructions=(
@@ -252,7 +271,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     try:
-        forge = Forge(load_config(args.config), mode=args.mode)
+        # Configuration validation is cheap and remains on the process-start
+        # path. Store-backed persistence and native service construction are
+        # intentionally deferred until the first request so MCP initialize and
+        # tool discovery do not wait for Store artifact compilation.
+        config: ForgeConfig = load_config(args.config)
+        forge = _LazyForge(lambda: Forge(config, mode=args.mode), mode=args.mode)
         build_server(forge).run(transport="stdio")
     except ForgeError as exc:
         print(f"MNCS Forge startup failed [{exc.code}]: {exc.message}", file=sys.stderr)
