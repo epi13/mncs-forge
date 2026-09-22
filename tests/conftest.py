@@ -64,6 +64,7 @@ def project(tmp_path: Path) -> Path:
         ("provider-zero-unknown", "ZERO_UNKNOWN"),
         ("provider-protected-check", "PROTECTED_CHECK"),
         ("provider-witness", "WITNESS"),
+        ("provider-security", "SECURITY_PASS"),
     ]
     provider_tables = "\n".join(
         (
@@ -73,7 +74,7 @@ def project(tmp_path: Path) -> Path:
             f"command = {json.dumps([python, str(fixture), mode])}\n"
             'transport = "stdio-jsonl"\n'
             "required = false\n"
-            'capabilities = ["bounded-structural"]\n'
+            f"capabilities = {json.dumps(['bounded-structural', 'security-micro'] if mode.startswith('SECURITY_') else ['bounded-structural'])}\n"
             f"identity = {json.dumps('fake-' + mode.lower())}\n"
             'version = "1"\n'
         )
@@ -83,7 +84,7 @@ def project(tmp_path: Path) -> Path:
         (
             "[[workflows]]\n"
             f"name = {json.dumps(name)}\n"
-            'category = "bounded_structural_analysis"\n'
+            f"category = {json.dumps('sanitizers' if mode.startswith('SECURITY_') else 'bounded_structural_analysis')}\n"
             f"mode = {json.dumps('both' if name == 'provider-pass' else 'development')}\n"
             f"command = {json.dumps([python, str(fixture), mode])}\n"
             "provider_protocol = true\n"
@@ -98,16 +99,16 @@ def project(tmp_path: Path) -> Path:
             'version = "1"\n'
             f"workflow = {json.dumps(name)}\n"
             f"provider = {json.dumps(name)}\n"
-            'method = "bounded-structural"\n'
-            f"claim = {json.dumps('Fixture bounded claim for ' + mode)}\n"
-            'category = "bounded_structural_analysis"\n'
+            f"method = {json.dumps('security-micro' if mode.startswith('SECURITY_') else 'bounded-structural')}\n"
+            f"claim = {json.dumps(('Bounded security micro-verifier claim for ' if mode.startswith('SECURITY_') else 'Fixture bounded claim for ') + mode)}\n"
+            f"category = {json.dumps('sanitizers' if mode.startswith('SECURITY_') else 'bounded_structural_analysis')}\n"
             f"modes = {_verifier_modes(mode)}\n"
             'languages = ["python"]\n'
             'artifact_types = ["source"]\n'
             'scopes = ["file"]\n'
             'input_kinds = ["candidate_identity", "changed_paths", "question_parameters"]\n'
             'uncertainty_classes = ["structural", "change-impact"]\n'
-            f"cost = {json.dumps('low' if mode == 'PASS' else 'medium')}\n"
+            f"cost = {json.dumps('low' if mode in {'PASS', 'SECURITY_PASS'} else 'medium')}\n"
             'parameter_keys = ["note"]\n'
             "timeout_seconds = 0.25\n"
         )

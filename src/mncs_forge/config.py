@@ -486,10 +486,13 @@ def load_config(path: Path | str = Path("mncs-forge.toml")) -> ForgeConfig:
             "language_service_socket",
             "test_manifest",
             "test_working_directory",
+            "family_proof_directory",
         ):
             if key in continuous:
                 resolve_contained(root, str(continuous[key]), must_exist=False)
         for value in continuous.get("library_paths", []):
+            resolve_contained(root, str(value), must_exist=False)
+        for value in continuous.get("actions_evidence_files", []):
             resolve_contained(root, str(value), must_exist=False)
         if (
             continuous.get("candidate_identity") is not None

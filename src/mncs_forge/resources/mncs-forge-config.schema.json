@@ -101,7 +101,8 @@
         "mncs_debug": {"$ref": "#/$defs/command"},
         "ravel_impact": {"$ref": "#/$defs/command"},
         "mncs_actions": {"$ref": "#/$defs/command"},
-        "mncs_doctor": {"$ref": "#/$defs/command"}
+        "mncs_doctor": {"$ref": "#/$defs/command"},
+        "language_service_host": {"$ref": "#/$defs/command"}
       }
     },
     "continuous": {
@@ -110,6 +111,8 @@
       "properties": {
         "enabled": {"type": "boolean", "default": false},
         "language_service_socket": {"$ref": "#/$defs/relativePath"},
+        "start_timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 600},
+        "stop_timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 120},
         "poll_max_events": {"type": "integer", "minimum": 1, "maximum": 256},
         "poll_interval_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 60},
         "debounce_ms": {"type": "integer", "minimum": 0, "maximum": 5000},
@@ -117,6 +120,16 @@
         "test_manifest": {"$ref": "#/$defs/relativePath"},
         "test_working_directory": {"$ref": "#/$defs/relativePath"},
         "library_paths": {"$ref": "#/$defs/pathList"},
+        "family_graph_file": {"$ref": "#/$defs/familyPath"},
+        "family_workspace_root": {"$ref": "#/$defs/familyPath"},
+        "family_proof_directory": {"$ref": "#/$defs/relativePath"},
+        "commons_root": {"$ref": "#/$defs/familyPath"},
+        "repository": {"type": "string", "minLength": 1},
+        "cross_repository": {"type": "boolean"},
+        "obligation_inventory": {"$ref": "#/$defs/familyPath"},
+        "current_evidence": {"$ref": "#/$defs/familyPath"},
+        "obligation_output": {"$ref": "#/$defs/familyPath"},
+        "actions_evidence_files": {"$ref": "#/$defs/pathList"},
         "max_run_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
         "triggers": {
           "type": "array",
@@ -283,6 +296,7 @@
   },
   "$defs": {
     "relativePath": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\u0000).+$"},
+    "familyPath": {"type": "string", "minLength": 1, "pattern": "^(?!.*\\u0000).+$"},
     "relativeRoot": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*\\u0000).+$"},
     "pathList": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
     "stringList": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},

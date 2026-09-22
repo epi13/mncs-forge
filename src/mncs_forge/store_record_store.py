@@ -127,8 +127,15 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
         )
         self._store_error_type = _StoreError
         self._store_result_code = _StoreResultCode
+        # This is a generation-bound, rebuildable projection.  Store remains
+        # authoritative; the projection only prevents every Forge query from
+        # rereading and revalidating the same current generation.
+        self._projection_generation: int | None = None
+        self._projection_feed: str | None = None
+        self._projection: tuple[LedgerEntry, ...] = ()
         if recover_on_open:
-            self.recover()
+            entries = self._all_entries()
+            self._ensure_index(entries)
 
     # ---- Store/Forge identity binding ---------------------------------
 
@@ -267,6 +274,13 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
         return projected
 
     def _all_entries(self) -> list[LedgerEntry]:
+        generation = self.store.current_generation
+        feed = self.store.commit_feed(generation).hex()
+        if (
+            self._projection_generation == generation
+            and self._projection_feed == feed
+        ):
+            return list(self._projection)
         try:
             objects = self.store.current_objects()
             entries = [self._entry_for_object(stored) for stored in objects]
@@ -278,13 +292,18 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
         expected = list(range(1, len(entries) + 1))
         if [entry.sequence for entry in entries] != expected:
             raise ForgeError("STORE_ORDER_INVALID", "Store ordinals are not a contiguous Forge history")
-        return self._with_projection_hashes(entries)
+        projected = self._with_projection_hashes(entries)
+        self._projection_generation = generation
+        self._projection_feed = feed
+        self._projection = tuple(projected)
+        return list(projected)
 
     def records(self, kind: str | None = None) -> list[LedgerEntry]:
-        entries = self._all_entries()
+        all_entries = self._all_entries()
+        entries = all_entries
         if kind is not None:
             entries = [entry for entry in entries if entry.kind == kind]
-        self._ensure_index(entries)
+        self._ensure_index(all_entries)
         return entries
 
     def records_for(self, kinds: Collection[str]) -> list[LedgerEntry]:
@@ -504,6 +523,9 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
 
     def recover(self) -> dict[str, int]:
         try:
+            self._projection_generation = None
+            self._projection_feed = None
+            self._projection = ()
             self.store.recover()
         except self._store_error_type as exc:
             raise self._store_failure(exc) from exc

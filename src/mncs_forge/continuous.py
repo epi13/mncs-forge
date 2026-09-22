@@ -12,17 +12,23 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import shlex
+import signal
+import subprocess
+import sys
+import tempfile
 import time
 from collections import Counter, deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse
 
+from filelock import FileLock, Timeout
+
 from .application.support import now
 from .errors import ForgeError
 from .records import RecordType, new_record
 from .serialization import local_json_identity
-from .verifier_support import changed_path_identity
 
 if TYPE_CHECKING:
     from .engine import Forge
@@ -30,6 +36,7 @@ if TYPE_CHECKING:
 COST_ORDER = {"low": 0, "medium": 1, "high": 2}
 CONTINUOUS_STATUS_SCHEMA = "mncs.continuous-status/1"
 REPAIR_RESULT_SCHEMA = "mncs.continuous-repair/1"
+CONTINUOUS_LIFECYCLE_SCHEMA = "mncs.continuous-lifecycle/1"
 
 
 def _mapping(value: object) -> dict[str, Any]:
@@ -47,6 +54,321 @@ def _source_path(uri: str, root: Path) -> Path:
         return path.resolve().relative_to(root.resolve())
     except ValueError as exc:
         raise ForgeError("CONTINUOUS_SCOPE", f"event source is outside Forge root: {uri}") from exc
+
+
+def _lifecycle_dir(config: Any) -> Path:
+    return config.state_dir / "continuous"
+
+
+def _supervisor_lease_path(config: Any) -> Path:
+    return _lifecycle_dir(config) / "supervisor.json"
+
+
+def _language_service_lease_path(config: Any) -> Path:
+    return _lifecycle_dir(config) / "language-service.json"
+
+
+def _read_json_path(path: Path) -> dict[str, object] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _write_json_path(path: Path, value: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as staged:
+        json.dump(value, staged, indent=2, sort_keys=True)
+        staged.write("\n")
+        staged.flush()
+        os.fsync(staged.fileno())
+        temporary = Path(staged.name)
+    os.replace(temporary, path)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _supervisor_process_matches(pid: int, config: Any) -> bool:
+    if not _pid_alive(pid):
+        return False
+    try:
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode()
+    except OSError:
+        return True
+    return "mncs_forge.continuous_host" in command and str(config.config_path) in command
+
+
+def _language_service_socket(config: Any) -> Path:
+    value = config.continuous_settings.get(
+        "language_service_socket", ".mncs/mnls-language-service.sock"
+    )
+    return config.root / str(value)
+
+
+def _probe_language_service(config: Any) -> dict[str, object]:
+    result = _mapping(LanguageServiceSocket(_language_service_socket(config), timeout=0.75).request("workspace_status", {}))
+    observed_root = result.get("workspace_root")
+    if not isinstance(observed_root, str) or Path(observed_root).resolve() != config.root.resolve():
+        raise ForgeError(
+            "LANGUAGE_SERVICE_IDENTITY",
+            f"resident Language Service root is not {config.root}",
+        )
+    return result
+
+
+def _language_service_command(config: Any) -> list[str]:
+    configured = config.public_commands().get("language_service_host")
+    if configured:
+        return list(configured)
+    environment = os.environ.get("MNLS_LANGUAGE_SERVICE_HOST")
+    if environment:
+        return shlex.split(environment)
+    candidates = []
+    language_root = os.environ.get("MNCS_LANGUAGE_SERVICE_ROOT")
+    if language_root:
+        candidates.append(Path(language_root).expanduser() / "target" / "debug" / "mnls-language-service-host")
+    candidates.append(config.root.parent / "mncs-language-service" / "target" / "debug" / "mnls-language-service-host")
+    candidates.append(
+        Path(__file__).resolve().parents[3]
+        / "mncs-language-service"
+        / "target"
+        / "debug"
+        / "mnls-language-service-host"
+    )
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return [str(candidate)]
+    raise ForgeError(
+        "LANGUAGE_SERVICE_HOST_UNAVAILABLE",
+        "canonical mnls-language-service-host is not configured or built",
+    )
+
+
+def _terminate_language_service_start(process: subprocess.Popen[bytes], lease_path: Path, socket_path: Path) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+    lease_path.unlink(missing_ok=True)
+    socket_path.unlink(missing_ok=True)
+
+
+def ensure_language_service(config: Any) -> dict[str, object]:
+    try:
+        status = _probe_language_service(config)
+        return {"state": "attached", "pid": None, "status": status}
+    except ForgeError as error:
+        if error.code == "LANGUAGE_SERVICE_IDENTITY":
+            raise
+    socket_path = _language_service_socket(config)
+    if socket_path.exists():
+        socket_path.unlink()
+    command = _language_service_command(config)
+    lease_path = _language_service_lease_path(config)
+    log_path = _lifecycle_dir(config) / "language-service.log"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "MNLS_WORKSPACE_ROOT": str(config.root),
+            "MNLS_SERVICE_SOCKET": str(socket_path),
+        }
+    )
+    log = log_path.open("ab")
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=config.root,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError as error:
+        log.close()
+        raise ForgeError("LANGUAGE_SERVICE_START_FAILED", str(error)) from error
+    log.close()
+    _write_json_path(
+        lease_path,
+        {
+            "schema_version": CONTINUOUS_LIFECYCLE_SCHEMA,
+            "kind": "language-service",
+            "pid": process.pid,
+            "workspace_root": str(config.root),
+            "owned_by_continuous": True,
+        },
+    )
+    deadline = time.monotonic() + float(config.continuous_settings.get("start_timeout_seconds", 60))
+    last_error = "resident Language Service did not become ready"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            _terminate_language_service_start(process, lease_path, socket_path)
+            raise ForgeError("LANGUAGE_SERVICE_START_FAILED", last_error)
+        try:
+            status = _probe_language_service(config)
+            return {"state": "started", "pid": process.pid, "status": status}
+        except ForgeError as error:
+            last_error = str(error)
+            time.sleep(0.05)
+    _terminate_language_service_start(process, lease_path, socket_path)
+    raise ForgeError("LANGUAGE_SERVICE_START_TIMEOUT", last_error)
+
+
+def _supervisor_status(config: Any) -> dict[str, object]:
+    path = _supervisor_lease_path(config)
+    lease = _read_json_path(path)
+    if not lease:
+        return {"state": "stopped", "pid": None}
+    pid = int(lease.get("pid", 0) or 0)
+    if not _supervisor_process_matches(pid, config):
+        path.unlink(missing_ok=True)
+        return {"state": "stale", "pid": pid}
+    return {**lease, "state": str(lease.get("phase", "starting"))}
+
+
+def _language_service_status(config: Any) -> dict[str, object]:
+    try:
+        status = _probe_language_service(config)
+    except ForgeError as error:
+        return {"state": "unavailable", "error": str(error)}
+    lease = _read_json_path(_language_service_lease_path(config)) or {}
+    return {
+        "state": "running",
+        "pid": lease.get("pid"),
+        "owned_by_continuous": bool(lease.get("owned_by_continuous", False)),
+        "status": status,
+    }
+
+
+def continuous_lifecycle(config: Any, action: str, *, mode: str = "development") -> dict[str, object]:
+    """Bounded lifecycle control around the one canonical supervisor loop."""
+
+    lifecycle = _lifecycle_dir(config)
+    lifecycle.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(str(lifecycle / "lifecycle.lock"), timeout=5)
+    try:
+        with lock:
+            if action == "status":
+                status_file = _read_json_path(config.state_dir / "continuous" / "status.json") or {}
+                return {
+                    "schema_version": CONTINUOUS_LIFECYCLE_SCHEMA,
+                    "workspace_root": str(config.root),
+                    "language_service": _language_service_status(config),
+                    "supervisor": _supervisor_status(config),
+                    "continuous": status_file,
+                }
+            if action == "start":
+                if not bool(config.continuous_settings.get("enabled", False)):
+                    raise ForgeError("CONTINUOUS_DISABLED", "continuous mode is not enabled")
+                language_service = ensure_language_service(config)
+                existing = _supervisor_status(config)
+                if existing.get("state") in {"starting", "running"}:
+                    return {
+                        "schema_version": CONTINUOUS_LIFECYCLE_SCHEMA,
+                        "state": "already_running",
+                        "language_service": language_service,
+                        "supervisor": existing,
+                    }
+                lease_path = _supervisor_lease_path(config)
+                command = [
+                    sys.executable,
+                    "-m",
+                    "mncs_forge.continuous_host",
+                    "--config",
+                    str(config.config_path),
+                    "--mode",
+                    mode,
+                ]
+                log_path = lifecycle / "supervisor.log"
+                log = log_path.open("ab")
+                process = subprocess.Popen(
+                    command,
+                    cwd=config.root,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+                log.close()
+                deadline = time.monotonic() + float(
+                    config.continuous_settings.get("start_timeout_seconds", 60)
+                )
+                while time.monotonic() < deadline:
+                    current = _supervisor_status(config)
+                    if current.get("pid") == process.pid and current.get("state") == "running":
+                        return {
+                            "schema_version": CONTINUOUS_LIFECYCLE_SCHEMA,
+                            "state": "started",
+                            "language_service": language_service,
+                            "supervisor": current,
+                        }
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                if process.poll() is None:
+                    # A bounded lifecycle command must not leave a second
+                    # untracked supervisor behind when Forge initialization
+                    # exceeds the declared startup window.
+                    os.kill(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        os.kill(process.pid, signal.SIGKILL)
+                        process.wait(timeout=2)
+                lease = _read_json_path(lease_path)
+                if lease and int(lease.get("pid", 0) or 0) == process.pid:
+                    lease_path.unlink(missing_ok=True)
+                raise ForgeError(
+                    "CONTINUOUS_START_TIMEOUT",
+                    "Forge supervisor did not become ready within the bounded startup window",
+                )
+            if action == "stop":
+                current = _supervisor_status(config)
+                pid = int(current.get("pid", 0) or 0)
+                if current.get("state") not in {"starting", "running"} or not pid:
+                    return {
+                        "schema_version": CONTINUOUS_LIFECYCLE_SCHEMA,
+                        "state": "stopped",
+                        "supervisor": current,
+                    }
+                os.kill(pid, signal.SIGTERM)
+                deadline = time.monotonic() + float(
+                    config.continuous_settings.get("stop_timeout_seconds", 15)
+                )
+                while time.monotonic() < deadline and _supervisor_process_matches(pid, config):
+                    time.sleep(0.05)
+                stopped = _supervisor_status(config)
+                return {
+                    "schema_version": CONTINUOUS_LIFECYCLE_SCHEMA,
+                    "state": "stopped"
+                    if stopped.get("state") in {"stopped", "stale"}
+                    else "stopping",
+                    "supervisor": stopped,
+                }
+            raise ForgeError("CONTINUOUS_LIFECYCLE", f"unknown lifecycle action: {action}")
+    except Timeout as error:
+        raise ForgeError("CONTINUOUS_LIFECYCLE_BUSY", "workspace lifecycle is already changing") from error
 
 
 class LanguageServiceSocket:
@@ -108,8 +430,13 @@ class ContinuousSupervisor:
         self.current_generation = 0
         self.current_source_identity: str | None = None
         self.current_cursor = 0
+        self.stream_identity: str | None = None
         self.active_tier = "edit-time"
         self._queued: deque[dict[str, object]] = deque()
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
 
     def _socket(self) -> LanguageServiceSocket:
         value = self.settings.get("language_service_socket", ".mncs/mnls-language-service.sock")
@@ -117,6 +444,36 @@ class ContinuousSupervisor:
 
     def _status_path(self) -> Path:
         return self.config.state_dir / "continuous" / "status.json"
+
+    def _family_path(self, value: object, *, label: str) -> Path:
+        candidate = Path(str(value))
+        if not candidate.is_absolute():
+            candidate = self.config.root / candidate
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(self.config.root.resolve().parent)
+        except ValueError as error:
+            raise ForgeError(
+                "CONTINUOUS_FAMILY_SCOPE",
+                f"{label} must remain inside the configured workspace parent",
+            ) from error
+        return resolved
+
+    def _poll(
+        self, client: LanguageServiceSocket, *, after_cursor: int, max_events: int
+    ) -> dict[str, object]:
+        params: dict[str, object] = {
+            "after_cursor": after_cursor,
+            "max_events": max_events,
+        }
+        if self.stream_identity:
+            params["stream_identity"] = self.stream_identity
+        poll = _mapping(client.request("poll_events", params))
+        observed = poll.get("stream_identity")
+        if isinstance(observed, str) and observed:
+            if self.stream_identity is None or bool(poll.get("reset_required")):
+                self.stream_identity = observed
+        return poll
 
     def _write_status(self, status: dict[str, object]) -> None:
         path = self._status_path()
@@ -214,6 +571,8 @@ class ContinuousSupervisor:
             kinds.add("security_boundary_changed")
         if "public_contract" in _list(impact.get("change_kinds")):
             kinds.add("public_contract_changed")
+        if bool(event.get("reconciled", False)):
+            kinds.add("workspace_reconciled")
         return kinds
 
     def _matches(self, trigger: dict[str, object], event: dict[str, object]) -> bool:
@@ -281,7 +640,9 @@ class ContinuousSupervisor:
             ):
                 return False
         return not (
-            bool(trigger.get("security", False)) and "security_boundary_changed" not in event_kinds
+            bool(trigger.get("security", False))
+            and "security_boundary_changed" not in event_kinds
+            and not bool(event.get("reconciled", False))
         )
 
     def _trigger_cost_allowed(self, trigger: dict[str, object], verifier_id: str) -> bool:
@@ -512,6 +873,24 @@ class ContinuousSupervisor:
             command.extend(("--root", root))
         for library in self.settings.get("library_paths", []):
             command.extend(("--library", str(self.config.root / str(library))))
+        cross_repository = bool(self.settings.get("cross_repository", False)) or (
+            change_class == "cross_repository_contract"
+        )
+        if cross_repository:
+            command.append("--cross-repository")
+        for option, setting in (
+            ("--family-graph", "family_graph_file"),
+            ("--commons-root", "commons_root"),
+            ("--obligation-inventory", "obligation_inventory"),
+            ("--current-evidence", "current_evidence"),
+            ("--obligation-output", "obligation_output"),
+        ):
+            value = self.settings.get(setting)
+            if value:
+                command.extend((option, str(self._family_path(value, label=setting))))
+        repository = self.settings.get("repository")
+        if repository:
+            command.extend(("--repository", str(repository)))
         command.extend(
             (
                 "--change-class",
@@ -611,6 +990,21 @@ class ContinuousSupervisor:
                     (run_dir / "verification-plan.json").relative_to(self.config.root)
                 ),
                 ravel_command=commands.get("ravel_impact"),
+                actions_evidence_files=[str(value) for value in self.settings.get("actions_evidence_files", [])],
+                actions_command=commands.get("mncs_actions"),
+                family_graph_file=(
+                    str(self.settings.get("family_graph_file"))
+                    if self.settings.get("family_graph_file")
+                    else None
+                ),
+                family_workspace_root=(
+                    str(self.settings.get("family_workspace_root"))
+                    if self.settings.get("family_workspace_root")
+                    else None
+                ),
+                family_proof_directory=str(
+                    self.settings.get("family_proof_directory", ".mncs-forge/family-proof")
+                ),
                 timeout_seconds=float(self.settings.get("max_run_seconds", self.config.timeout)),
                 output_file=str((run_dir / "failure-loop.json").relative_to(self.config.root)),
             )
@@ -667,21 +1061,9 @@ class ContinuousSupervisor:
         service = self.forge._verifier_service  # type: ignore[attr-defined]
         identities = service._material_identities(verifier, provider, workflow, environment)
         try:
-            path = _source_path(
-                str(_mapping(event.get("current")).get("uri", "")), self.config.root
-            ).as_posix()
+            _source_path(str(_mapping(event.get("current")).get("uri", "")), self.config.root)
         except ForgeError:
             return None
-        paths = [path]
-        path_identities = {path: changed_path_identity(self.config.root, path) for path in paths}
-        inputs = {
-            "candidate_identity": candidate,
-            "changed_path_identities": path_identities,
-            "contract_identity": None,
-            "dependency_slice_identities": {},
-            "prior_artifact_identity": None,
-            "question_parameters_identity": local_json_identity({}),
-        }
         for entry in reversed(self.forge.ledger.records("verifier_result")):
             payload = entry.payload.to_object_dict()
             if payload.get("verifier_id") != verifier_id or payload.get("mode") != self.forge.mode:
@@ -690,7 +1072,18 @@ class ContinuousSupervisor:
                 continue
             if any(payload.get(key) != value for key, value in identities.items()):
                 continue
-            if payload.get("input_identities") != inputs:
+            recorded_inputs = _mapping(payload.get("input_identities"))
+            if recorded_inputs.get("candidate_identity") != candidate:
+                continue
+            if any(
+                recorded_inputs.get(key) != expected
+                for key, expected in {
+                    "contract_identity": None,
+                    "dependency_slice_identities": {},
+                    "prior_artifact_identity": None,
+                    "question_parameters_identity": local_json_identity({}),
+                }.items()
+            ):
                 continue
             envelope = _mapping(payload.get("dependency_envelope"))
             if envelope.get("complete") is not True:
@@ -859,6 +1252,18 @@ class ContinuousSupervisor:
                 ):
                     repair["focused_verification_result"] = rebound_verification
                     break
+        action_statuses = [
+            str(_mapping(action.get("result")).get("status", "PASS"))
+            for action in action_results
+            if isinstance(action, dict)
+        ]
+        if "FAIL" in action_statuses or "UNKNOWN" in action_statuses or "STALE" in action_statuses:
+            return {
+                "generation": generation,
+                "cursor": event.get("cursor"),
+                "status": "FAIL" if "FAIL" in action_statuses else "UNKNOWN",
+                "actions": action_results,
+            }
         try:
             current = _mapping(client.request("workspace_status", {}))
         except ForgeError as error:
@@ -901,6 +1306,7 @@ class ContinuousSupervisor:
             "active_verification_tier": self.active_tier,
             "blocking_attention_events": self.attention,
             "event_cursor": self.current_cursor,
+            "event_stream_identity": self.stream_identity,
             "evidence_reused": self.reused_evidence,
             "evidence_recomputed": self.recomputed_evidence,
             "queued_jobs_cancelled": self.cancelled_jobs,
@@ -944,11 +1350,17 @@ class ContinuousSupervisor:
         interval = float(poll_interval_seconds or self.settings.get("poll_interval_seconds", 0.2))
         try:
             client.request("refresh_workspace", {})
+            prior = self.read_status()
+            prior_stream = prior.get("event_stream_identity")
+            if self.stream_identity is None and isinstance(prior_stream, str) and prior_stream:
+                self.stream_identity = prior_stream
             if after_cursor is None:
-                after_cursor = 0
-            poll = _mapping(
-                client.request("poll_events", {"after_cursor": after_cursor, "max_events": limit})
-            )
+                after_cursor = int(prior.get("event_cursor", 0))
+            live_status = _mapping(client.request("workspace_status", {}))
+            live_stream = live_status.get("stream_identity")
+            if self.stream_identity is None and isinstance(live_stream, str) and live_stream:
+                self.stream_identity = live_stream
+            poll = self._poll(client, after_cursor=after_cursor, max_events=limit)
         except ForgeError as error:
             self._attention({"current_generation": 0}, str(error), tier="edit-time")
             self._record_status("UNKNOWN")
@@ -974,9 +1386,7 @@ class ContinuousSupervisor:
             try:
                 client.request("refresh_workspace", {})
                 debounced = _mapping(
-                    client.request(
-                        "poll_events", {"after_cursor": after_cursor, "max_events": limit}
-                    )
+                    self._poll(client, after_cursor=after_cursor, max_events=limit)
                 )
                 seen_cursors = {
                     int(event.get("cursor", -1))
@@ -1007,10 +1417,27 @@ class ContinuousSupervisor:
             if previous is not None:
                 self.cancelled_jobs += 1
             latest[uri] = event
-        results = [self._process_event(client, event) for event in latest.values()]
+        result_history: deque[dict[str, object]] = deque(maxlen=64)
+        events_processed = 0
+
+        def record_result(value: dict[str, object]) -> None:
+            nonlocal events_processed
+            events_processed += 1
+            result_history.append(value)
+
+        for event in latest.values():
+            record_result(self._process_event(client, event))
         self.current_cursor = max(
             self.current_cursor, int(poll.get("current_cursor", self.current_cursor))
         )
+
+        def persist_runtime_status() -> None:
+            runtime = self.status()
+            runtime["events_processed"] = events_processed
+            runtime["event_results"] = list(result_history)
+            self._write_status(runtime)
+
+        persist_runtime_status()
         if once:
             # A Safe Doctor promotion creates a new filesystem generation.
             # Drain the rebound event in the same bounded invocation so a
@@ -1018,11 +1445,8 @@ class ContinuousSupervisor:
             for _ in range(8):
                 try:
                     client.request("refresh_workspace", {})
-                    rebound = _mapping(
-                        client.request(
-                            "poll_events",
-                            {"after_cursor": self.current_cursor, "max_events": limit},
-                        )
+                    rebound = self._poll(
+                        client, after_cursor=self.current_cursor, max_events=limit
                     )
                 except ForgeError as error:
                     self._attention({"current_generation": self.current_generation}, str(error))
@@ -1034,20 +1458,20 @@ class ContinuousSupervisor:
                 if not rebound_events:
                     break
                 for event in rebound_events:
-                    results.append(self._process_event(client, event))
+                    record_result(self._process_event(client, event))
                 self.current_cursor = max(
                     self.current_cursor, int(rebound.get("current_cursor", self.current_cursor))
                 )
+                persist_runtime_status()
         else:
-            while True:
+            while not self._stop_requested:
                 time.sleep(interval)
+                if self._stop_requested:
+                    break
                 try:
                     client.request("refresh_workspace", {})
-                    poll = _mapping(
-                        client.request(
-                            "poll_events",
-                            {"after_cursor": self.current_cursor, "max_events": limit},
-                        )
+                    poll = self._poll(
+                        client, after_cursor=self.current_cursor, max_events=limit
                     )
                 except ForgeError as error:
                     self._attention({"current_generation": self.current_generation}, str(error))
@@ -1055,14 +1479,16 @@ class ContinuousSupervisor:
                     break
                 events = [event for event in poll.get("events", []) if isinstance(event, dict)]
                 if not events:
+                    persist_runtime_status()
                     continue
                 for event in events:
-                    results.append(self._process_event(client, event))
+                    record_result(self._process_event(client, event))
                 self.current_cursor = max(
                     self.current_cursor, int(poll.get("current_cursor", self.current_cursor))
                 )
+                persist_runtime_status()
         result = self.status()
-        result["events_processed"] = len(results)
-        result["event_results"] = results
+        result["events_processed"] = events_processed
+        result["event_results"] = list(result_history)
         self._write_status(result)
         return result

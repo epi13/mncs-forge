@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_config
+from .continuous import continuous_lifecycle
 from .engine import Forge
 from .errors import ForgeError
 from .operations import (
@@ -173,6 +174,8 @@ def _common_parser() -> argparse.ArgumentParser:
         continuous_commands.add_parser(_cli_command("development.continuous.status")),
         "development.continuous.status",
     )
+    continuous_commands.add_parser("start")
+    continuous_commands.add_parser("stop")
 
     mncs = commands.add_parser(_cli_command("development.mncs.failure-loop", 0))
     mncs_commands = mncs.add_subparsers(dest="mncs_command", required=True)
@@ -463,6 +466,12 @@ def run(argv: list[str] | None = None) -> tuple[int, dict[str, Any]]:
     args = _common_parser().parse_args(argv)
     try:
         config = load_config(args.config)
+        if args.command == "continuous" and args.continuous_command in {"start", "status", "stop"}:
+            return 0, continuous_lifecycle(
+                config,
+                str(args.continuous_command),
+                mode=args.mode,
+            )
         value = _dispatch(Forge(config, mode=args.mode), args)
         if isinstance(value, dict):
             return 0, value

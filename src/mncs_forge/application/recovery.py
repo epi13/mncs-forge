@@ -21,10 +21,13 @@ class RecoveryService:
         self._recover_stranded_verifier_actions()
 
     def _recover_stranded_verifier_actions(self) -> None:
-        actions = self.records.records("verifier_action")
-        terminal_action_ids = {
-            str(entry.payload["action_id"]) for entry in self.records.records("verifier_result")
-        }
+        # Read the bounded action/result view once.  A Store-backed reader may
+        # serve this from its generation-bound projection; in particular do
+        # not rescan complete history once per stranded action.
+        entries = self.records.records_for(frozenset({"verifier_action", "verifier_result"}))
+        actions = [entry for entry in entries if entry.kind == "verifier_action"]
+        results = [entry for entry in entries if entry.kind == "verifier_result"]
+        terminal_action_ids = {str(entry.payload["action_id"]) for entry in results}
         for entry in actions:
             action = entry.payload
             if not isinstance(action, VerifierActionRecord):
@@ -34,10 +37,9 @@ class RecoveryService:
                 continue
             try:
                 with self.record_store.action_execution(action_id, timeout=0):
-                    current_results = self.records.records("verifier_result")
                     ForgeStateMachine.authorize_terminal_result_for_recorded_action(
                         action,
-                        current_results,
+                        results,
                         action_id=action_id,
                         candidate_id=str(action["candidate_identity"]),
                         freeze_id=(
@@ -56,7 +58,8 @@ class RecoveryService:
                             "RECOVERY_ACTION_MALFORMED",
                             "recovered verifier result has wrong type",
                         )
-                    self.record_store.commit("verifier-results", "verifier_result", result)
+                    committed = self.record_store.commit("verifier-results", "verifier_result", result)
+                    results.append(committed)
                     terminal_action_ids.add(action_id)
             except ForgeError as exc:
                 if exc.code == "ACTION_EXECUTION_BUSY":

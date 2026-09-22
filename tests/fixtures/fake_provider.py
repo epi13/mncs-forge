@@ -34,6 +34,8 @@ def main() -> int:
     if mode == "ZERO_UNKNOWN":
         return 0
     identity = "drifted-provider-identity" if mode == "IDENTITY_DRIFT" else f"fake-{mode.lower()}"
+    security = mode.startswith("SECURITY_")
+    capabilities = ["bounded-structural", "security-micro"] if security else ["bounded-structural"]
     provider = {
         "id": f"fake-{mode.lower()}",
         "name": f"fake-{mode.lower()}",
@@ -45,7 +47,7 @@ def main() -> int:
             "protocol_version": "0.1",
             "type": "capabilities",
             "provider": provider,
-            "analyses": ["bounded-structural"],
+            "analyses": capabilities,
             "statuses": ["PASS", "FAIL", "UNKNOWN"],
             "cancellation": False,
             "health_checks": True,
@@ -57,18 +59,25 @@ def main() -> int:
         }
         print(json.dumps(response, sort_keys=True, separators=(",", ":")))
         return 0
-    status = "UNKNOWN" if mode == "IDENTITY_DRIFT" else mode
+    status = (
+        "UNKNOWN"
+        if mode == "IDENTITY_DRIFT"
+        else "PASS"
+        if mode == "SECURITY_PASS"
+        else mode
+    )
     if mode == "PROTECTED_CHECK":
         status = "FAIL" if Path("protected/holdout.txt").exists() else "PASS"
     if mode == "WITNESS":
         status = "FAIL"
+    dependency_paths = ["reference/reference.py"] if security else ["candidate/main.py"]
     response = {
         "protocol_version": "0.1",
         "type": "analysis_response",
         "request_id": request["request_id"],
         "provider": provider,
         "status": status,
-        "summary": f"fixture {mode}",
+        "summary": f"bounded security fixture {mode}" if security else f"fixture {mode}",
         "witnesses": (
             [{"location": "candidate/main.py:1", "detail": "x" * 48} for _ in range(20)]
             if mode == "WITNESS"
@@ -82,7 +91,7 @@ def main() -> int:
             "mncs_forge": {
                 "assumptions": ["fixture request is bounded"],
                 "dependency_envelope": {
-                    "paths": ["candidate/main.py"],
+                    "paths": dependency_paths,
                     "identities": {},
                     "complete": True,
                 },

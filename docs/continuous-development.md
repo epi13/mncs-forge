@@ -2,14 +2,31 @@
 
 Forge can run a local, declaration-driven development supervisor over one resident
 `mncs-language-service` process. It is enabled by a checked-in `[continuous]`
-configuration table and consumes the service's bounded `mncs.workspace-change/1`
-cursor; it does not scan or retain source text as an event log.
+configuration table and can be established with one bounded command:
+
+```text
+mncs-forge continuous start
+mncs-forge continuous status
+mncs-forge continuous stop
+```
+
+`start` attaches to or launches the canonical Language Service, then launches
+one detached Forge process that delegates to the existing
+`ContinuousSupervisor`. `status` reads lifecycle state without constructing
+Forge; `stop` requests a clean supervisor shutdown. The shared Language Service
+may remain resident for LSP/MCP clients after Forge stops.
+
+The service consumes its bounded `mncs.workspace-change/2` cursor; it does not
+scan or retain source text as an event log. Cursors carry an explicit stream
+identity. The Language Service persists only a compact workspace checkpoint
+under `.mncs/`; after restart it compares source identities and reconstructs
+bounded reconciliation events for offline edits.
 
 The production topology is:
 
 ```text
 mnls-language-service-host
-        └── one LanguageService workspace and event cursor
+        └── one LanguageService workspace, stream identity, and event cursor
              ├── mncs-lsp (MNLS_SERVICE_SOCKET)
              ├── mncs-mcp (MNLS_SERVICE_SOCKET)
              └── mncs-forge continuous run
@@ -33,14 +50,19 @@ Forge evidence boundary.
 
 Verifier reuse reads existing `verifier_result` records only. A record is
 reusable when the verifier, provider, configuration, policy, environment,
-candidate, changed-path identities, and provider-declared complete dependency
-envelope all match and Forge's existing freshness projection is `CURRENT`.
+candidate and stable input identities still match, the provider-declared
+complete dependency envelope remains unchanged, and Forge's existing
+freshness projection is `CURRENT`. An unrelated edit therefore does not force
+the verifier process to run again; an edit inside the declared envelope does.
 Otherwise the verifier runs again or remains `UNKNOWN`; there is no private
 continuous-mode cache and no whole-suite fallback.
 
-Successful routine checks remain in the bounded status projection. Attention
+The detached supervisor refreshes the bounded status projection while it runs,
+so status is useful without stopping the process. Successful routine checks remain in that projection. Attention
 events are reserved for FAIL, blocking UNKNOWN, failed/conflicted Safe repair,
 stale work, or an explicit scope/security decision. The resident frontend is
 still synchronous; results are generation-checked and late work is discarded,
 not reported as current evidence. The event cursor is bounded and may require a
-reset after transient history ages out.
+reset after transient history ages out; a host restart is handled by the
+checkpoint/stream identity rather than by treating an equal cursor number from
+a different host as valid.

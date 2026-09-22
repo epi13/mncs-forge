@@ -92,8 +92,10 @@ class Forge:
             root=config.root,
         )
         RecoveryService(records=self.ledger, record_store=self.record_store).recover(
-            recover_storage=record_store is not None
-            or isinstance(self.record_store, StoreBackedRecordStore)
+            # EmbeddedStore owns opening/recovery for its Store-backed
+            # projection.  Re-running Store recovery here used to verify the
+            # same complete generation again before Forge could start.
+            recover_storage=not isinstance(self.record_store, StoreBackedRecordStore)
         )
 
         self._workflow_executor = WorkflowExecutor(
