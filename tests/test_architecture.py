@@ -107,6 +107,10 @@ def test_application_services_use_runner_port_without_subprocess_bypass() -> Non
 
 
 def test_subprocess_implementation_is_confined_to_execution_modules() -> None:
+    # The bounded continuous lifecycle coordinator is the one additional
+    # process-owning boundary: it launches and terminates the detached
+    # canonical Language Service and Forge hosts.  Semantic execution remains
+    # confined to the execution modules below.
     direct_subprocess = sorted(
         path.relative_to(PACKAGE).as_posix()
         for path in PACKAGE.rglob("*.py")
@@ -122,7 +126,11 @@ def test_subprocess_implementation_is_confined_to_execution_modules() -> None:
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
         )
     )
-    assert direct_subprocess == ["execution.py", "execution_windows.py"]
+    assert direct_subprocess == [
+        "continuous.py",
+        "execution.py",
+        "execution_windows.py",
+    ]
 
 
 def test_core_does_not_import_fabric_or_fleet_mechanics() -> None:
