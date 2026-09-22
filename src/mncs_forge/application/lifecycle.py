@@ -30,6 +30,8 @@ class LifecycleContext:
         self.native = native
         self.native_mode = native_mode
         self.root = root
+        self._machine_cache_key: tuple[object, ...] | None = None
+        self._machine_cache: ForgeStateMachine | None = None
 
     def native_status(self) -> dict[str, object]:
         if self.native is None:
@@ -70,10 +72,52 @@ class LifecycleContext:
             if history_kinds is not None
             else self.records.records()
         )
+        current_authority_identities = (
+            self.observer.current_authority_identities() if observe_epoch_authority else {}
+        )
         current_freeze = next(
             (entry.payload for entry in reversed(history) if entry.kind == "freeze"), None
         )
-        return ForgeStateMachine(
+        current_freeze_bindings = (
+            self.observer.current_freeze_bindings(
+                current_candidate_identity,
+                current_freeze if isinstance(current_freeze, Mapping) else None,
+            )
+            if observe_freeze_bindings
+            else {}
+        )
+        native_identity = (
+            self.native.semantic_input_identity() if self.native is not None else None
+        )
+        cache_key = (
+            self.mode,
+            observe_epoch_authority,
+            observe_freeze_bindings,
+            observe_policy,
+            history_kinds,
+            tuple(
+                (
+                    entry.sequence,
+                    entry.entry_hash,
+                    entry.kind,
+                    entry.payload.record_type.value,
+                )
+                for entry in history
+            ),
+            current_candidate_identity,
+            tuple(sorted(current_authority_identities.items())),
+            tuple(sorted(current_freeze_bindings.items())),
+            policy_identity,
+            required_evidence,
+            policy_error,
+            tuple(sorted(environment_keys.items())),
+            tuple(sorted(environment_identities.items())),
+            tuple(sorted(policy_identities.items())),
+            native_identity,
+        )
+        if self._machine_cache_key == cache_key and self._machine_cache is not None:
+            return self._machine_cache
+        machine = ForgeStateMachine(
             mode=self.mode,
             history=history,
             current_candidate_identity=current_candidate_identity,
@@ -96,6 +140,9 @@ class LifecycleContext:
             evidence_policy_identities=policy_identities,
             native=self.native,
         )
+        self._machine_cache_key = cache_key
+        self._machine_cache = machine
+        return machine
 
     def record_by_id(self, kind: str, identity: str, key: str) -> ForgeRecord:
         return record_by_id(self.records, kind, identity, key)

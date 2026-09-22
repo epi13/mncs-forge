@@ -82,6 +82,16 @@ class Forge:
         native_selected = native_mode == "required" or (
             native_mode == "prefer" and bool(native.status(native_mode).get("selected"))
         )
+        if native_selected:
+            try:
+                # A continuous Forge supervisor admits its language-owned
+                # application before serving work.  The exact artifact/session
+                # is retained by NativeForgeAdapter across all projections.
+                native.ensure_session()
+            except ForgeError:
+                if native_mode == "required":
+                    raise
+                native_selected = False
         self._native = native if native_selected else None
         self._lifecycle = LifecycleContext(
             mode=mode,

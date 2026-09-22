@@ -37,6 +37,7 @@ COST_ORDER = {"low": 0, "medium": 1, "high": 2}
 CONTINUOUS_STATUS_SCHEMA = "mncs.continuous-status/1"
 REPAIR_RESULT_SCHEMA = "mncs.continuous-repair/1"
 CONTINUOUS_LIFECYCLE_SCHEMA = "mncs.continuous-lifecycle/1"
+ENVIRONMENT_ENTRY_SCHEMA = "mncs.environment-entry/1"
 
 
 def _mapping(value: object) -> dict[str, Any]:
@@ -369,6 +370,187 @@ def continuous_lifecycle(config: Any, action: str, *, mode: str = "development")
             raise ForgeError("CONTINUOUS_LIFECYCLE", f"unknown lifecycle action: {action}")
     except Timeout as error:
         raise ForgeError("CONTINUOUS_LIFECYCLE_BUSY", "workspace lifecycle is already changing") from error
+
+
+def _bounded_repository_state(root: Path) -> dict[str, object]:
+    """Observe only the configured repository; never discover sibling repositories."""
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--short", "--untracked-files=no"],
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=1.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "repository": root.name,
+            "root": str(root),
+            "state": "unknown",
+            "reason": str(exc),
+            "entries": [],
+        }
+    entries = result.stdout.decode("utf-8", errors="replace").splitlines()
+    if result.returncode != 0:
+        return {
+            "repository": root.name,
+            "root": str(root),
+            "state": "unknown",
+            "reason": result.stderr.decode("utf-8", errors="replace")[:512],
+            "entries": [],
+        }
+    return {
+        "repository": root.name,
+        "root": str(root),
+        "state": "clean" if not entries else "dirty",
+        "entries": entries[:32],
+        "truncated": len(entries) > 32,
+    }
+
+
+def environment_enter(config: Any, *, mode: str = "development") -> dict[str, object]:
+    """Compose one bounded agent-entry capsule from resident authority projections."""
+
+    started = time.perf_counter()
+    lifecycle_start = continuous_lifecycle(config, "start", mode=mode)
+    lifecycle = continuous_lifecycle(config, "status", mode=mode)
+    language_service = _mapping(lifecycle.get("language_service"))
+    resident_status = _mapping(language_service.get("status"))
+    if resident_status.get("workspace_root") is not None:
+        observed_root = Path(str(resident_status["workspace_root"])).resolve()
+        if observed_root != config.root.resolve():
+            raise ForgeError(
+                "LANGUAGE_SERVICE_IDENTITY",
+                f"resident Language Service root is not {config.root}",
+            )
+    family = _mapping(
+        LanguageServiceSocket(_language_service_socket(config), timeout=8.0).request(
+            "family_agent_context", {"max_items": 16}
+        )
+    )
+    workspace_status = resident_status
+    repository = _mapping(family.get("repository"))
+    language = _mapping(family.get("language"))
+    architecture = _mapping(family.get("architecture"))
+    verification = _mapping(family.get("verification"))
+    completeness = _mapping(family.get("completeness"))
+    continuous = _mapping(lifecycle.get("continuous"))
+    pressures = [
+        item
+        for item in family.get("pressures", [])
+        if isinstance(item, dict) and item.get("unresolved") is not False
+    ][:16]
+    attention = [
+        item for item in continuous.get("blocking_attention_events", []) if isinstance(item, dict)
+    ][:16]
+    counts = _mapping(continuous.get("counts"))
+    continuous_summary = {
+        "schema_version": continuous.get("schema_version"),
+        "workspace_generation": continuous.get("workspace_generation"),
+        "current_source_identity": continuous.get("current_source_identity"),
+        "pending_checks": [
+            item for item in continuous.get("pending_checks", []) if isinstance(item, dict)
+        ][:16],
+        "counts": counts,
+        "stale_evidence_count": continuous.get("stale_evidence_count"),
+        "active_verification_tier": continuous.get("active_verification_tier"),
+        "blocking_attention_events": attention,
+        "event_cursor": continuous.get("event_cursor"),
+        "event_stream_identity": continuous.get("event_stream_identity"),
+        "evidence_reused": continuous.get("evidence_reused"),
+        "evidence_recomputed": continuous.get("evidence_recomputed"),
+        "queued_jobs_cancelled": continuous.get("queued_jobs_cancelled"),
+    }
+    manifest_identity = repository.get("manifest_identity")
+    language_identity = language.get("content_identity")
+    architecture_identity = architecture.get("content_identity")
+    stream_identity = workspace_status.get("stream_identity")
+    workspace_identity = local_json_identity(
+        {
+            "schema_version": "mncs.workspace-entry/1",
+            "root": str(config.root.resolve()),
+            "project_identity": config.project_identity,
+            "manifest_identity": manifest_identity,
+            "stream_identity": stream_identity,
+        }
+    )
+    environment_identity = local_json_identity(
+        {
+            "schema_version": ENVIRONMENT_ENTRY_SCHEMA,
+            "workspace_identity": workspace_identity,
+            "language_identity": language_identity,
+            "architecture_identity": architecture_identity,
+            "continuous_configuration": config.continuous_settings,
+        }
+    )
+    return {
+        "schema_version": ENVIRONMENT_ENTRY_SCHEMA,
+        "environment_identity": environment_identity,
+        "workspace_identity": workspace_identity,
+        "workspace_generation": workspace_status.get("generation"),
+        "language_identity": language_identity,
+        "architecture_identity": architecture_identity,
+        "resident_services": {
+            "language_service": {
+                "state": language_service.get("state"),
+                "pid": language_service.get("pid"),
+                "stream_identity": stream_identity,
+            },
+            "forge_supervisor": {
+                "state": _mapping(lifecycle.get("supervisor")).get("state"),
+                "pid": _mapping(lifecycle.get("supervisor")).get("pid"),
+            },
+        },
+        "canonical_authority": {
+            "language": "mncs-language",
+            "semantic_workspace": "mncs-language-service",
+            "remediation": "mncs-doctor",
+            "verification_planning": "ravel",
+            "test": "mncs-test",
+            "debug": "mncs-debug",
+            "persistence": "mncs-store",
+            "orchestration": "mncs-forge",
+        },
+        "task_environment": {
+            "family_context_status": family.get("status"),
+            "family_completeness": completeness.get("state"),
+            "verification_state": verification.get("state"),
+            "current_blocking_attention": attention,
+            "pre_existing_failures": {
+                "counts": counts,
+                "attention_count": len(attention),
+            },
+            "unresolved_pressures": pressures,
+            "relevant_dirty_repositories": [_bounded_repository_state(config.root)],
+            "continuous_status": continuous_summary,
+        },
+        "negative_knowledge": [
+            item
+            for item in family.get("negative_knowledge", [])
+            if isinstance(item, dict)
+        ][:16],
+        "query_handles": [
+            "family_agent_context",
+            "workspace_status",
+            "language_capabilities",
+            "describe_subject",
+            "obligations",
+            "continuous_status",
+        ],
+        "startup": {
+            "state": lifecycle_start.get("state"),
+            "language_service_state": _mapping(lifecycle_start.get("language_service")).get(
+                "state"
+            ),
+            "forge_supervisor_state": _mapping(lifecycle_start.get("supervisor")).get(
+                "state"
+            ),
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+        },
+    }
 
 
 class LanguageServiceSocket:

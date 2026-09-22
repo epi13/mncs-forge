@@ -451,9 +451,6 @@ class MicroVerifierService:
                     verifier_version=verifier.version,
                     provider_id=provider.provider_id,
                 )
-                self.record_store.commit(
-                    "execution-receipt-bindings", "execution_receipt_binding", binding
-                )
             ForgeStateMachine.authorize_terminal_result_for_recorded_action(
                 action,
                 prior_verifier_results,
@@ -462,7 +459,20 @@ class MicroVerifierService:
                 freeze_id=(str(result["freeze_identity"]) if result["freeze_identity"] else None),
                 mode=str(result["mode"]),
             )
-            self.record_store.commit("verifier-results", "verifier_result", result)
+            commit_batch = getattr(self.record_store, "commit_batch", None)
+            if binding is not None and callable(commit_batch):
+                commit_batch(
+                    [
+                        ("execution-receipt-bindings", "execution_receipt_binding", binding),
+                        ("verifier-results", "verifier_result", result),
+                    ]
+                )
+            else:
+                if binding is not None:
+                    self.record_store.commit(
+                        "execution-receipt-bindings", "execution_receipt_binding", binding
+                    )
+                self.record_store.commit("verifier-results", "verifier_result", result)
             disclosed = self._disclose_result(result)
             if binding is not None:
                 disclosed["execution_receipt"] = summarize_binding(binding)

@@ -6,6 +6,7 @@ does not execute providers, create records, or write storage.
 
 from __future__ import annotations
 
+import copy
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -195,6 +196,7 @@ class ForgeStateMachine:
         self.evidence_policy_identities = dict(evidence_policy_identities or {})
         self.native = native
         self._native_preflight_enabled = True
+        self._inspection_cache: dict[str, object] | None = None
         self._indexed = tuple(enumerate(entry.payload for entry in self.history))
         self.projection = self._project()
 
@@ -1618,6 +1620,8 @@ class ForgeStateMachine:
         return blockers
 
     def inspect(self) -> dict[str, object]:
+        if self._inspection_cache is not None:
+            return copy.deepcopy(self._inspection_cache)
         projection = self.projection
         # Inspection probes every prospective operation to explain blockers.
         # Running a subprocess for each hypothetical transition would make a
@@ -1633,7 +1637,7 @@ class ForgeStateMachine:
         candidate = projection.current_candidate
         disposition = projection.disposition
         freeze = projection.freeze
-        return {
+        result = {
             "stage": projection.stage.value,
             "mode": self.mode,
             "epoch": {
@@ -1688,3 +1692,5 @@ class ForgeStateMachine:
             },
             "limitations": [item.to_dict() for item in projection.limitations],
         }
+        self._inspection_cache = result
+        return copy.deepcopy(result)

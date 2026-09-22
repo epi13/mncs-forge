@@ -24,12 +24,16 @@ from typing import Any, TypedDict
 
 from .errors import ForgeError
 from .execution import run_bounded
+from .retained_embed import RetainedEmbedError, RetainedEmbedSession
 from .serialization import reject_duplicate_keys
 
 NATIVE_SCHEMA_VERSION = "0.1"
 NATIVE_STATUS_CODES = {"PASS": 1, "FAIL": 2, "UNKNOWN": 3}
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_OUTPUT_BYTES = 1_000_000
+NATIVE_ARTIFACT_OUTPUT_BYTES = 128_000_000
+NATIVE_BACKEND = "mncs-research-bytecode"
+NATIVE_SOURCE_PROFILE = "0.10"
 _MNCS_TYPE_PREFIX = "mncs:0.2:finite-type:"
 _MNCS_VARIANT_PREFIX = "mncs:0.2:finite-variant:"
 _STATUS_VARIANTS = {"PASS": 0, "FAIL": 1, "UNKNOWN": 2}
@@ -280,6 +284,7 @@ class NativeInvocation:
     stderr: bytes
     payload: dict[str, Any] | None
     duration_seconds: float = 0.0
+    transport: str = "process"
 
     @property
     def ok(self) -> bool:
@@ -521,7 +526,7 @@ def canonical_candidate_digest(
 
 
 class NativeForgeAdapter:
-    """Invoke MNCS Language without changing the Forge compatibility surface."""
+    """Execute the language-owned Forge application without per-query processes."""
 
     def __init__(
         self,
@@ -536,6 +541,15 @@ class NativeForgeAdapter:
         self.timeout_seconds = timeout_seconds
         self.output_bytes = output_bytes
         self._assurance_cache_option_supported: bool | None = None
+        self._retained_session: RetainedEmbedSession | None = None
+        self._retained_identity: str | None = None
+        self._retained_artifact_identity: str | None = None
+        self._identity_signature: tuple[tuple[str, int, int, int, int], ...] | None = None
+        self._identity_environment_signature: tuple[tuple[str, str], ...] | None = None
+        self._identity_value: str | None = None
+        self._process_invocations = 0
+        self._retained_invocations = 0
+        self._retained_call_seconds: list[float] = []
         self._resource_stack = ExitStack()
         configured_source = os.environ.get("MNCS_FORGE_NATIVE_SOURCE")
         if configured_source:
@@ -554,6 +568,10 @@ class NativeForgeAdapter:
         if stack is not None:
             with suppress(Exception):
                 stack.close()
+        session = getattr(self, "_retained_session", None)
+        if session is not None:
+            with suppress(Exception):
+                session.close()
 
     @staticmethod
     def _discover_language_root(explicit: Path | None) -> Path | None:
@@ -623,11 +641,14 @@ class NativeForgeAdapter:
                     "available": False,
                     "reason": exc.code,
                 }
+            embed_library = self._embed_library(command)
             return {
                 "mode": mode,
-                "selected": True,
+                "selected": embed_library is not None,
                 "available": True,
                 "command": list(command),
+                "retained": embed_library is not None,
+                "embed_library": str(embed_library) if embed_library is not None else None,
                 **self._selected_binary_observation(),
             }
         return {
@@ -721,6 +742,55 @@ class NativeForgeAdapter:
             "--",
         ]
 
+    def _embed_library(self, command: Sequence[str] | None = None) -> Path | None:
+        """Select the language-owned C ABI library matching the CLI build."""
+
+        configured = os.environ.get("MNCS_EMBED_LIB")
+        if configured:
+            path = Path(configured).expanduser().resolve()
+            return path if path.is_file() else None
+        if self.language_root is None:
+            return None
+        selected = Path((command or self._command())[0])
+        target_dir: Path | None = None
+        for name in ("debug", "release"):
+            candidate = self.language_root / "target" / name
+            if selected.resolve().parent == candidate.resolve():
+                target_dir = candidate
+                break
+        candidates: list[Path] = []
+        if target_dir is not None:
+            candidates.append(target_dir / "libmncs_embed.so")
+            candidates.append(target_dir / "libmncs_embed.dylib")
+            candidates.append(target_dir / "mncs_embed.dll")
+        for name in ("release", "debug"):
+            candidate_dir = self.language_root / "target" / name
+            candidates.extend(
+                (
+                    candidate_dir / "libmncs_embed.so",
+                    candidate_dir / "libmncs_embed.dylib",
+                    candidate_dir / "mncs_embed.dll",
+                )
+            )
+        existing = [path for path in candidates if path.is_file()]
+        if target_dir is not None:
+            matching = [path for path in existing if path.parent == target_dir]
+            if matching:
+                return max(matching, key=lambda path: path.stat().st_mtime_ns)
+        return max(existing, key=lambda path: path.stat().st_mtime_ns) if existing else None
+
+    def _environment(self) -> dict[str, str]:
+        if self.language_root is None:
+            raise ForgeError(
+                "NATIVE_UNAVAILABLE",
+                "mncs-language sibling checkout is unavailable; native Forge is UNKNOWN",
+            )
+        environment = dict(os.environ)
+        environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(
+            (str(self.language_root / "library"), str(self.native_root))
+        )
+        return environment
+
     def invoke(self, arguments: list[str], *, stdin: bytes = b"") -> NativeInvocation:
         if self.language_root is None:
             raise ForgeError(
@@ -730,16 +800,14 @@ class NativeForgeAdapter:
         if not self.forge_root.is_dir():
             raise ForgeError("NATIVE_CONFIG_INVALID", "Forge root is not a directory")
         command = [*self._command(), *arguments]
-        environment = dict(os.environ)
-        library_path = os.pathsep.join((str(self.language_root / "library"), str(self.native_root)))
-        environment["MNCS_LIBRARY_PATH"] = library_path
+        self._process_invocations += 1
         result = run_bounded(
             command,
             cwd=self.forge_root,
             timeout=self.timeout_seconds,
             output_cap=self.output_bytes,
             stderr_cap=self.output_bytes,
-            environment=environment,
+            environment=self._environment(),
             stdin=stdin,
         )
         payload: dict[str, Any] | None = None
@@ -771,31 +839,278 @@ class NativeForgeAdapter:
             digest.update(content)
         return digest.hexdigest()
 
+    @staticmethod
+    def _file_signature(paths: Sequence[Path]) -> tuple[tuple[str, int, int, int, int], ...]:
+        """Return a cheap freshness signature for exact material inputs.
+
+        Content is hashed only when this signature changes.  Normal edits
+        change mtime/size/inode, so a resident supervisor does not rescan the
+        compiler tree before every semantic query while still re-admitting a
+        session when a relevant source or runtime artifact changes.
+        """
+
+        result: list[tuple[str, int, int, int, int]] = []
+        for path in sorted({item.resolve() for item in paths}, key=lambda item: item.as_posix()):
+            try:
+                stat = path.stat()
+            except OSError:
+                result.append((path.as_posix(), -1, -1, -1, -1))
+                continue
+            result.append(
+                (path.as_posix(), stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
+            )
+        return tuple(result)
+
+    def _identity_material(self, command: Sequence[str]) -> tuple[list[Path], list[Path], list[Path]]:
+        self.ensure_available()
+        assert self.language_root is not None
+        forge_sources = sorted(
+            [path for path in self.native_root.iterdir() if path.is_file()],
+            key=lambda path: path.as_posix(),
+        )
+        library_sources = sorted(
+            (self.language_root / "library").rglob("*.mncs"),
+            key=lambda path: path.as_posix(),
+        )
+        selected_binary = Path(command[0]) if command and Path(command[0]).is_file() else None
+        embed_library = self._embed_library(command)
+        if selected_binary is not None and embed_library is not None:
+            runtime_inputs = [selected_binary, embed_library]
+        elif selected_binary is not None:
+            runtime_inputs = [selected_binary]
+        else:
+            # A cargo fallback is an explicit development escape hatch.  It
+            # has no single admitted compiler executable, so bind its source
+            # inputs as well as the cargo launcher.  The normal prebuilt path
+            # never hashes the Rust compiler tree.
+            runtime_inputs = [Path(command[0])] if command else []
+            runtime_inputs.extend((self.language_root / "crates").rglob("*.rs"))
+            runtime_inputs.extend(
+                path
+                for path in (self.language_root / "Cargo.toml", self.language_root / "Cargo.lock")
+                if path.is_file()
+            )
+        stdlib_bundle = os.environ.get("MNCS_STDLIB_BUNDLE")
+        if stdlib_bundle:
+            bundle_path = Path(stdlib_bundle).expanduser()
+            if bundle_path.is_file():
+                runtime_inputs.append(bundle_path)
+        for key in ("MNCS_BACKEND_CONFIG", "MNCS_TARGET_PROFILE"):
+            configured = os.environ.get(key)
+            if configured:
+                configured_path = Path(configured).expanduser()
+                if configured_path.is_file():
+                    runtime_inputs.append(configured_path)
+        return forge_sources, library_sources, runtime_inputs
+
     def semantic_input_identity(self) -> str:
         """Identify every source/runtime input that can affect a native result."""
 
-        self.ensure_available()
-        assert self.language_root is not None
-        forge_sources = list(self.native_root.glob("*.mncs"))
-        library_sources = list((self.language_root / "library").rglob("*.mncs"))
-        compiler_sources = list((self.language_root / "crates").rglob("*.rs"))
-        manifest_sources = [
-            self.language_root / "Cargo.toml",
-            self.language_root / "Cargo.lock",
-        ]
         command = self._command()
-        command_identity: list[Path] = []
-        if command and Path(command[0]).is_file():
-            command_identity.append(Path(command[0]))
+        forge_sources, library_sources, runtime_inputs = self._identity_material(command)
+        paths = [*forge_sources, *library_sources, *runtime_inputs]
+        signature = self._file_signature(paths)
+        runtime_configuration = {
+            key: os.environ.get(key, "")
+            for key in (
+                "MNCS_RUNTIME_PROFILE",
+                "MNCS_STDLIB_BUNDLE",
+                "MNCS_BACKEND_CONFIG",
+                "MNCS_TARGET_PROFILE",
+            )
+        }
+        environment_signature = tuple(sorted(runtime_configuration.items()))
+        if (
+            self._identity_signature == signature
+            and self._identity_environment_signature == environment_signature
+            and self._identity_value is not None
+        ):
+            return self._identity_value
         identity = {
             "contract": NATIVE_EXECUTION_CONTRACT,
             "forge_sources": self._content_identity(forge_sources),
             "library_sources": self._content_identity(library_sources),
-            "compiler_sources": self._content_identity(compiler_sources + manifest_sources),
+            "runtime_inputs": self._content_identity(runtime_inputs),
             "command": command,
-            "command_content": self._content_identity(command_identity),
+            "backend": NATIVE_BACKEND,
+            "source_profile": NATIVE_SOURCE_PROFILE,
+            "runtime_configuration": runtime_configuration,
+            "library_path": str((self.language_root / "library").resolve())
+            if self.language_root is not None
+            else None,
         }
-        return hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
+        self._identity_signature = signature
+        self._identity_environment_signature = environment_signature
+        self._identity_value = hashlib.sha256(
+            json.dumps(identity, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return self._identity_value
+
+    def _artifact_cache_path(self, identity: str) -> Path:
+        configured = os.environ.get("MNCS_NATIVE_APPLICATION_CACHE_DIR")
+        if configured:
+            root = Path(configured).expanduser()
+            if not root.is_absolute():
+                root = self.forge_root / root
+        else:
+            root = self.forge_root / ".mncs" / "cache" / "native-applications"
+        return root / f"forge-core-{identity}.json"
+
+    def _compile_native_artifact(self, identity: str) -> bytes:
+        """Compile/import the Forge core once; semantic calls never use this path."""
+
+        embed_library = self._embed_library()
+        if embed_library is None:
+            raise ForgeError(
+                "NATIVE_EMBED_UNAVAILABLE",
+                "the language-owned mncs-embed library is unavailable",
+            )
+        cache_path = self._artifact_cache_path(identity)
+        try:
+            cached = cache_path.read_bytes()
+        except OSError:
+            cached = None
+        if cached:
+            try:
+                with RetainedEmbedSession(embed_library, cached):
+                    return cached
+            except RetainedEmbedError:
+                # A present-but-invalid cache entry is not an authority.  The
+                # exact source/runtime identity below produces a fresh one.
+                pass
+        with tempfile.TemporaryDirectory(prefix=".mncs-native-artifact-", dir=self.forge_root) as directory:
+            output_dir = Path(directory)
+            command = [
+                *self._command(),
+                "compile",
+                str(self.native_source.resolve()),
+                "--emit",
+                "backend",
+                "--output-dir",
+                str(output_dir),
+                "--target",
+                NATIVE_BACKEND,
+            ]
+            result = run_bounded(
+                command,
+                cwd=self.forge_root,
+                timeout=self.timeout_seconds,
+                output_cap=max(self.output_bytes, NATIVE_ARTIFACT_OUTPUT_BYTES),
+                stderr_cap=max(self.output_bytes, NATIVE_ARTIFACT_OUTPUT_BYTES),
+                environment=self._environment(),
+            )
+            artifact_path = output_dir / "backend.json"
+            if result.returncode != 0 or not artifact_path.is_file():
+                detail = (result.stderr or result.stdout)[-4000:].decode(
+                    "utf-8", errors="replace"
+                )
+                raise ForgeError(
+                    "NATIVE_ADMISSION_FAILED",
+                    "Forge MNCS application compilation/admission failed: " + detail,
+                )
+            artifact = artifact_path.read_bytes()
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp")
+            temporary.write_bytes(artifact)
+            os.replace(temporary, cache_path)
+        except OSError:
+            # The admitted artifact is still valid for this resident session;
+            # an unwritable cache only loses the next-process warm hit.
+            pass
+        return artifact
+
+    def ensure_session(self) -> RetainedEmbedSession:
+        """Admit the exact Forge core artifact and retain one embed session."""
+
+        identity = self.semantic_input_identity()
+        if self._retained_session is not None and self._retained_identity == identity:
+            return self._retained_session
+        if self._retained_session is not None:
+            self._retained_session.close()
+            self._retained_session = None
+            self._retained_identity = None
+            self._retained_artifact_identity = None
+        embed_library = self._embed_library()
+        if embed_library is None:
+            raise ForgeError(
+                "NATIVE_EMBED_UNAVAILABLE",
+                "the language-owned mncs-embed library is unavailable",
+            )
+        artifact = self._compile_native_artifact(identity)
+        try:
+            session = RetainedEmbedSession(embed_library, artifact)
+        except RetainedEmbedError as exc:
+            raise ForgeError("NATIVE_ADMISSION_FAILED", str(exc)) from exc
+        info = session.info()
+        artifact_identity = info.get("artifact_identity")
+        if not isinstance(artifact_identity, str) or not artifact_identity:
+            session.close()
+            raise ForgeError("NATIVE_ADMISSION_FAILED", "admitted artifact has no identity")
+        self._retained_session = session
+        self._retained_identity = identity
+        self._retained_artifact_identity = artifact_identity
+        return session
+
+    def retained_status(self) -> dict[str, object]:
+        session = self._retained_session
+        return {
+            "active": session is not None and not session.closed,
+            "semantic_input_identity": self._retained_identity,
+            "artifact_identity": self._retained_artifact_identity,
+            "call_count": self._retained_invocations,
+            "process_invocations": self._process_invocations,
+            "mean_call_seconds": (
+                sum(self._retained_call_seconds) / len(self._retained_call_seconds)
+                if self._retained_call_seconds
+                else 0.0
+            ),
+        }
+
+    def _execute_is_overridden(self) -> bool:
+        bound = getattr(self.execute, "__func__", None)
+        return bound is not NativeForgeAdapter.execute
+
+    def _semantic_invocation(
+        self, request: Mapping[str, object], *, request_name: str
+    ) -> NativeInvocation:
+        """Call the retained core; use the old request-file path only for tests/oracles."""
+
+        target = request.get("target")
+        arguments = request.get("arguments")
+        if not isinstance(target, Mapping) or not isinstance(arguments, list):
+            raise ForgeError("NATIVE_REQUEST_INVALID", "native request shape is invalid")
+        module = target.get("module")
+        function = target.get("function")
+        if not isinstance(module, str) or not isinstance(function, str):
+            raise ForgeError("NATIVE_REQUEST_INVALID", "native target is invalid")
+        if self._execute_is_overridden() or self._embed_library() is None:
+            with tempfile.TemporaryDirectory(prefix=".mncs-native-", dir=self.forge_root) as directory:
+                request_path = Path(directory) / request_name
+                request_path.write_text(json.dumps(request), encoding="utf-8")
+                return self.execute(self.native_source, request_path)
+        session = self.ensure_session()
+        try:
+            payload, duration = session.call(
+                module,
+                function,
+                arguments,
+                step_budget=int(request.get("step_budget", 0)),
+            )
+        except RetainedEmbedError as exc:
+            raise ForgeError("NATIVE_EXECUTION", str(exc)) from exc
+        self._retained_invocations += 1
+        self._retained_call_seconds.append(duration)
+        encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return NativeInvocation(
+            command=("mncs-embed", self._retained_artifact_identity or "unknown"),
+            returncode=0,
+            stdout=encoded,
+            stderr=b"",
+            payload=payload,
+            duration_seconds=duration,
+            transport="retained",
+        )
 
     def source_study(self, source: Path, *, node_id: str = "forge-native") -> NativeInvocation:
         return self.invoke(["source-study", str(source.resolve()), "--node-id", node_id])
@@ -865,60 +1180,129 @@ class NativeForgeAdapter:
         return self.forge_root / ".mncs" / "cache" / "native-applications"
 
     def assurance_loop(self, value: NativeAssuranceInput) -> NativeAssuranceDecision:
-        """Run the canonical Forge assurance state machine through ``mncs run-app``."""
+        """Run the canonical Forge assurance state machine in the retained core."""
 
         if not isinstance(value, NativeAssuranceInput):
             raise ForgeError("NATIVE_ASSURANCE_INPUT", "assurance input is not typed")
         self.ensure_available()
-        wire = self._assurance_wire(value)
-        cache_dir = self._assurance_cache_dir()
-        arguments = [
-            "run-app",
-            str(self.assurance_descriptor.resolve()),
-            "--library",
-            str((self.language_root / "library").resolve()),
-            "--library",
-            str(self.native_root.resolve()),
-        ]
-        if self._assurance_cache_option_supported is not False:
-            arguments.extend(("--cache-dir", str(cache_dir)))
-        invocation = self.invoke(arguments, stdin=wire)
+        abi = self.language_owned_abi()
+        function_contract = abi.functions.get("assurance_loop")
+        if function_contract is None:
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "assurance loop function is absent")
+        inputs = function_contract.get("inputs")
+        outputs = function_contract.get("outputs")
+        if not isinstance(inputs, list) or len(inputs) != 1 or not isinstance(outputs, list) or len(outputs) != 1:
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "assurance loop ABI has invalid arity")
+        input_contract = inputs[0].get("record") if isinstance(inputs[0], Mapping) else None
+        output_contract = outputs[0].get("record") if isinstance(outputs[0], Mapping) else None
+        if not isinstance(input_contract, Mapping) or not isinstance(output_contract, Mapping):
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "assurance loop ABI is not record-based")
+        input_type = input_contract.get("type_identity")
+        output_type = output_contract.get("type_identity")
+        if not isinstance(input_type, str) or not isinstance(output_type, str):
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "assurance loop ABI identities are malformed")
+        evidence_type = self._abi_record_type(
+            abi, "ForgeEvidenceState", context="ForgeEvidenceState"
+        )
+        evidence_fields = {
+            "test_status": self._abi_finite_value(
+                abi, "Status", value.test_status, context="assurance test status"
+            ),
+            "post_repair_test_status": self._abi_finite_value(
+                abi,
+                "Status",
+                value.post_repair_test_status,
+                context="assurance post-repair test status",
+            ),
+            "debug_status": self._abi_finite_value(
+                abi, "Status", value.debug_status, context="assurance debug status"
+            ),
+            "family_proof_status": self._abi_finite_value(
+                abi, "Status", value.family_proof_status, context="assurance family proof status"
+            ),
+            "test_present": {"boolean": {"value": value.test_present}},
+            "failing_execution_present": {"boolean": {"value": value.failing_execution_present}},
+            "post_repair_test_present": {"boolean": {"value": value.post_repair_test_present}},
+            "family_proof_present": {"boolean": {"value": value.family_proof_present}},
+            "plan_present": {"boolean": {"value": value.plan_present}},
+            "plan_current": {"boolean": {"value": value.plan_current}},
+            "repair_requested": {"boolean": {"value": value.repair_requested}},
+            "repair_arguments_complete": {"boolean": {"value": value.repair_arguments_complete}},
+            "repair_admissible": {"boolean": {"value": value.repair_admissible}},
+            "source_changed": {"boolean": {"value": value.source_changed}},
+            "rebound_plan_present": {"boolean": {"value": value.rebound_plan_present}},
+            "rebound_plan_current": {"boolean": {"value": value.rebound_plan_current}},
+            "proof_required": {"boolean": {"value": value.proof_required}},
+            "proof_sufficient": {"boolean": {"value": value.proof_sufficient}},
+            "identity_binding_valid": {"boolean": {"value": value.identity_binding_valid}},
+            "evidence_fresh": {"boolean": {"value": value.evidence_fresh}},
+            "provider_evidence_present": {"boolean": {"value": value.provider_evidence_present}},
+        }
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "assurance_loop"},
+            "arguments": [
+                self._record_value(
+                    input_type,
+                    "ForgeLoopInput",
+                    {
+                        "evidence": self._record_value(
+                            evidence_type, "ForgeEvidenceState", evidence_fields
+                        ),
+                        "phase": self._abi_finite_value(
+                            abi, "LoopPhase", value.phase, context="assurance phase"
+                        ),
+                        "valid": {"boolean": {"value": True}},
+                    },
+                )
+            ],
+            "step_budget": 200_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="assurance-request.json")
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError(
+                "NATIVE_ASSURANCE_UNKNOWN",
+                "native Forge assurance loop did not return a valid retained decision "
+                f"(returncode {invocation.returncode})",
+            )
+        returned = invocation.payload.get("returned")
         if (
-            self._assurance_cache_option_supported is not False
-            and invocation.returncode == 2
-            and not invocation.stdout
-            and b"unknown launcher option" in invocation.stderr
-            and b"--cache-dir" in invocation.stderr
+            not isinstance(returned, list)
+            or len(returned) != 1
+            or not isinstance(returned[0], Mapping)
+            or not isinstance(returned[0].get("record"), Mapping)
+            or returned[0]["record"].get("type_identity") != output_type
         ):
-            # Older already-built CLIs predate the generic cache flag but still
-            # expose the same run-app contract. Keep this compatibility path
-            # bounded; current CLIs take the cache-enabled path above.
-            self._assurance_cache_option_supported = False
-            invocation = self.invoke(arguments[:6], stdin=wire)
-        elif invocation.returncode == 0:
-            self._assurance_cache_option_supported = True
-        if invocation.returncode != 0 or len(invocation.stdout) != 6:
+            raise ForgeError(
+                "NATIVE_ABI_MISMATCH", "assurance loop result type disagrees with language ABI"
+            )
+        result_fields = self._record_fields(invocation.payload, context="assurance loop")
+        state_type = self._abi_record_type(abi, "ForgeLoopState", context="ForgeLoopState")
+        state_fields = self._record_value_fields(
+            result_fields.get("state"), state_type, context="assurance loop state"
+        )
+        status = self._abi_finite_variant(
+            result_fields.get("status"), abi, "Status", context="assurance status"
+        )
+        decision = self._abi_finite_variant(
+            result_fields.get("decision"), abi, "LoopDecision", context="assurance decision"
+        )
+        next_action = self._abi_finite_variant(
+            result_fields.get("next_action"), abi, "NextAction", context="assurance next action"
+        )
+        stop_reason = self._abi_finite_variant(
+            result_fields.get("stop_reason"), abi, "StopReason", context="assurance stop reason"
+        )
+        phase = self._abi_finite_variant(
+            state_fields.get("phase"), abi, "LoopPhase", context="assurance phase"
+        )
+        terminal = self._boolean(result_fields.get("terminal"), context="assurance terminal flag")
+        valid = self._boolean(result_fields.get("valid"), context="assurance validity")
+        if not valid:
             raise ForgeError(
                 "NATIVE_ASSURANCE_UNKNOWN",
-                "native Forge assurance application did not return its bounded decision "
-                f"(returncode {invocation.returncode}, bytes {len(invocation.stdout)})",
+                "native assurance result is invalid",
             )
-        result = invocation.stdout
-        if result[0] != 1:
-            raise ForgeError(
-                "NATIVE_ASSURANCE_UNKNOWN", "native assurance result schema is invalid"
-            )
-        status = {0: "PASS", 1: "FAIL", 2: "UNKNOWN"}.get(result[1])
-        decision = _ASSURANCE_DECISIONS.get(result[2])
-        next_action = _ASSURANCE_NEXT_ACTIONS.get(result[3])
-        stop_reason = _ASSURANCE_REASONS.get(result[4])
-        phase = _ASSURANCE_PHASES.get(result[5])
-        if None in (status, decision, next_action, stop_reason, phase):
-            raise ForgeError(
-                "NATIVE_ASSURANCE_UNKNOWN",
-                "native assurance result contains an unknown code",
-            )
-        terminal = decision in {"StopPass", "StopFail", "StopUnknown", "Finalize"}
         return NativeAssuranceDecision(
             status=str(status),
             decision=str(decision),
@@ -926,7 +1310,7 @@ class NativeForgeAdapter:
             stop_reason=str(stop_reason),
             phase=str(phase),
             terminal=terminal,
-            valid=True,
+            valid=valid,
             duration_seconds=invocation.duration_seconds,
         )
 
@@ -1596,10 +1980,7 @@ class NativeForgeAdapter:
             ],
             "step_budget": 4096,
         }
-        with tempfile.TemporaryDirectory(prefix=".mncs-native-", dir=self.forge_root) as directory:
-            request_path = Path(directory) / "lifecycle-request.json"
-            request_path.write_text(json.dumps(request), encoding="utf-8")
-            invocation = self.execute(self.native_source, request_path)
+        invocation = self._semantic_invocation(request, request_name="lifecycle-request.json")
         if not invocation.ok or invocation.payload is None:
             raise ForgeError(
                 "NATIVE_LIFECYCLE_UNKNOWN",
@@ -1697,10 +2078,9 @@ class NativeForgeAdapter:
             "arguments": [request_value],
             "step_budget": 200_000,
         }
-        with tempfile.TemporaryDirectory(prefix=".mncs-native-", dir=self.forge_root) as directory:
-            request_path = Path(directory) / "lifecycle-projection-request.json"
-            request_path.write_text(json.dumps(request), encoding="utf-8")
-            invocation = self.execute(self.native_source, request_path)
+        invocation = self._semantic_invocation(
+            request, request_name="lifecycle-projection-request.json"
+        )
         if not invocation.ok or invocation.payload is None:
             raise ForgeError(
                 "NATIVE_LIFECYCLE_UNKNOWN",
@@ -1852,10 +2232,7 @@ class NativeForgeAdapter:
             "arguments": [request_value],
             "step_budget": 500_000,
         }
-        with tempfile.TemporaryDirectory(prefix=".mncs-native-", dir=self.forge_root) as directory:
-            request_path = Path(directory) / "reconciliation-request.json"
-            request_path.write_text(json.dumps(request), encoding="utf-8")
-            invocation = self.execute(self.native_source, request_path)
+        invocation = self._semantic_invocation(request, request_name="reconciliation-request.json")
         if not invocation.ok or invocation.payload is None:
             raise ForgeError(
                 "NATIVE_RECONCILIATION_UNKNOWN",
@@ -2144,10 +2521,7 @@ class NativeForgeAdapter:
             "arguments": [request_value],
             "step_budget": 700_000,
         }
-        with tempfile.TemporaryDirectory(prefix=".mncs-native-", dir=self.forge_root) as directory:
-            request_path = Path(directory) / "readiness-request.json"
-            request_path.write_text(json.dumps(request), encoding="utf-8")
-            invocation = self.execute(self.native_source, request_path)
+        invocation = self._semantic_invocation(request, request_name="readiness-request.json")
         if not invocation.ok or invocation.payload is None:
             raise ForgeError(
                 "NATIVE_READINESS_UNKNOWN",
@@ -2478,10 +2852,9 @@ class NativeForgeAdapter:
             "arguments": [request_value],
             "step_budget": 100_000,
         }
-        with tempfile.TemporaryDirectory(prefix=".mncs-native-", dir=self.forge_root) as directory:
-            request_path = Path(directory) / "bundle-preconditions-request.json"
-            request_path.write_text(json.dumps(request), encoding="utf-8")
-            invocation = self.execute(self.native_source, request_path)
+        invocation = self._semantic_invocation(
+            request, request_name="bundle-preconditions-request.json"
+        )
         if not invocation.ok or invocation.payload is None:
             raise ForgeError(
                 "NATIVE_BUNDLE_UNKNOWN",

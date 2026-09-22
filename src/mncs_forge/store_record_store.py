@@ -52,12 +52,13 @@ def _load_store_types(store_root: Path | None = None) -> tuple[Any, ...]:
 
     try:
         from mncs_store import (  # type: ignore[import-not-found]
+            BoundObjectInput,
             EmbeddedStore,
             StoreError,
             StoreResultCode,
         )
 
-        return EmbeddedStore, StoreError, StoreResultCode
+        return BoundObjectInput, EmbeddedStore, StoreError, StoreResultCode
     except ModuleNotFoundError:
         configured = os.environ.get("MNCS_STORE_ROOT")
         root = Path(configured).expanduser().resolve() if configured else store_root
@@ -72,6 +73,7 @@ def _load_store_types(store_root: Path | None = None) -> tuple[Any, ...]:
         sys.path.insert(0, str(package_path))
         try:
             from mncs_store import (  # type: ignore[import-not-found]
+                BoundObjectInput,
                 EmbeddedStore,
                 StoreError,
                 StoreResultCode,
@@ -81,7 +83,7 @@ def _load_store_types(store_root: Path | None = None) -> tuple[Any, ...]:
                 "STORE_ADAPTER_UNAVAILABLE",
                 "supported Store package could not be imported",
             ) from exc
-        return EmbeddedStore, StoreError, StoreResultCode
+        return BoundObjectInput, EmbeddedStore, StoreError, StoreResultCode
 
 
 def _timestamp() -> str:
@@ -114,7 +116,7 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
         store_root: Path | None = None,
         session: Any | None = None,
     ) -> None:
-        EmbeddedStore, _StoreError, _StoreResultCode = _load_store_types(store_root)
+        BoundObjectInput, EmbeddedStore, _StoreError, _StoreResultCode = _load_store_types(store_root)
         self.state_dir = Path(state_dir)
         self.store_path = self.state_dir / "store"
         self.index_path = self.state_dir / "ledger-index.json"
@@ -127,6 +129,7 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
         )
         self._store_error_type = _StoreError
         self._store_result_code = _StoreResultCode
+        self._bound_object_input_type = BoundObjectInput
         # This is a generation-bound, rebuildable projection.  Store remains
         # authoritative; the projection only prevents every Forge query from
         # rereading and revalidating the same current generation.
@@ -394,16 +397,13 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
         if not references:
             return [], [provenance]
 
-        current = self.store.current_objects()
-        exact: dict[tuple[bytes, bytes], bytes] = {
-            (item.domain_schema, item.domain_identity): item.logical_id for item in current
-        }
-        by_identity: dict[bytes, bytes] = {}
-        for item in current:
-            by_identity.setdefault(item.domain_identity, item.logical_id)
         relations: list[bytes] = []
         for ordinal, (label, schema, identity) in enumerate(references):
-            target = exact.get((schema, identity)) if schema else by_identity.get(identity)
+            if schema:
+                target = self.store.logical_id_for_domain(schema, identity)
+            else:
+                matches = self.store.logical_ids_for_domain_identity(identity)
+                target = matches[0] if matches else None
             if target is None or target == source:
                 continue
             relation_type = self.store.content_identity(
@@ -490,6 +490,81 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
 
     def commit(self, record_group: str, ledger_kind: str, record: ForgeRecord) -> LedgerEntry:
         return self._commit_record(record_group, ledger_kind, record)
+
+    def commit_batch(
+        self,
+        records: Collection[tuple[str, str, ForgeRecord]],
+    ) -> list[LedgerEntry]:
+        """Commit multiple Forge records into one generic Store generation."""
+
+        prepared: list[tuple[str, str, ForgeRecord, str]] = []
+        objects: list[Any] = []
+        expected = self.store.current_generation
+        next_generation = expected + 1
+        for record_group, ledger_kind, record in records:
+            context = self._context(record_group, ledger_kind)
+            if record.record_type is not context.record_type:
+                raise ForgeError(
+                    "RECORD_TYPE_MISMATCH",
+                    f"storage context requires {context.record_type.value}, got {record.record_type.value}",
+                )
+            if record.schema_version != CURRENT_SCHEMA_VERSION:
+                raise ForgeError("RECORD_VERSION_WRITE", "new records require schema version 1")
+            domain_identity = self._domain_identity(record, context.identity_field)
+            payload = canonical_bytes(record.to_json())
+            if len(payload) > 4_000_000:
+                raise ForgeError("RECORD_SIZE", "Forge record exceeds the Store object byte limit")
+            descriptor = self._descriptor(
+                record_group=record_group,
+                ledger_kind=ledger_kind,
+                identity_field=context.identity_field,
+                timestamp=_timestamp(),
+            )
+            relations, typed_provenance = self._typed_store_metadata(
+                record=record,
+                record_group=record_group,
+                ledger_kind=ledger_kind,
+                domain_identity=domain_identity,
+                payload=payload,
+                expected_generation=expected,
+            )
+            objects.append(
+                self._bound_object_input_type(
+                    self._domain_schema(ledger_kind),
+                    domain_identity,
+                    descriptor,
+                    payload,
+                    tuple(relations),
+                    tuple(typed_provenance),
+                )
+            )
+            prepared.append((record_group, ledger_kind, record, context.identity_field))
+        if not objects:
+            raise ForgeError("STORE_BATCH", "Store record batch must not be empty")
+        try:
+            result = self.store.put_bound_objects(objects, expected_generation=expected)
+        except self._store_error_type as exc:
+            raise self._store_failure(exc) from exc
+        if result.code.value == "STALE_GENERATION":
+            raise ForgeError(
+                "STORE_STALE_GENERATION",
+                f"Store expected generation {expected}, observed {result.observed_generation}; retry is consumer policy",
+            )
+        if result.code.value not in {"COMMITTED", "DUPLICATE"}:
+            raise ForgeError("STORE_COMMIT_REJECTED", f"Store returned {result.code.value}")
+        entries = self._all_entries()
+        matched: list[LedgerEntry] = []
+        for _record_group, _ledger_kind, record, identity_field in prepared:
+            candidates = [
+                entry
+                for entry in entries
+                if entry.payload.get(identity_field) == record.get(identity_field)
+            ]
+            if len(candidates) != 1:
+                raise ForgeError("STORE_INTEGRITY", "committed Store object is absent from the Forge projection")
+            matched.append(candidates[0])
+        self._ensure_index(entries)
+        return matched
 
     def import_legacy_entries(
         self,
