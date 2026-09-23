@@ -96,8 +96,19 @@ identity = "forge.continuous-verification-transition.v1"
 semantic_owner = "mncs.forge.core.v1::verification_resource_transition"
 native_source = "src/mncs_forge/resources/native/forge/core.mncs"
 host_realization = "src/mncs_forge/continuous.py::ContinuousSupervisor"
-host_may = ["maintain_bounded_pending_projection", "observe_workspace_generation", "execute_native_transition"]
-host_must_not = ["choose_run_defer_or_pending", "choose_stale_cancel_or_discard", "choose_remaining_verifier_deferral", "aggregate_verifier_status"]
+host_may = [
+  "maintain_bounded_pending_projection",
+  "observe_workspace_generation",
+  "supply_resource_outcome_observation_presence",
+  "execute_native_transition",
+]
+host_must_not = [
+  "choose_run_defer_or_pending",
+  "choose_stale_cancel_or_discard",
+  "choose_remaining_verifier_deferral",
+  "interpret_missing_resource_outcome",
+  "aggregate_verifier_status",
+]
 status = "NATIVE_AUTHORITY"
 bootstrap_provisional = false
 

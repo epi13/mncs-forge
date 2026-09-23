@@ -2132,6 +2132,9 @@ class NativeForgeAdapter:
                 ),
                 "in_flight": self._mncs_boolean(boolean_value("in_flight")),
                 "has_outcome": self._mncs_boolean(boolean_value("has_outcome")),
+                "resource_outcome_observed": self._mncs_boolean(
+                    boolean_value("resource_outcome_observed")
+                ),
                 "outcome": finite_value("ResourceOutcomeStatus", "outcome"),
                 "evidence_status": finite_value(
                     "VerificationEvidenceStatus", "evidence_status"

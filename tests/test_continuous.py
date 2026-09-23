@@ -247,6 +247,7 @@ def test_resource_pressure_defers_next_micro_obligation_natively() -> None:
         evidence_status="Unknown",
         has_outcome=True,
         queue_remaining=1,
+        resource_outcome_observed=True,
     )
     assert first.disposition == "RemainPendingAndDeferRemaining"
     assert first.retain_current_pending is True
@@ -369,6 +370,7 @@ def test_superseding_generation_cancels_owned_process_group(tmp_path: Path) -> N
         evidence_status="Unknown",
         has_outcome=True,
         queue_remaining=0,
+        resource_outcome_observed=True,
         work_generation=7,
         current_generation=8,
     )

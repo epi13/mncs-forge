@@ -942,6 +942,7 @@ record ContinuousResourceState {
     verification_required: bool,
     in_flight: bool,
     has_outcome: bool,
+    resource_outcome_observed: bool,
     outcome: ResourceOutcomeStatus,
     evidence_status: VerificationEvidenceStatus,
     pending_exists: bool,
@@ -1102,7 +1103,8 @@ fn verification_resource_transition(
         );
     }
     if verification_status_resolved(state.evidence_status) {
-        if verification_resource_outcome_resolved(state.outcome) {
+        if !state.resource_outcome_observed
+            || verification_resource_outcome_resolved(state.outcome) {
             return verification_transition(
                 VerificationDisposition.Resolve,
                 state.evidence_status,

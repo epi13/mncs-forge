@@ -1166,6 +1166,7 @@ class ContinuousSupervisor:
         evidence_status: str,
         has_outcome: bool,
         queue_remaining: int,
+        resource_outcome_observed: bool = False,
         resource_gate_closed: bool = False,
         in_flight: bool = False,
         source_identity_matches: bool = True,
@@ -1194,6 +1195,7 @@ class ContinuousSupervisor:
                 "verification_required": True,
                 "in_flight": in_flight,
                 "has_outcome": has_outcome,
+                "resource_outcome_observed": resource_outcome_observed,
                 "outcome": outcome,
                 "evidence_status": evidence_status,
                 "pending_exists": identity in self.pending,
@@ -2132,14 +2134,17 @@ class ContinuousSupervisor:
                 results.append({"verifier_id": verifier_id, **reused})
                 reused_status = str(reused["status"])
                 self._record_status(reused_status)
-                outcome = (
+                reused_resource = self._resource_evidence_in_result(reused)
+                raw_outcome = reused_resource.get("resource_outcome")
+                resource_outcome_observed = isinstance(raw_outcome, str)
+                outcome = str(raw_outcome) if resource_outcome_observed else "Unknown"
+                evidence_status = (
                     "Pass"
                     if reused_status == "PASS"
                     else "Fail"
                     if reused_status == "FAIL"
                     else "Unknown"
                 )
-                evidence_status = outcome
                 transition = self._native_resource_transition(
                     event=event,
                     candidate=candidate,
@@ -2150,6 +2155,7 @@ class ContinuousSupervisor:
                     queue_remaining=(
                         len(selected_ids) - index - 1 + len(capacity_deferred)
                     ),
+                    resource_outcome_observed=resource_outcome_observed,
                 )
                 if transition.disposition == "Resolve":
                     self._resolve_micro_pending(event, candidate, verifier_id)
@@ -2200,26 +2206,9 @@ class ContinuousSupervisor:
                     }
                 result_status = str(result.get("status", "UNKNOWN"))
                 resource_evidence = self._resource_evidence_in_result(result)
-                outcome = resource_evidence.get("resource_outcome")
-                if outcome not in {
-                    "Pass",
-                    "Fail",
-                    "ResourceLimit",
-                    "ResourcePressure",
-                    "Timeout",
-                    "OutputLimit",
-                    "Unknown",
-                    "CleanupFailure",
-                    "Cancelled",
-                    "Stale",
-                }:
-                    outcome = (
-                        "Pass"
-                        if result_status == "PASS"
-                        else "Fail"
-                        if result_status == "FAIL"
-                        else "Unknown"
-                    )
+                raw_outcome = resource_evidence.get("resource_outcome")
+                resource_outcome_observed = isinstance(raw_outcome, str)
+                outcome = str(raw_outcome) if resource_outcome_observed else "Unknown"
                 evidence_status = (
                     "Pass"
                     if result_status == "PASS"
@@ -2237,6 +2226,7 @@ class ContinuousSupervisor:
                     queue_remaining=(
                         len(selected_ids) - index - 1 + len(capacity_deferred)
                     ),
+                    resource_outcome_observed=resource_outcome_observed,
                 )
                 if transition.disposition in {"CancelStale", "DiscardStale"}:
                     result = {
@@ -2301,21 +2291,9 @@ class ContinuousSupervisor:
                     )
                 results.append(failure)
                 resource_evidence = _mapping(error.details.get("resource_evidence"))
-                outcome = resource_evidence.get("resource_outcome")
-                valid_outcomes = {
-                    "Pass",
-                    "Fail",
-                    "ResourceLimit",
-                    "ResourcePressure",
-                    "Timeout",
-                    "OutputLimit",
-                    "Unknown",
-                    "CleanupFailure",
-                    "Cancelled",
-                    "Stale",
-                }
-                if outcome not in valid_outcomes:
-                    outcome = "Unknown"
+                raw_outcome = resource_evidence.get("resource_outcome")
+                resource_outcome_observed = isinstance(raw_outcome, str)
+                outcome = str(raw_outcome) if resource_outcome_observed else "Unknown"
                 gate_closed = bool(
                     resource_evidence.get("verification_deferred")
                     or resource_evidence.get("deferred")
@@ -2330,6 +2308,7 @@ class ContinuousSupervisor:
                     queue_remaining=(
                         len(selected_ids) - index - 1 + len(capacity_deferred)
                     ),
+                    resource_outcome_observed=resource_outcome_observed,
                     resource_gate_closed=gate_closed,
                 )
                 if transition.retain_current_pending:

@@ -521,6 +521,7 @@ def test_native_outcome_classifies_raw_resource_facts(
             "resource_pending_and_defer_remaining",
             {
                 "has_outcome": True,
+                "resource_outcome_observed": True,
                 "outcome": "ResourceLimit",
                 "evidence_status": "Unknown",
                 "queue_remaining": 1,
@@ -531,6 +532,7 @@ def test_native_outcome_classifies_raw_resource_facts(
             "pressure_remains_pending",
             {
                 "has_outcome": True,
+                "resource_outcome_observed": True,
                 "outcome": "ResourcePressure",
                 "evidence_status": "Unknown",
             },
@@ -540,6 +542,7 @@ def test_native_outcome_classifies_raw_resource_facts(
             "semantic_pass_resolves",
             {
                 "has_outcome": True,
+                "resource_outcome_observed": True,
                 "outcome": "Pass",
                 "evidence_status": "Pass",
             },
@@ -549,6 +552,7 @@ def test_native_outcome_classifies_raw_resource_facts(
             "pending_capacity_escalates",
             {
                 "has_outcome": True,
+                "resource_outcome_observed": True,
                 "outcome": "Unknown",
                 "evidence_status": "Unknown",
                 "pending_count": 2,
@@ -568,10 +572,31 @@ def test_native_outcome_classifies_raw_resource_facts(
                 "work_generation": 7,
                 "in_flight": False,
                 "has_outcome": True,
+                "resource_outcome_observed": True,
                 "outcome": "Pass",
                 "evidence_status": "Pass",
             },
             ("DiscardStale", "Unknown", False, False, False, False),
+        ),
+        (
+            "semantic_pass_without_resource_observation_resolves",
+            {
+                "has_outcome": True,
+                "resource_outcome_observed": False,
+                "outcome": "Unknown",
+                "evidence_status": "Pass",
+            },
+            ("Resolve", "Pass", False, False, False, False),
+        ),
+        (
+            "unknown_resource_observation_blocks_semantic_pass",
+            {
+                "has_outcome": True,
+                "resource_outcome_observed": True,
+                "outcome": "Unknown",
+                "evidence_status": "Pass",
+            },
+            ("RemainPending", "Unknown", True, False, False, False),
         ),
     ],
     ids=lambda value: value if isinstance(value, str) else None,
@@ -589,6 +614,7 @@ def test_native_continuous_transition_corpus(
         "verification_required": True,
         "in_flight": False,
         "has_outcome": False,
+        "resource_outcome_observed": False,
         "outcome": "Unknown",
         "evidence_status": "NotRun",
         "pending_exists": False,
