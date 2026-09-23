@@ -65,7 +65,9 @@
         "result_bytes": {"type": "integer", "minimum": 2048, "maximum": 4194304},
         "max_changed_paths": {"type": "integer", "minimum": 1, "maximum": 1024},
         "max_dependency_identities": {"type": "integer", "minimum": 1, "maximum": 1024},
-        "max_question_parameters": {"type": "integer", "minimum": 0, "maximum": 128}
+        "max_question_parameters": {"type": "integer", "minimum": 0, "maximum": 128},
+        "workspace_bytes": {"type": "integer", "minimum": 1048576, "maximum": 17179869184},
+        "max_workspace_entries": {"type": "integer", "minimum": 1, "maximum": 100000}
       }
     },
     "runner": {
@@ -131,6 +133,18 @@
         "obligation_output": {"$ref": "#/$defs/familyPath"},
         "actions_evidence_files": {"$ref": "#/$defs/pathList"},
         "max_run_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
+        "resource_envelope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "memory_fraction": {"type": "number", "minimum": 0.05, "maximum": 0.25, "default": 0.15},
+            "memory_cap_bytes": {"type": "integer", "minimum": 134217728, "default": 4294967296},
+            "memory_max_bytes": {"type": "integer", "minimum": 134217728},
+            "pids_limit": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 64},
+            "concurrency_limit": {"const": 1, "default": 1},
+            "runtime_max_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 600, "default": 600}
+          }
+        },
         "triggers": {
           "type": "array",
           "maxItems": 64,
@@ -149,7 +163,7 @@
               "diagnostics": {"$ref": "#/$defs/stringList"},
               "event_kinds": {"$ref": "#/$defs/stringList"},
               "risk_flags": {"$ref": "#/$defs/stringList"},
-              "verifier_ids": {"$ref": "#/$defs/stringList"},
+              "verifier_ids": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
               "maximum_cost": {"enum": ["low", "medium", "high"]},
               "debounce_ms": {"type": "integer", "minimum": 0, "maximum": 5000},
               "escalation": {"enum": ["silent", "unknown", "attention"]},

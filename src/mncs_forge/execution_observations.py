@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import platform
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -147,6 +148,14 @@ class ExecutionObservationBuilder:
         self._started_at: str | None = None
         self._finished = False
         self._observation: ExecutionObservation | None = None
+        self._resource_envelope: dict[str, object] = {}
+        self._resource_observations: dict[str, object] = {}
+
+    def resource_started(self, envelope: Mapping[str, object]) -> None:
+        self._resource_envelope = dict(envelope)
+
+    def resource_finished(self, observations: Mapping[str, object]) -> None:
+        self._resource_observations = dict(observations)
 
     def feed(self, stream: str, data: bytes) -> None:
         if stream == "stdout":
@@ -184,6 +193,10 @@ class ExecutionObservationBuilder:
             {
                 "TIMEOUT": "timeout",
                 "OUTPUT_LIMIT": "output-limit",
+                "RESOURCE_LIMIT": "resource-limit",
+                "RESOURCE_PRESSURE": "resource-limit",
+                "RESOURCE_ENVELOPE_UNAVAILABLE": "policy-rejected",
+                "RESOURCE_CONCURRENCY_LIMIT": "policy-rejected",
             }.get(code, "internal-runner-error"),
         )
 
@@ -206,6 +219,10 @@ class ExecutionObservationBuilder:
     def completed(self, result: ExecutionResult) -> None:
         if self._finished:
             return
+        if result.resource_envelope:
+            self._resource_envelope = dict(result.resource_envelope)
+        if result.resource_observations:
+            self._resource_observations = dict(result.resource_observations)
         stdout = self._stdout.snapshot(complete=True)
         stderr = self._stderr.snapshot(complete=True)
         termination, signal = self._termination(result.returncode)
@@ -240,6 +257,8 @@ class ExecutionObservationBuilder:
             filesystem_policy=self.filesystem_policy,
             network_policy=self.network_policy,
             same_operator=self.same_operator,
+            resource_envelope=self._resource_envelope,
+            resource_observations=self._resource_observations,
         )
         self._finished = True
 
@@ -279,6 +298,8 @@ class ExecutionObservationBuilder:
             filesystem_policy=self.filesystem_policy,
             network_policy=self.network_policy,
             same_operator=self.same_operator,
+            resource_envelope=self._resource_envelope,
+            resource_observations=self._resource_observations,
         )
         self._finished = True
 

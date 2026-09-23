@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable, Mapping
+from contextlib import suppress
 from pathlib import Path
 
 from .adapters import LocalProjectObserver, build_runner
@@ -35,6 +37,7 @@ from .forge_cell import (
 from .learned_specialists import invoke_shadow_provider, read_artifact
 from .micro_verifiers import MicroVerifierService
 from .mncs_native import NativeForgeAdapter
+from .ports import Runner
 from .record_store import RecordStore
 from .records import ForgeRecord, LedgerEntry
 from .state_machine import ForgeStateMachine
@@ -59,23 +62,17 @@ class Forge:
         mode: str = "development",
         *,
         record_store: RecordStore | None = None,
+        runner: Runner | None = None,
     ) -> None:
         if mode not in {"development", "evaluator"}:
             raise ForgeError("INVALID_MODE", "mode must be development or evaluator")
         self.config = config
         self.mode = mode
-
-        # Intentional public compatibility attributes used by CLI diagnostics and callers.
-        self.record_store = record_store or StoreBackedRecordStore(config.state_dir)
-        # ``ledger`` is retained as the public Forge reader name, but the
-        # normal implementation is now the Store-backed projection.  The
-        # old JSONL Ledger is used only by explicit differential/migration
-        # callers and is never constructed on this path.
-        self.ledger = getattr(self.record_store, "ledger", self.record_store)
-
-        self._executor = build_runner(config)
+        self._closed = False
+        self._owns_record_store = record_store is None
+        self._executor = runner if runner is not None else build_runner(config)
         self._observer = LocalProjectObserver(config)
-        native = NativeForgeAdapter(config.root)
+        native = NativeForgeAdapter(config.root, runner=self._executor)
         native_mode = config.native_execution_mode
         if native_mode == "required":
             native.ensure_available()
@@ -93,6 +90,19 @@ class Forge:
                     raise
                 native_selected = False
         self._native = native if native_selected else None
+
+        # Intentional public compatibility attributes used by CLI diagnostics and callers.
+        self.record_store = (
+            record_store
+            if record_store is not None
+            else StoreBackedRecordStore(config.state_dir, command_executor=self._executor)
+        )
+        # ``ledger`` is retained as the public Forge reader name, but the
+        # normal implementation is now the Store-backed projection.  The
+        # old JSONL Ledger is used only by explicit differential/migration
+        # callers and is never constructed on this path.
+        self.ledger = getattr(self.record_store, "ledger", self.record_store)
+
         self._lifecycle = LifecycleContext(
             mode=mode,
             records=self.ledger,
@@ -459,7 +469,37 @@ class Forge:
     def continuous_status(self) -> dict[str, object]:
         from .continuous import ContinuousSupervisor
 
-        return ContinuousSupervisor(self).read_status()
+        supervisor = ContinuousSupervisor(self)
+        persisted = supervisor.read_status()
+        live = supervisor.status()
+        persisted["resources"] = live["resources"]
+        for key in ("resource_exhaustion_events", "deferred_jobs"):
+            persisted[key] = max(int(persisted.get(key, 0) or 0), int(live.get(key, 0) or 0))
+        active_job = persisted.get("active_job")
+        if isinstance(active_job, dict):
+            started = active_job.get("started_monotonic")
+            if isinstance(started, (int, float)) and not isinstance(started, bool):
+                active_job["elapsed_seconds"] = round(time.monotonic() - float(started), 3)
+            resources = live.get("resources")
+            if isinstance(resources, dict):
+                active_job["resource_protection_state"] = resources.get("state")
+                active_job["resource_envelope_identity"] = resources.get(
+                    "resource_envelope_identity"
+                )
+                active_job["execution_memory_current_bytes"] = resources.get(
+                    "aggregate_memory_current_bytes"
+                )
+                active_job["execution_memory_peak_bytes"] = resources.get(
+                    "aggregate_memory_peak_bytes"
+                )
+            aggregate_process_count = (
+                resources.get("aggregate_process_count") if isinstance(resources, dict) else None
+            )
+            if isinstance(aggregate_process_count, int) and not isinstance(
+                aggregate_process_count, bool
+            ):
+                active_job["execution_process_count_current"] = aggregate_process_count
+        return persisted
 
     def mncs_failure_loop(
         self,
@@ -748,3 +788,28 @@ class Forge:
 
     def compiler_candidate_inspect(self, candidate_id: str) -> dict[str, object]:
         return self._compiler_candidate_service.inspect_unresolved(candidate_id)
+
+    def close(self) -> None:
+        """Release Forge-owned retained native and Store sessions."""
+
+        if getattr(self, "_closed", True):
+            return
+        self._closed = True
+        native = getattr(self, "_native", None)
+        close_native = getattr(native, "close", None)
+        if callable(close_native):
+            close_native()
+        if getattr(self, "_owns_record_store", False):
+            close_store = getattr(getattr(self, "record_store", None), "close", None)
+            if callable(close_store):
+                close_store()
+
+    def __enter__(self) -> Forge:
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        with suppress(Exception):
+            self.close()

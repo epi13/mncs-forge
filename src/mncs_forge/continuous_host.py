@@ -77,6 +77,9 @@ def main(argv: list[str] | None = None) -> int:
                 "config_path": str(config.config_path),
                 "phase": "running",
                 "started_at": time.time(),
+                "resource_state": forge._executor.resource_status()
+                if callable(getattr(forge._executor, "resource_status", None))
+                else {"state": "unknown", "limitation": "Runner resource status unavailable"},
             },
         )
         supervisor.run(once=False)

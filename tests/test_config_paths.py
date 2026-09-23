@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from mncs_forge.config import ForgeConfig, load_config
+from mncs_forge.config import ForgeConfig, load_config, validate_config_data
 from mncs_forge.engine import Forge
 from mncs_forge.errors import ForgeError
 from mncs_forge.execution import validate_argv
@@ -28,6 +28,8 @@ def test_configuration_defaults_remain_compatible(config: ForgeConfig) -> None:
         "max_changed_paths": 64,
         "max_dependency_identities": 64,
         "max_question_parameters": 32,
+        "workspace_bytes": 1073741824,
+        "max_workspace_entries": 50000,
     }
     project_workflow = config.workflows["project-check"]
     assert project_workflow.disclosure == "compact"
@@ -38,6 +40,27 @@ def test_configuration_defaults_remain_compatible(config: ForgeConfig) -> None:
     provider = config.providers["provider-pass"]
     assert provider.transport == "stdio-jsonl"
     assert provider.required is False
+
+
+def test_continuous_micro_verifier_declarations_have_an_event_capacity(
+    config: ForgeConfig,
+) -> None:
+    raw = {
+        **config.raw,
+        "continuous": {
+            "enabled": True,
+            "triggers": [
+                {
+                    "id": "bounded-micro",
+                    "action": "micro_verifier",
+                    "maximum_cost": "low",
+                    "verifier_ids": [f"verifier-{index}" for index in range(17)],
+                }
+            ],
+        },
+    }
+    with pytest.raises(ForgeError, match="per-event capacity of 16"):
+        validate_config_data(raw)
 
 
 def test_nested_configuration_can_scope_an_ancestor_project(project: Path) -> None:

@@ -19,6 +19,7 @@ from .execution_observations import ExecutionObservationBuilder
 from .identity import content_identity, file_identity, identity_map
 from .paths import is_within, resolve_contained, validate_relative_path
 from .ports import ExecutionObservation, ExecutionResult, ExecutionSession, RunnerCapabilities
+from .resource_envelope import SystemdCgroupEnvelope
 from .serialization import local_json_identity, read_json
 
 if TYPE_CHECKING:
@@ -29,6 +30,9 @@ class LocalProcessRunner:
     """Run declared commands locally while preserving the bounded subprocess contract."""
 
     runner_identity = "runner.local-process-v1"
+
+    def __init__(self, resource_envelope: SystemdCgroupEnvelope | None = None) -> None:
+        self.resource_envelope = resource_envelope
 
     def execute(
         self,
@@ -49,6 +53,7 @@ class LocalProcessRunner:
             stderr_cap=stderr_cap,
             environment=environment,
             stdin=stdin,
+            resource_envelope=self.resource_envelope,
         )
 
     def observe(
@@ -116,8 +121,15 @@ class LocalProcessRunner:
                 environment=environment,
                 stdin=stdin,
                 _observation=builder,
+                resource_envelope=self.resource_envelope,
             )
         except ForgeError as exc:
+            resource_evidence = exc.details.get("resource_evidence")
+            if isinstance(resource_evidence, Mapping):
+                envelope_identity = resource_evidence.get("resource_envelope_identity")
+                if envelope_identity is not None:
+                    builder.resource_started({"identity": envelope_identity})
+                builder.resource_finished(resource_evidence)
             builder.failed(exc)
             return builder.session(None, exc)
         builder.completed(result)
@@ -145,6 +157,11 @@ class LocalProcessRunner:
         return identity.removeprefix("sha256:")
 
     def inspect_capabilities(self) -> RunnerCapabilities:
+        resource_capability = (
+            self.resource_envelope.resource_limit_capability
+            if self.resource_envelope is not None
+            else "unknown"
+        )
         return RunnerCapabilities(
             runner_kind="local-process",
             runner_version="1",
@@ -159,7 +176,23 @@ class LocalProcessRunner:
             sandbox_isolation="not-provided",
             network_isolation="not-provided",
             filesystem_isolation="not-provided",
+            memory_limit=resource_capability,
+            process_count_limit=resource_capability,
+            aggregate_concurrency_limit=resource_capability,
         )
+
+    def resource_status(self) -> dict[str, object]:
+        if self.resource_envelope is None:
+            return {
+                "state": "not-required",
+                "mechanism": None,
+                "limitation": "continuous resource envelope is not enabled for this Forge instance",
+            }
+        return self.resource_envelope.status()
+
+    def set_job_context(self, value: Mapping[str, object] | None) -> None:
+        if self.resource_envelope is not None:
+            self.resource_envelope.set_job_context(value)
 
 
 # Preserve the existing concrete adapter name while callers migrate to the runner vocabulary.
@@ -171,13 +204,25 @@ def build_runner(config: ForgeConfig) -> LocalProcessRunner | PodmanRunner:
 
     settings = config.runner_settings
     kind = str(settings.get("kind", "local-process"))
+    continuous_enabled = bool(config.continuous_settings.get("enabled", False))
+    resource_envelope = (
+        SystemdCgroupEnvelope(
+            _mapping(config.continuous_settings.get("resource_envelope")), required=True
+        )
+        if continuous_enabled
+        else None
+    )
     if kind == "local-process":
-        return LocalProcessRunner()
+        return LocalProcessRunner(resource_envelope)
     if kind == "podman-rootless":
         from .podman_runner import build_podman_runner
 
-        return build_podman_runner(settings)
+        return build_podman_runner(settings, resource_envelope=resource_envelope)
     raise ForgeError("CONFIG_INVALID", f"unsupported runner kind: {kind!r}")
+
+
+def _mapping(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
 
 
 class LocalProjectObserver:
@@ -336,6 +381,8 @@ class LocalProjectObserver:
         return executable, identity
 
     def provider_workspace(self, *, evaluator: bool = False) -> tempfile.TemporaryDirectory[str]:
+        workspace_byte_limit = int(self.config.verifier_limits["workspace_bytes"])
+        workspace_entry_limit = int(self.config.verifier_limits["max_workspace_entries"])
         temporary = tempfile.TemporaryDirectory(prefix="mncs-forge-provider-")
         workspace = Path(temporary.name)
         visible_keys = [
@@ -349,10 +396,19 @@ class LocalProjectObserver:
         ]
         if evaluator:
             visible_keys.append("protected")
-        for key in visible_keys:
-            for source in self.config.paths(key):
-                if not source.exists():
-                    continue
+        sources = [
+            source
+            for key in visible_keys
+            for source in self.config.paths(key)
+            if source.exists()
+        ]
+        try:
+            self._check_workspace_bound(
+                sources,
+                byte_limit=workspace_byte_limit,
+                entry_limit=workspace_entry_limit,
+            )
+            for source in sources:
                 relative = source.relative_to(self.config.root)
                 target = workspace / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -360,7 +416,91 @@ class LocalProjectObserver:
                     shutil.copytree(source, target, symlinks=False, dirs_exist_ok=True)
                 else:
                     shutil.copy2(source, target, follow_symlinks=True)
+        except BaseException:
+            temporary.cleanup()
+            raise
         return temporary
+
+    def _check_workspace_bound(
+        self, sources: list[Path], *, byte_limit: int, entry_limit: int
+    ) -> None:
+        """Preflight copy size without materializing file contents in Forge memory."""
+
+        entries = 0
+        total_bytes = 0
+        visited_directories: set[tuple[int, int]] = set()
+        pending = list(sources)
+        root = self.config.root.resolve()
+        while pending:
+            path = pending.pop()
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(root)
+                metadata = resolved.stat()
+            except (OSError, ValueError) as error:
+                raise ForgeError(
+                    "WORKSPACE_SCOPE",
+                    f"provider workspace input is unavailable or escapes the workspace: {path.name}",
+                ) from error
+            entries += 1
+            if entries > entry_limit:
+                raise ForgeError(
+                    "WORKSPACE_LIMIT",
+                    f"provider workspace exceeds the {entry_limit}-entry bound",
+                    details={
+                        "resource_evidence": {
+                            "resource_metric": "workspace-entry-count",
+                            "resource_bound": entry_limit,
+                            "resource_observed": entries,
+                            "resource_exhausted": True,
+                        }
+                    },
+                )
+            if resolved.is_dir():
+                identity = (metadata.st_dev, metadata.st_ino)
+                if identity in visited_directories:
+                    continue
+                visited_directories.add(identity)
+                try:
+                    with os.scandir(resolved) as children:
+                        for child in children:
+                            if entries + len(pending) >= entry_limit:
+                                observed = entries + len(pending) + 1
+                                raise ForgeError(
+                                    "WORKSPACE_LIMIT",
+                                    f"provider workspace exceeds the {entry_limit}-entry bound",
+                                    details={
+                                        "resource_evidence": {
+                                            "resource_metric": "workspace-entry-count",
+                                            "resource_bound": entry_limit,
+                                            "resource_observed": observed,
+                                            "resource_exhausted": True,
+                                        }
+                                    },
+                                )
+                            pending.append(Path(child.path))
+                except ForgeError:
+                    raise
+                except OSError as error:
+                    raise ForgeError(
+                        "WORKSPACE_UNKNOWN",
+                        f"provider workspace directory cannot be enumerated: {resolved.name}",
+                    ) from error
+            else:
+                total_bytes += metadata.st_size
+                if total_bytes > byte_limit:
+                    raise ForgeError(
+                        "WORKSPACE_LIMIT",
+                        f"provider workspace exceeds the {byte_limit}-byte bound",
+                        details={
+                            "resource_evidence": {
+                                "resource_metric": "workspace-bytes",
+                                "resource_bound": byte_limit,
+                                "resource_observed": total_bytes,
+                                "resource_exhausted": True,
+                            }
+                        },
+                    )
 
     def validate_changed_files(self, changed_files: list[str]) -> dict[str, str]:
         writable = self.config.relative_scopes("candidates", "generated")

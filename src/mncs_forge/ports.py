@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -21,6 +21,8 @@ class ExecutionResult:
     stdout: bytes
     stderr: bytes
     duration_seconds: float
+    resource_envelope: Mapping[str, object] = field(default_factory=dict)
+    resource_observations: Mapping[str, object] = field(default_factory=dict)
 
 
 ExecutionTermination = Literal[
@@ -104,6 +106,9 @@ class RunnerCapabilities:
     sandbox_isolation: RunnerCapability
     network_isolation: RunnerCapability
     filesystem_isolation: RunnerCapability
+    memory_limit: RunnerCapability = "unknown"
+    process_count_limit: RunnerCapability = "unknown"
+    aggregate_concurrency_limit: RunnerCapability = "unknown"
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -120,6 +125,9 @@ class RunnerCapabilities:
             "sandbox_isolation": self.sandbox_isolation,
             "network_isolation": self.network_isolation,
             "filesystem_isolation": self.filesystem_isolation,
+            "memory_limit": self.memory_limit,
+            "process_count_limit": self.process_count_limit,
+            "aggregate_concurrency_limit": self.aggregate_concurrency_limit,
         }
 
 
@@ -157,6 +165,8 @@ class ExecutionObservation:
     filesystem_policy: str
     network_policy: str
     same_operator: bool | None
+    resource_envelope: Mapping[str, object] = field(default_factory=dict)
+    resource_observations: Mapping[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -190,6 +200,8 @@ class ExecutionObservation:
             "filesystem_policy": self.filesystem_policy,
             "network_policy": self.network_policy,
             "same_operator": self.same_operator,
+            "resource_envelope": dict(self.resource_envelope),
+            "resource_observations": dict(self.resource_observations),
         }
 
 

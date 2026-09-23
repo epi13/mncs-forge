@@ -92,7 +92,7 @@ class MncsDevelopmentService:
         if self.native_mode == "off":
             return None
         if self.native is None:
-            candidate = NativeForgeAdapter(self.config.root)
+            candidate = NativeForgeAdapter(self.config.root, runner=self.executor)
             try:
                 candidate.ensure_available()
             except ForgeError:

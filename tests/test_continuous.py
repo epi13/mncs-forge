@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+from conftest import with_native_latency_allowance
+
+from mncs_forge.adapters import LocalProcessRunner
 from mncs_forge.continuous import ContinuousSupervisor
 from mncs_forge.engine import Forge
+from mncs_forge.execution_observations import ExecutionObservationBuilder
+from mncs_forge.ports import ExecutionResult
 from mncs_forge.record_store import LocalRecordStore
-
-from conftest import with_native_latency_allowance
 
 
 def _supervisor() -> ContinuousSupervisor:
-    return object.__new__(ContinuousSupervisor)
+    supervisor = object.__new__(ContinuousSupervisor)
+    supervisor.pending = OrderedDict()
+    supervisor.pending_overflow_count = 0
+    supervisor.pending_overflow_identity = None
+    supervisor.cancelled_jobs = 0
+    return supervisor
 
 
 def _event() -> dict[str, object]:
@@ -185,10 +194,78 @@ def test_reconciled_security_trigger_runs_bounded_verifier_and_reuses_evidence(
             },
         )
     )
-    # This focused trigger test uses the explicitly identified in-process
-    # adapter so provider/trigger behavior is isolated from the native Store
-    # benchmark. Store-backed evidence reuse is covered separately.
-    forge = Forge(configured, record_store=LocalRecordStore(project / ".local-state"))
+    # The coordinator's trigger/evidence behavior is exercised with a fixture
+    # Runner. Resource-envelope enforcement has separate fake-cgroup tests, so
+    # this test never starts a host systemd scope.
+    class FixtureRunner(LocalProcessRunner):
+        def run(
+            self,
+            command,
+            *,
+            cwd,
+            timeout,
+            output_cap,
+            stderr_cap=None,
+            environment,
+            stdin=b"",
+        ):
+            request = json.loads(stdin)
+            response = {
+                "protocol_version": "0.1",
+                "type": "analysis_response",
+                "request_id": request["request_id"],
+                "provider": {
+                    "id": "fake-security_pass",
+                    "name": "fake-security_pass",
+                    "version": "1",
+                    "identity": "fake-security_pass",
+                },
+                "status": "PASS",
+                "summary": "bounded fake security verifier",
+                "witnesses": [],
+                "limitations": [],
+                "extensions": {
+                    "mncs_forge": {
+                        "assumptions": [],
+                        "dependency_envelope": {
+                            "paths": ["reference/reference.py"],
+                            "identities": {},
+                            "complete": True,
+                        },
+                    }
+                },
+            }
+            stdout = json.dumps(response, sort_keys=True, separators=(",", ":")).encode()
+            result = ExecutionResult(
+                argv=list(command),
+                returncode=0,
+                stdout=stdout,
+                stderr=b"",
+                duration_seconds=0.001,
+            )
+            builder = ExecutionObservationBuilder(
+                argv=list(command),
+                cwd=cwd,
+                timeout=timeout,
+                stdout_limit=output_cap,
+                stderr_limit=stderr_cap or output_cap,
+                environment=environment,
+                stdin=stdin,
+                capabilities=self.inspect_capabilities(),
+                runner_identity=self.runner_identity,
+                runner_version="1",
+                executable_identity=None,
+            )
+            builder.process_started()
+            builder.feed("stdout", stdout)
+            builder.completed(result)
+            return builder.session(result, None)
+
+    forge = Forge(
+        configured,
+        record_store=LocalRecordStore(project / ".local-state"),
+        runner=FixtureRunner(),  # type: ignore[arg-type]
+    )
     forge.epoch_begin(generator_identity="generator-v1", evaluator_identity="evaluator-v1")
     candidate = forge.candidate_register(
         changed_files=["candidate/main.py"],

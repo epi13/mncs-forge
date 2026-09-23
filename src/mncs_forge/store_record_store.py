@@ -40,11 +40,14 @@ from .records import (
 )
 from .serialization import canonical_bytes
 
-
 GENESIS = "0" * 64
 _DESCRIPTOR_PREFIX = b"mncs-forge.store.descriptor/1\n"
 _TRANSFORMATION_IDENTITY = "mncs-forge:legacy-jsonl-to-store:v1"
 _STORE_PACKAGE = "mncs-store/python"
+_RECORD_PROJECTION_MAX_ENTRIES = 1024
+_RECORD_PROJECTION_MAX_BYTES = 16 * 1024 * 1024
+_RECORD_PROJECTION_ENTRY_OVERHEAD_ESTIMATE = 1024
+_COUNTER_MAX = (1 << 63) - 1
 
 
 def _load_store_types(store_root: Path | None = None) -> tuple[Any, ...]:
@@ -115,6 +118,7 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
         recover_on_open: bool = True,
         store_root: Path | None = None,
         session: Any | None = None,
+        command_executor: Any | None = None,
     ) -> None:
         BoundObjectInput, EmbeddedStore, _StoreError, _StoreResultCode = _load_store_types(store_root)
         self.state_dir = Path(state_dir)
@@ -124,6 +128,7 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
         self.store = EmbeddedStore(
             self.store_path,
             session=session,
+            command_executor=command_executor,
             failpoint=failpoint,
             verify_on_open=True,
         )
@@ -136,6 +141,8 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
         self._projection_generation: int | None = None
         self._projection_feed: str | None = None
         self._projection: tuple[LedgerEntry, ...] = ()
+        self._projection_bytes_estimate = 0
+        self._projection_evictions = 0
         if recover_on_open:
             entries = self._all_entries()
             self._ensure_index(entries)
@@ -296,9 +303,28 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
         if [entry.sequence for entry in entries] != expected:
             raise ForgeError("STORE_ORDER_INVALID", "Store ordinals are not a contiguous Forge history")
         projected = self._with_projection_hashes(entries)
-        self._projection_generation = generation
-        self._projection_feed = feed
-        self._projection = tuple(projected)
+        estimated_bytes = 0
+        if len(projected) <= _RECORD_PROJECTION_MAX_ENTRIES:
+            for entry in projected:
+                estimated_bytes += _RECORD_PROJECTION_ENTRY_OVERHEAD_ESTIMATE + 3 * len(
+                    canonical_bytes(entry.payload.to_json())
+                )
+                if estimated_bytes > _RECORD_PROJECTION_MAX_BYTES:
+                    break
+        if (
+            len(projected) <= _RECORD_PROJECTION_MAX_ENTRIES
+            and estimated_bytes <= _RECORD_PROJECTION_MAX_BYTES
+        ):
+            self._projection_generation = generation
+            self._projection_feed = feed
+            self._projection = tuple(projected)
+            self._projection_bytes_estimate = estimated_bytes
+        else:
+            self._projection_generation = None
+            self._projection_feed = None
+            self._projection = ()
+            self._projection_bytes_estimate = 0
+            self._projection_evictions = min(_COUNTER_MAX, self._projection_evictions + 1)
         return list(projected)
 
     def records(self, kind: str | None = None) -> list[LedgerEntry]:
@@ -671,9 +697,31 @@ class StoreBackedRecordStore(RecordReader, RecordCommitter):
             raise ForgeError("ACTION_EXECUTION_BUSY", "verifier action is already executing") from exc
 
     def close(self) -> None:
+        self._projection = ()
+        self._projection_generation = None
+        self._projection_feed = None
+        self._projection_bytes_estimate = 0
         self.store.close()
 
-    def __enter__(self) -> "StoreBackedRecordStore":
+    def resident_status(self) -> dict[str, object]:
+        store_status = getattr(self.store, "resident_status", None)
+        return {
+            "forge_record_projection_entries": len(self._projection),
+            "forge_record_projection_entry_capacity": _RECORD_PROJECTION_MAX_ENTRIES,
+            "forge_record_projection_retained_bytes_estimate": self._projection_bytes_estimate,
+            "forge_record_projection_byte_capacity": _RECORD_PROJECTION_MAX_BYTES,
+            "forge_record_projection_evictions": self._projection_evictions,
+            "store_generation": self.store.current_generation,
+            "embedded_store": store_status() if callable(store_status) else {},
+            "limitations": [
+                "Forge record projection retains only small generations; "
+                "larger projections are rebuilt on demand.",
+                "EmbeddedStore generation authority/index cardinality follows "
+                "the durable Store generation.",
+            ],
+        }
+
+    def __enter__(self) -> StoreBackedRecordStore:
         return self
 
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
