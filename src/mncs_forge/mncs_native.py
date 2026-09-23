@@ -2231,12 +2231,24 @@ class NativeForgeAdapter:
         return selected, deferred
 
     def verification_status_decide(
-        self, statuses: Sequence[str], *, verification_required: bool = True
+        self,
+        statuses: Sequence[str],
+        *,
+        verification_required: bool = True,
+        unresolved_count: int = 0,
     ) -> NativeVerificationStatusDecision:
         """Decide a bounded verification status set through the MNCS status lattice."""
 
         if isinstance(statuses, (str, bytes)) or len(statuses) > 16:
             raise ForgeError("NATIVE_CONTINUOUS_INPUT", "status set exceeds the 16-result bound")
+        if (
+            not isinstance(unresolved_count, int)
+            or isinstance(unresolved_count, bool)
+            or not 0 <= unresolved_count < (1 << 63)
+        ):
+            raise ForgeError(
+                "NATIVE_CONTINUOUS_INPUT", "unresolved obligation count is outside the i64 bound"
+            )
         stale_observed = False
         normalized: list[str] = []
         for status in statuses:
@@ -2271,6 +2283,7 @@ class NativeForgeAdapter:
             {
                 "statuses": self._sequence_value(status_values),
                 "status_count": {"byte": {"value": len(normalized)}},
+                "unresolved_count": self._mncs_integer(unresolved_count),
             },
         )
         request = {

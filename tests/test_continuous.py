@@ -232,6 +232,52 @@ def _linux_process_state(pid: int) -> str | None:
     return stat[stat.rfind(")") + 2 : stat.rfind(")") + 3]
 
 
+def test_resource_pressure_defers_next_micro_obligation_natively() -> None:
+    supervisor = _supervisor()
+    supervisor.current_generation = 7
+    supervisor.deferred_jobs = 0
+    supervisor.stale_jobs = 0
+    event = _event()
+    trigger = {"id": "bounded-queue"}
+    first = supervisor._native_resource_transition(
+        event=event,
+        candidate="candidate:test",
+        verifier_id="verifier:first",
+        outcome="ResourcePressure",
+        evidence_status="Unknown",
+        has_outcome=True,
+        queue_remaining=1,
+    )
+    assert first.disposition == "RemainPendingAndDeferRemaining"
+    assert first.retain_current_pending is True
+    assert first.defer_remaining is True
+    supervisor._remember_micro_pending(
+        event,
+        trigger,
+        "candidate:test",
+        "verifier:first",
+        "native resource pressure",
+        {"status": "UNKNOWN", "resource_evidence": {"resource_outcome": "ResourcePressure"}},
+    )
+    supervisor.deferred_jobs += 1
+    unresolved = supervisor._defer_micro_verifiers(
+        event,
+        trigger,
+        "candidate:test",
+        ["verifier:second"],
+        "per-event queue capacity",
+    )
+
+    assert unresolved == 1
+    assert len(supervisor.pending) == 2
+    assert supervisor.deferred_jobs == 2
+    decision = supervisor._resource_semantics.verification_status_decide(
+        ["UNKNOWN"], verification_required=True, unresolved_count=unresolved
+    )
+    assert decision.status == "UNKNOWN"
+    assert decision.escalation_required is True
+
+
 def test_superseding_generation_cancels_owned_process_group(tmp_path: Path) -> None:
     supervisor = _supervisor()
     supervisor.current_generation = 7

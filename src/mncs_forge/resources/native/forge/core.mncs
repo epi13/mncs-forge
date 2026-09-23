@@ -842,7 +842,8 @@ fn verification_queue_admit(total_count: i64) -> (result: VerificationQueueDecis
 
 record VerificationStatusSet {
     statuses: [statlib.Status; 16],
-    status_count: byte
+    status_count: byte,
+    unresolved_count: i64
 }
 
 record VerificationStatusFold {
@@ -866,7 +867,9 @@ fn verification_status_step(
 }
 
 fn verification_status_aggregate(input: VerificationStatusSet) -> (result: statlib.Status) {
-    if (input.status_count as i64) > 16 { return statlib.Status.UNKNOWN; }
+    if (input.status_count as i64) > 16 || input.unresolved_count < 0 {
+        return statlib.Status.UNKNOWN;
+    }
     let initial: VerificationStatusFold = VerificationStatusFold {
         status: statlib.Status.UNKNOWN,
         count: 0
@@ -874,6 +877,10 @@ fn verification_status_aggregate(input: VerificationStatusSet) -> (result: statl
     iterate i over input.statuses carrying current: VerificationStatusFold = initial {
         let include: bool = (i as i64) < (input.status_count as i64);
         next current = verification_status_step(current, input.statuses[i], include);
+    }
+    if input.unresolved_count > 0 {
+        if current.count == 0 { return statlib.Status.UNKNOWN; }
+        return statlib.dominate(current.status, statlib.Status.UNKNOWN);
     }
     if current.count == 0 { return statlib.Status.UNKNOWN; }
     return current.status;
@@ -899,7 +906,7 @@ fn verification_status_decide(
     verification_required: bool
 ) -> (result: VerificationStatusDecision) {
     let aggregate: statlib.Status = verification_status_aggregate(input);
-    let nonempty: bool = input.status_count > 0;
+    let nonempty: bool = input.status_count > 0 || input.unresolved_count > 0;
     if verification_required && !nonempty {
         return VerificationStatusDecision {
             status: statlib.Status.UNKNOWN,

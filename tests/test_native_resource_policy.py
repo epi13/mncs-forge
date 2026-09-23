@@ -643,6 +643,31 @@ def test_native_continuous_status_decision(
 
 
 @pytest.mark.parametrize(
+    ("statuses", "unresolved_count", "expected", "escalation"),
+    [
+        (["PASS"], 1, "UNKNOWN", True),
+        (["FAIL"], 1, "FAIL", True),
+        ([], 1, "UNKNOWN", True),
+        (["PASS"], 0, "PASS", False),
+    ],
+)
+def test_native_continuous_status_includes_deferred_obligations(
+    native: NativeForgeAdapter,
+    statuses: list[str],
+    unresolved_count: int,
+    expected: str,
+    escalation: bool,
+) -> None:
+    decision = native.verification_status_decide(
+        statuses,
+        verification_required=True,
+        unresolved_count=unresolved_count,
+    )
+    assert decision.status == expected
+    assert decision.escalation_required is escalation
+
+
+@pytest.mark.parametrize(
     ("count", "expected"),
     [(0, (0, 0)), (4, (4, 0)), (16, (16, 0)), (19, (16, 3))],
 )

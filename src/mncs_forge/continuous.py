@@ -2043,14 +2043,45 @@ class ContinuousSupervisor:
         candidate: str,
         verifier_ids: list[str],
         reason: str,
-    ) -> None:
-        if not verifier_ids:
-            return
-        generation = int(event.get("current_generation", 0))
-        for verifier_id in verifier_ids:
-            self._remember_micro_pending(event, trigger, candidate, verifier_id, reason)
-        self.deferred_jobs = min(_COUNTER_MAX, self.deferred_jobs + len(verifier_ids))
-        self._escalate(event, trigger, reason, status="UNKNOWN", tier="micro")
+    ) -> int:
+        """Apply native transitions to deferred obligations and return unresolved count."""
+
+        unresolved_count = 0
+        for index, verifier_id in enumerate(verifier_ids):
+            transition = self._native_resource_transition(
+                event=event,
+                candidate=candidate,
+                verifier_id=verifier_id,
+                outcome="Unknown",
+                evidence_status="NotRun",
+                has_outcome=False,
+                queue_remaining=len(verifier_ids) - index - 1,
+                resource_gate_closed=True,
+                in_flight=False,
+            )
+            if transition.disposition in {"CancelStale", "DiscardStale"}:
+                self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
+                continue
+            if transition.retain_current_pending:
+                self._remember_micro_pending(
+                    event,
+                    trigger,
+                    candidate,
+                    verifier_id,
+                    reason,
+                )
+                self.deferred_jobs = min(_COUNTER_MAX, self.deferred_jobs + 1)
+            if transition.disposition == "EscalateUnknown":
+                self._escalate(
+                    event,
+                    trigger,
+                    reason,
+                    status="UNKNOWN",
+                    tier="micro",
+                )
+            if transition.retain_current_pending or transition.disposition == "EscalateUnknown":
+                unresolved_count += 1
+        return unresolved_count
 
     @staticmethod
     def _resource_evidence_in_result(value: object) -> dict[str, object]:
@@ -2077,6 +2108,7 @@ class ContinuousSupervisor:
         selected_count, deferred_count = self._native_queue_admission(len(verifier_ids))
         selected_ids = verifier_ids[:selected_count]
         capacity_deferred = verifier_ids[selected_count : selected_count + deferred_count]
+        unresolved_count = 0
         for index, verifier_id in enumerate(selected_ids):
             if not self._trigger_cost_allowed(trigger, verifier_id):
                 self._escalate(
@@ -2133,7 +2165,7 @@ class ContinuousSupervisor:
                     self.deferred_jobs = min(_COUNTER_MAX, self.deferred_jobs + 1)
                 if transition.defer_remaining:
                     capacity_deferred = [*selected_ids[index + 1 :], *capacity_deferred]
-                    self._defer_micro_verifiers(
+                    unresolved_count += self._defer_micro_verifiers(
                         event,
                         trigger,
                         candidate,
@@ -2241,7 +2273,7 @@ class ContinuousSupervisor:
                     )
                 if transition.defer_remaining:
                     capacity_deferred = [*selected_ids[index + 1 :], *capacity_deferred]
-                    self._defer_micro_verifiers(
+                    unresolved_count += self._defer_micro_verifiers(
                         event,
                         trigger,
                         candidate,
@@ -2294,7 +2326,7 @@ class ContinuousSupervisor:
                     verifier_id=verifier_id,
                     outcome=str(outcome),
                     evidence_status="Unknown",
-                    has_outcome=not gate_closed or outcome != "Unknown",
+                    has_outcome=True,
                     queue_remaining=(
                         len(selected_ids) - index - 1 + len(capacity_deferred)
                     ),
@@ -2320,7 +2352,7 @@ class ContinuousSupervisor:
                     )
                 if transition.defer_remaining:
                     capacity_deferred = [*selected_ids[index + 1 :], *capacity_deferred]
-                    self._defer_micro_verifiers(
+                    unresolved_count += self._defer_micro_verifiers(
                         event,
                         trigger,
                         candidate,
@@ -2333,19 +2365,12 @@ class ContinuousSupervisor:
                     self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
                     break
         if capacity_deferred:
-            self._defer_micro_verifiers(
+            unresolved_count += self._defer_micro_verifiers(
                 event,
                 trigger,
                 candidate,
                 capacity_deferred,
                 "per-event micro-verifier capacity reached",
-            )
-            results.append(
-                {
-                    "status": "UNKNOWN",
-                    "reason": "per-event micro-verifier capacity reached",
-                    "deferred_verifier_count": len(capacity_deferred),
-                }
             )
         decide_status = getattr(self._resource_semantics, "verification_status_decide", None)
         if not callable(decide_status):
@@ -2356,6 +2381,7 @@ class ContinuousSupervisor:
         status_decision = decide_status(
             [str(result.get("status", "UNKNOWN")) for result in results],
             verification_required=True,
+            unresolved_count=unresolved_count,
         )
         status = status_decision.status
         if status_decision.escalation_required:

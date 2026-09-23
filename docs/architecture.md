@@ -116,8 +116,16 @@ identity = "forge.verification-status-decision.v1"
 semantic_owner = "mncs.forge.core.v1::verification_status_decide"
 native_source = "src/mncs_forge/resources/native/forge/core.mncs"
 host_realization = "src/mncs_forge/continuous.py::ContinuousSupervisor"
-host_may = ["serialize_bounded_result_statuses", "apply_escalation_decision"]
-host_must_not = ["aggregate_pass_fail_unknown", "decide_escalation_from_aggregate"]
+host_may = [
+  "serialize_bounded_result_statuses",
+  "supply_native_unresolved_obligation_count",
+  "apply_escalation_decision",
+]
+host_must_not = [
+  "aggregate_pass_fail_unknown",
+  "classify_deferred_obligations_as_unknown",
+  "decide_escalation_from_aggregate",
+]
 status = "NATIVE_AUTHORITY"
 bootstrap_provisional = false
 

@@ -373,4 +373,8 @@ def test_resource_semantics_have_identity_bound_native_authority() -> None:
     assert "verification_resource_transition" in continuous_source
     assert "verification_queue_admit" in continuous_source
     assert "verification_status_decide" in continuous_source
+    assert "unresolved_count=unresolved_count" in continuous_source
+    assert "unresolved_count: i64" in (
+        workspace / "src" / "mncs_forge" / "resources" / "native" / "forge" / "core.mncs"
+    ).read_text(encoding="utf-8")
     assert "def select_resource_budget(" not in resource_source
