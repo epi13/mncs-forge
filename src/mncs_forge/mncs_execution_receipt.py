@@ -140,6 +140,9 @@ def _resource_limit_state(capabilities: RunnerCapabilities) -> EnforcementState:
         capabilities.timeout_enforcement,
         capabilities.stdout_limit,
         capabilities.stderr_limit,
+        capabilities.memory_limit,
+        capabilities.process_count_limit,
+        capabilities.aggregate_concurrency_limit,
     )
     if all(value == "enforced" for value in values):
         return "enforced"
@@ -227,6 +230,8 @@ def build_mncs_execution_receipt(
         "stderr_limit_bytes": observation.stderr_limit,
         "capabilities": observation.capabilities.to_dict(),
         "termination_error_code": observation.error_code,
+        "resource_envelope": dict(observation.resource_envelope),
+        "resource_observations": dict(observation.resource_observations),
     }
     placement = None
     if context.placement is not None:
@@ -274,6 +279,22 @@ def build_mncs_execution_receipt(
             "requested_limits": [
                 {"resource": "timeout", "value": observation.timeout_seconds, "unit": "seconds"},
                 {"resource": "output", "value": requested_output, "unit": "bytes"},
+                *(
+                    [
+                        {
+                            "resource": "host-memory",
+                            "value": observation.resource_envelope["memory_max_bytes"],
+                            "unit": "bytes",
+                        },
+                        {
+                            "resource": "concurrency",
+                            "value": observation.resource_envelope["concurrency_max"],
+                            "unit": "count",
+                        },
+                    ]
+                    if observation.resource_envelope
+                    else []
+                ),
             ],
             "result_semantics": context.result_semantics,
         },
@@ -345,7 +366,9 @@ def build_mncs_execution_receipt(
                 observation.capabilities.filesystem_isolation
             ),
             "network_restriction": _capability_state(observation.capabilities.network_isolation),
-            "process_restriction": "unknown",
+            "process_restriction": _capability_state(
+                observation.capabilities.process_count_limit
+            ),
             "resource_limits": _resource_limit_state(observation.capabilities),
             "test_bundle_integrity": test_bundle_integrity,
             "result_integrity": result_integrity,
@@ -362,6 +385,33 @@ def build_mncs_execution_receipt(
         },
         "extensions": extension_values,
     }
+    resource_facts = observation.resource_observations.get("resource_observations")
+    if isinstance(resource_facts, Mapping):
+        for metric, key, unit in (
+            (
+                "host-memory-peak",
+                "cgroup_memory_peak_bytes"
+                if "cgroup_memory_peak_bytes" in resource_facts
+                else "process_rss_peak_bytes",
+                "bytes",
+            ),
+            ("process-count", "process_count_peak", "count"),
+            ("cpu-time", "cpu_time_microseconds", "seconds"),
+        ):
+            value = resource_facts.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                measured = value / 1_000_000 if metric == "cpu-time" else value
+                receipt["resources"].append(
+                    {
+                        "metric": metric,
+                        "value": measured,
+                        "unit": unit,
+                        "source_identity": str(
+                            observation.resource_envelope.get("identity", "forge:cgroup-v2")
+                        ),
+                        "phase": "whole-execution",
+                    }
+                )
     receipt["receipt_identity"] = canonical_sha256(
         {key: value for key, value in receipt.items() if key != "receipt_identity"}
     )

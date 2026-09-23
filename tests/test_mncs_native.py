@@ -208,8 +208,6 @@ def test_native_lifecycle_preflight_rejects_malformed_structured_result(
             payload={"status": "returned", "returned": [{"not_a_record": {}}]},
         ),
     )
-    mncs_native._LIFECYCLE_CACHE.clear()
-
     with pytest.raises(ForgeError, match="did not return a record"):
         adapter.lifecycle_preflight("NoEpoch", "BeginEpoch")
 

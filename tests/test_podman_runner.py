@@ -48,6 +48,8 @@ elif args[:2] == ["image", "inspect"]:
 elif args[:1] == ["rm"]:
     pass
 elif args[:1] == ["run"]:
+    with open(os.path.join(home, "podman_environment.json"), "w", encoding="utf-8") as stream:
+        json.dump({"MNCS_TEST_SECRET": os.environ.get("MNCS_TEST_SECRET")}, stream)
     behavior = open(os.path.join(home, "run_behavior"), encoding="utf-8").read().strip()
     if behavior == "sleep":
         time.sleep(30)
@@ -140,7 +142,11 @@ def test_container_invocation_preserves_declared_argv(fake_podman: Path, tmp_pat
     runner = make_runner(fake_podman)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    environment = {"LANG": "C", "PATH": "/usr/bin"}
+    environment = {
+        "LANG": "C",
+        "PATH": "/usr/bin",
+        "MNCS_TEST_SECRET": "private-provider-value",
+    }
     session = runner.run(
         ["python3", "-c", "print('x')"],
         cwd=workspace,
@@ -155,7 +161,14 @@ def test_container_invocation_preserves_declared_argv(fake_podman: Path, tmp_pat
     for flag in ("--network=none", "--read-only", "-i", "--rm", "--cap-drop=all"):
         assert flag in argv
     assert f"--volume={workspace.resolve(strict=True)}:/workspace:ro" in argv
-    assert any(item.startswith("--env=LANG=C") for item in argv)
+    assert "--env=LANG" in argv
+    assert "--env=PATH" in argv
+    assert "--env=MNCS_TEST_SECRET" in argv
+    assert not any(item.startswith("--env=LANG=") for item in argv)
+    assert "private-provider-value" not in "\x00".join(argv)
+    assert json.loads((fake_podman / "podman_environment.json").read_text()) == {
+        "MNCS_TEST_SECRET": "private-provider-value"
+    }
     separator = argv.index("--")
     assert argv[separator + 1] == "quay.io/example/forge-fixture:latest"
     assert argv[separator + 2 :] == ["python3", "-c", "print('x')"]
@@ -165,6 +178,23 @@ def test_container_invocation_preserves_declared_argv(fake_podman: Path, tmp_pat
     assert properties["network_isolation"] == "established"
     assert properties["filesystem_isolation"] == "established"
     assert properties["containerization"] == "established"
+
+
+def test_resource_envelope_places_container_under_delegated_service_cgroup(
+    fake_podman: Path, tmp_path: Path
+) -> None:
+    runner = make_runner(fake_podman)
+    runner._resource_envelope = object()  # type: ignore[assignment]
+    workspace = tmp_path / "workspace-cgroup-parent"
+    workspace.mkdir()
+    argv = runner._container_argv(
+        ["true"],
+        cwd=workspace,
+        mounts=[],
+        environment={},
+        container_name="forge-fixture",
+    )
+    assert "--cgroup-parent=@mncs.current-cgroup@" in argv
 
 
 def test_writable_mount_requires_existing_directory(fake_podman: Path, tmp_path: Path) -> None:

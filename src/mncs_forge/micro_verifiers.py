@@ -955,6 +955,7 @@ class MicroVerifierService:
             "identity": None,
         }
         operational_error: dict[str, str] | None = None
+        resource_evidence: dict[str, object] | None = None
         provider_identity: dict[str, Any] | None = None
         provider_response_identity: str | None = None
         provider_executable_identity: str | None = None
@@ -987,9 +988,15 @@ class MicroVerifierService:
                     stdin=request_bytes,
                 )
                 if session.result is None:
+                    observation = session.observation
+                    resource_evidence = {
+                        "resource_envelope_identity": observation.resource_envelope.get("identity"),
+                        **dict(observation.resource_observations),
+                    }
                     raise ForgeError(
                         session.error_code or "COMMAND_START",
                         session.error_message or "verifier provider produced no execution result",
+                        details={"resource_evidence": resource_evidence},
                     )
                 execution = session.result
             if execution.returncode != 0:
@@ -1047,6 +1054,9 @@ class MicroVerifierService:
         except ForgeError as exc:
             status = "UNKNOWN"
             operational_error = {"code": exc.code, "message": exc.message}
+            candidate_resource_evidence = exc.details.get("resource_evidence")
+            if isinstance(candidate_resource_evidence, dict):
+                resource_evidence = candidate_resource_evidence
             limitations.append(f"operational verifier failure {exc.code}: {exc.message}")
         if authority_before != self.observer.current_authority_identities():
             raise ForgeError(
@@ -1120,6 +1130,17 @@ class MicroVerifierService:
             "disclosure": disclosure,
             "recorded_at": self._now(),
         }
+        if session is not None and (
+            session.observation.resource_envelope or session.observation.resource_observations
+        ):
+            resource_evidence = {
+                "resource_envelope": dict(session.observation.resource_envelope),
+                **dict(session.observation.resource_observations),
+            }
+        if resource_evidence:
+            fields["extensions"] = {
+                "mncs_forge": {"resource_evidence": resource_evidence}
+            }
         if self.mode == "evaluator" and disclosure == "status-only":
             redact_status_only_result(fields)
         result = new_record(RecordType.VERIFIER_RESULT, fields)

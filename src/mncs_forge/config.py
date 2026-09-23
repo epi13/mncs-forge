@@ -145,6 +145,8 @@ class ForgeConfig:
             "max_changed_paths": int(configured.get("max_changed_paths", 64)),
             "max_dependency_identities": int(configured.get("max_dependency_identities", 64)),
             "max_question_parameters": int(configured.get("max_question_parameters", 32)),
+            "workspace_bytes": int(configured.get("workspace_bytes", 1_073_741_824)),
+            "max_workspace_entries": int(configured.get("max_workspace_entries", 50000)),
         }
 
     @property
@@ -273,6 +275,19 @@ def validate_config_data(data: object) -> dict[str, Any]:
         issue = errors[0]
         location = ".".join(str(part) for part in issue.absolute_path) or "<root>"
         raise ForgeError("CONFIG_INVALID", f"{location}: {issue.message}")
+    continuous = data.get("continuous", {})
+    triggers = continuous.get("triggers", []) if isinstance(continuous, dict) else []
+    micro_verifiers = sum(
+        len(trigger.get("verifier_ids", []))
+        for trigger in triggers
+        if isinstance(trigger, dict)
+        and trigger.get("action") in {"micro_verifier", "security_micro_verifier"}
+    )
+    if micro_verifiers > 16:
+        raise ForgeError(
+            "CONFIG_INVALID",
+            "continuous micro-verifier declarations exceed the per-event capacity of 16",
+        )
     return data
 
 

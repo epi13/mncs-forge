@@ -13,10 +13,13 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import tempfile
+import threading
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -24,6 +27,7 @@ from typing import Any, TypedDict
 
 from .errors import ForgeError
 from .execution import run_bounded
+from .ports import Runner
 from .retained_embed import RetainedEmbedError, RetainedEmbedSession
 from .serialization import reject_duplicate_keys
 
@@ -481,12 +485,115 @@ class NativeAbi:
     composites: Mapping[str, Mapping[str, object]]
 
 
-_LIFECYCLE_CACHE: dict[tuple[object, ...], NativeLifecycleResult] = {}
-_LIFECYCLE_PROJECTION_CACHE: dict[tuple[object, ...], NativeLifecycleProjection] = {}
-_RECONCILIATION_CACHE: dict[tuple[object, ...], NativeReconciliationProjection] = {}
-_READINESS_CACHE: dict[tuple[object, ...], NativeReadinessProjection] = {}
-_BUNDLE_CACHE: dict[tuple[object, ...], NativeBundlePreconditionProjection] = {}
-_ABI_CACHE: dict[tuple[object, ...], NativeAbi] = {}
+_NATIVE_CACHE_MAX_ENTRIES = 64
+_NATIVE_CACHE_MAX_BYTES = 2 * 1024 * 1024
+_COUNTER_MAX = (1 << 63) - 1
+
+
+def _retained_size(value: object, *, remaining: int, seen: set[int] | None = None) -> int:
+    """Conservatively estimate retained Python object size, stopping at a fixed cap."""
+
+    if remaining <= 0:
+        return 0
+    visited = seen if seen is not None else set()
+    identity = id(value)
+    if identity in visited:
+        return 0
+    visited.add(identity)
+    size = sys.getsizeof(value)
+    if size >= remaining:
+        return remaining
+    if isinstance(value, Mapping):
+        children = (child for pair in value.items() for child in pair)
+    elif isinstance(value, (tuple, list, set, frozenset, OrderedDict)):
+        children = iter(value)
+    elif is_dataclass(value) and not isinstance(value, type):
+        children = (getattr(value, field.name) for field in fields(value))
+    else:
+        return size
+    for child in children:
+        size += _retained_size(child, remaining=remaining - size, seen=visited)
+        if size >= remaining:
+            return remaining
+    return size
+
+
+class BoundedNativeCache:
+    """Adapter-owned exact-key LRU with entry and approximate byte ceilings."""
+
+    def __init__(self, *, max_entries: int = _NATIVE_CACHE_MAX_ENTRIES,
+                 max_bytes: int = _NATIVE_CACHE_MAX_BYTES) -> None:
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+        self._items: OrderedDict[tuple[object, ...], tuple[object, int]] = OrderedDict()
+        self._retained_bytes = 0
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._identity_invalidations = 0
+        self._lock = threading.RLock()
+
+    def get(self, key: tuple[object, ...]) -> Any | None:
+        with self._lock:
+            found = self._items.get(key)
+            if found is None:
+                self._misses = min(_COUNTER_MAX, self._misses + 1)
+                return None
+            self._items.move_to_end(key)
+            self._hits = min(_COUNTER_MAX, self._hits + 1)
+            return found[0]
+
+    def put(self, key: tuple[object, ...], value: object) -> None:
+        limit = self.max_bytes
+        item_bytes = _retained_size((key, value), remaining=limit + 1)
+        if item_bytes > limit:
+            return
+        with self._lock:
+            prior = self._items.pop(key, None)
+            if prior is not None:
+                self._retained_bytes -= prior[1]
+            while self._items and (
+                len(self._items) >= self.max_entries
+                or self._retained_bytes + item_bytes > self.max_bytes
+            ):
+                _old_key, (_old_value, old_bytes) = self._items.popitem(last=False)
+                self._retained_bytes -= old_bytes
+                self._evictions = min(_COUNTER_MAX, self._evictions + 1)
+            self._items[key] = (value, item_bytes)
+            self._retained_bytes += item_bytes
+
+    def retain_semantic_identity(self, semantic_identity: str) -> None:
+        """Drop generations that cannot satisfy an exact current semantic key."""
+
+        with self._lock:
+            stale = [
+                key for key in self._items
+                if len(key) < 2 or key[1] != semantic_identity
+            ]
+            for key in stale:
+                _value, item_bytes = self._items.pop(key)
+                self._retained_bytes -= item_bytes
+                self._identity_invalidations = min(
+                    _COUNTER_MAX, self._identity_invalidations + 1
+                )
+
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+            self._retained_bytes = 0
+
+    def stats(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "entries": len(self._items),
+                "entry_capacity": self.max_entries,
+                "retained_bytes_estimate": self._retained_bytes,
+                "byte_capacity": self.max_bytes,
+                "hits": self._hits,
+                "misses": self._misses,
+                "evictions": self._evictions,
+                "identity_invalidations": self._identity_invalidations,
+            }
 
 
 def canonical_candidate_material(
@@ -535,11 +642,13 @@ class NativeForgeAdapter:
         language_root: Path | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         output_bytes: int = DEFAULT_OUTPUT_BYTES,
+        runner: Runner | None = None,
     ) -> None:
         self.forge_root = forge_root.resolve()
         self.language_root = self._discover_language_root(language_root)
         self.timeout_seconds = timeout_seconds
         self.output_bytes = output_bytes
+        self.runner = runner
         self._assurance_cache_option_supported: bool | None = None
         self._retained_session: RetainedEmbedSession | None = None
         self._retained_identity: str | None = None
@@ -549,7 +658,19 @@ class NativeForgeAdapter:
         self._identity_value: str | None = None
         self._process_invocations = 0
         self._retained_invocations = 0
-        self._retained_call_seconds: list[float] = []
+        self._retained_call_mean_seconds = 0.0
+        self._retained_call_max_seconds = 0.0
+        self._native_caches = {
+            name: BoundedNativeCache()
+            for name in (
+                "lifecycle",
+                "lifecycle_projection",
+                "reconciliation",
+                "readiness",
+                "bundle",
+                "abi",
+            )
+        }
         self._resource_stack = ExitStack()
         configured_source = os.environ.get("MNCS_FORGE_NATIVE_SOURCE")
         if configured_source:
@@ -562,16 +683,27 @@ class NativeForgeAdapter:
         self.assurance_descriptor = self.native_root / "assurance-application.json"
 
     def __del__(self) -> None:
-        # ``as_file`` normally resolves to the installed filesystem.  The
-        # context is still closed for zip-backed importers and test fixtures.
-        stack = getattr(self, "_resource_stack", None)
-        if stack is not None:
-            with suppress(Exception):
-                stack.close()
+        with suppress(Exception):
+            self.close()
+
+    def close(self) -> None:
+        """Release adapter-owned retained application state at Forge shutdown."""
+
         session = getattr(self, "_retained_session", None)
         if session is not None:
             with suppress(Exception):
                 session.close()
+            self._retained_session = None
+            self._retained_identity = None
+            self._retained_artifact_identity = None
+        for cache in getattr(self, "_native_caches", {}).values():
+            cache.clear()
+        # ``as_file`` normally resolves to the installed filesystem. This
+        # also covers zip-backed importers and test fixtures.
+        stack = getattr(self, "_resource_stack", None)
+        if stack is not None:
+            with suppress(Exception):
+                stack.close()
 
     @staticmethod
     def _discover_language_root(explicit: Path | None) -> Path | None:
@@ -800,16 +932,27 @@ class NativeForgeAdapter:
         if not self.forge_root.is_dir():
             raise ForgeError("NATIVE_CONFIG_INVALID", "Forge root is not a directory")
         command = [*self._command(), *arguments]
-        self._process_invocations += 1
-        result = run_bounded(
-            command,
-            cwd=self.forge_root,
-            timeout=self.timeout_seconds,
-            output_cap=self.output_bytes,
-            stderr_cap=self.output_bytes,
-            environment=self._environment(),
-            stdin=stdin,
-        )
+        self._process_invocations = min(_COUNTER_MAX, self._process_invocations + 1)
+        if self.runner is not None:
+            result = self.runner.execute(
+                command,
+                cwd=self.forge_root,
+                timeout=self.timeout_seconds,
+                output_cap=self.output_bytes,
+                stderr_cap=self.output_bytes,
+                environment=self._environment(),
+                stdin=stdin,
+            )
+        else:
+            result = run_bounded(
+                command,
+                cwd=self.forge_root,
+                timeout=self.timeout_seconds,
+                output_cap=self.output_bytes,
+                stderr_cap=self.output_bytes,
+                environment=self._environment(),
+                stdin=stdin,
+            )
         payload: dict[str, Any] | None = None
         try:
             decoded = result.stdout.decode("utf-8")
@@ -939,11 +1082,15 @@ class NativeForgeAdapter:
             if self.language_root is not None
             else None,
         }
+        prior_identity = self._identity_value
         self._identity_signature = signature
         self._identity_environment_signature = environment_signature
         self._identity_value = hashlib.sha256(
             json.dumps(identity, sort_keys=True).encode("utf-8")
         ).hexdigest()
+        if prior_identity is not None and prior_identity != self._identity_value:
+            for cache in self._native_caches.values():
+                cache.retain_semantic_identity(self._identity_value)
         return self._identity_value
 
     def _artifact_cache_path(self, identity: str) -> Path:
@@ -991,14 +1138,24 @@ class NativeForgeAdapter:
                 "--target",
                 NATIVE_BACKEND,
             ]
-            result = run_bounded(
-                command,
-                cwd=self.forge_root,
-                timeout=self.timeout_seconds,
-                output_cap=max(self.output_bytes, NATIVE_ARTIFACT_OUTPUT_BYTES),
-                stderr_cap=max(self.output_bytes, NATIVE_ARTIFACT_OUTPUT_BYTES),
-                environment=self._environment(),
-            )
+            if self.runner is not None:
+                result = self.runner.execute(
+                    command,
+                    cwd=self.forge_root,
+                    timeout=self.timeout_seconds,
+                    output_cap=max(self.output_bytes, NATIVE_ARTIFACT_OUTPUT_BYTES),
+                    stderr_cap=max(self.output_bytes, NATIVE_ARTIFACT_OUTPUT_BYTES),
+                    environment=self._environment(),
+                )
+            else:
+                result = run_bounded(
+                    command,
+                    cwd=self.forge_root,
+                    timeout=self.timeout_seconds,
+                    output_cap=max(self.output_bytes, NATIVE_ARTIFACT_OUTPUT_BYTES),
+                    stderr_cap=max(self.output_bytes, NATIVE_ARTIFACT_OUTPUT_BYTES),
+                    environment=self._environment(),
+                )
             artifact_path = output_dir / "backend.json"
             if result.returncode != 0 or not artifact_path.is_file():
                 detail = (result.stderr or result.stdout)[-4000:].decode(
@@ -1060,12 +1217,14 @@ class NativeForgeAdapter:
             "artifact_identity": self._retained_artifact_identity,
             "call_count": self._retained_invocations,
             "process_invocations": self._process_invocations,
-            "mean_call_seconds": (
-                sum(self._retained_call_seconds) / len(self._retained_call_seconds)
-                if self._retained_call_seconds
-                else 0.0
-            ),
+            "mean_call_seconds": self._retained_call_mean_seconds,
+            "max_call_seconds": self._retained_call_max_seconds,
         }
+
+    def cache_status(self) -> dict[str, object]:
+        """Return bounded cardinality and byte observations for resident projections."""
+
+        return {name: cache.stats() for name, cache in self._native_caches.items()}
 
     def _execute_is_overridden(self) -> bool:
         bound = getattr(self.execute, "__func__", None)
@@ -1099,8 +1258,13 @@ class NativeForgeAdapter:
             )
         except RetainedEmbedError as exc:
             raise ForgeError("NATIVE_EXECUTION", str(exc)) from exc
-        self._retained_invocations += 1
-        self._retained_call_seconds.append(duration)
+        prior_count = self._retained_invocations
+        self._retained_invocations = min(_COUNTER_MAX, prior_count + 1)
+        sample_count = max(self._retained_invocations, 1)
+        self._retained_call_mean_seconds += (
+            duration - self._retained_call_mean_seconds
+        ) / sample_count
+        self._retained_call_max_seconds = max(self._retained_call_max_seconds, duration)
         encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         return NativeInvocation(
             command=("mncs-embed", self._retained_artifact_identity or "unknown"),
@@ -1444,7 +1608,7 @@ class NativeForgeAdapter:
 
         self.ensure_available()
         cache_key = ("language-owned-abi", self.semantic_input_identity())
-        cached = _ABI_CACHE.get(cache_key)
+        cached = self._native_caches["abi"].get(cache_key)
         if cached is not None:
             return cached
         invocation = self.invoke(["abi", str(self.native_source.resolve())])
@@ -1528,7 +1692,7 @@ class NativeForgeAdapter:
                 raise ForgeError("NATIVE_ABI_UNKNOWN", f"{context} has no record name")
             if not isinstance(record.get("type_identity"), str) or not record["type_identity"]:
                 raise ForgeError("NATIVE_ABI_UNKNOWN", f"{context} has no record identity")
-        _ABI_CACHE[cache_key] = result
+        self._native_caches["abi"].put(cache_key, result)
         return result
 
     @staticmethod
@@ -1964,7 +2128,7 @@ class NativeForgeAdapter:
             operation,
             evidence,
         )
-        cached = _LIFECYCLE_CACHE.get(cache_key)
+        cached = self._native_caches["lifecycle"].get(cache_key)
         if cached is not None:
             return cached
         request = {
@@ -2018,7 +2182,7 @@ class NativeForgeAdapter:
             status=status,
             reason=reason,
         )
-        _LIFECYCLE_CACHE[cache_key] = result
+        self._native_caches["lifecycle"].put(cache_key, result)
         return result
 
     def lifecycle_projection(
@@ -2055,7 +2219,7 @@ class NativeForgeAdapter:
             current_candidate or "",
             required_evidence,
         )
-        cached = _LIFECYCLE_PROJECTION_CACHE.get(cache_key)
+        cached = self._native_caches["lifecycle_projection"].get(cache_key)
         if cached is not None:
             return cached
         event_values = [self._history_event_value(event) for event in event_list]
@@ -2148,7 +2312,7 @@ class NativeForgeAdapter:
             status=status,
             reason=self._byte(result_fields.get("reason"), context="lifecycle projection reason"),
         )
-        _LIFECYCLE_PROJECTION_CACHE[cache_key] = result
+        self._native_caches["lifecycle_projection"].put(cache_key, result)
         return result
 
     def reconciliation_projection(
@@ -2212,7 +2376,7 @@ class NativeForgeAdapter:
             self.semantic_input_identity(),
             serialized,
         )
-        cached = _RECONCILIATION_CACHE.get(cache_key)
+        cached = self._native_caches["reconciliation"].get(cache_key)
         if cached is not None:
             return cached
         request_value = self._record_value(
@@ -2360,7 +2524,7 @@ class NativeForgeAdapter:
                 "NATIVE_RECONCILIATION_MISMATCH",
                 "native reconciliation unsupported count is inconsistent",
             )
-        _RECONCILIATION_CACHE[cache_key] = result
+        self._native_caches["reconciliation"].put(cache_key, result)
         return result
 
     def readiness_projection(
@@ -2502,7 +2666,7 @@ class NativeForgeAdapter:
                 sort_keys=True,
             ),
         )
-        cached = _READINESS_CACHE.get(cache_key)
+        cached = self._native_caches["readiness"].get(cache_key)
         if cached is not None:
             return cached
         request_value = self._record_value(
@@ -2741,7 +2905,7 @@ class NativeForgeAdapter:
             ready=ready,
             valid=valid,
         )
-        _READINESS_CACHE[cache_key] = result
+        self._native_caches["readiness"].put(cache_key, result)
         return result
 
     def bundle_precondition_projection(
@@ -2843,7 +3007,7 @@ class NativeForgeAdapter:
                 sort_keys=True,
             ),
         )
-        cached = _BUNDLE_CACHE.get(cache_key)
+        cached = self._native_caches["bundle"].get(cache_key)
         if cached is not None:
             return cached
         request = {
@@ -2927,5 +3091,5 @@ class NativeForgeAdapter:
             evidence_ready=returned_evidence_ready,
             valid=valid,
         )
-        _BUNDLE_CACHE[cache_key] = result
+        self._native_caches["bundle"].put(cache_key, result)
         return result

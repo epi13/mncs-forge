@@ -187,6 +187,54 @@ def test_receipt_adapter_produces_schema_valid_non_authoritative_envelope() -> N
     assert receipt["enforcement"]["network_restriction"] == "not-enforced"  # type: ignore[index]
 
 
+def test_receipt_carries_cgroup_limits_and_aggregate_resource_observations() -> None:
+    observation, context = _observe(LocalProcessRunner(), "print('contained')")
+    envelope = {
+        "identity": "e" * 64,
+        "memory_high_bytes": 96 * 1024 * 1024,
+        "memory_max_bytes": 128 * 1024 * 1024,
+        "memory_swap_max_bytes": 0,
+        "tasks_max": 8,
+        "concurrency_max": 1,
+        "runtime_max_seconds": 30,
+    }
+    observed = replace(
+        observation,
+        capabilities=replace(
+            observation.capabilities,
+            memory_limit="enforced",
+            process_count_limit="enforced",
+            aggregate_concurrency_limit="enforced",
+        ),
+        resource_envelope=envelope,
+        resource_observations={
+            "resource_observations": {
+                "cgroup_memory_peak_bytes": 32 * 1024 * 1024,
+                "process_count_peak": 3,
+                "cpu_time_microseconds": 250_000,
+            }
+        },
+    )
+    receipt = build_mncs_execution_receipt(observed, context)
+    errors = sorted(
+        Draft202012Validator(_schema(), format_checker=FormatChecker()).iter_errors(receipt),
+        key=str,
+    )
+    assert errors == []
+    assert receipt["enforcement"]["resource_limits"] == "enforced"  # type: ignore[index]
+    limits = receipt["policy"]["requested_limits"]  # type: ignore[index]
+    assert {item["resource"] for item in limits} >= {
+        "host-memory",
+        "concurrency",
+    }
+    local = receipt["extensions"]["forge:local-process"]  # type: ignore[index]
+    assert local["resource_envelope"]["tasks_max"] == 8  # type: ignore[index]
+    metrics = {item["metric"]: item for item in receipt["resources"]}  # type: ignore[index]
+    assert metrics["host-memory-peak"]["value"] == 32 * 1024 * 1024
+    assert metrics["process-count"]["value"] == 3
+    assert metrics["cpu-time"]["value"] == 0.25
+
+
 def test_receipt_identity_changes_when_observed_command_changes() -> None:
     first_observation, context = _observe(LocalProcessRunner(), "print('one')")
     second_observation, _ = _observe(LocalProcessRunner(), "print('two')")

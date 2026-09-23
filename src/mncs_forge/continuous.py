@@ -18,7 +18,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse
@@ -38,6 +39,15 @@ CONTINUOUS_STATUS_SCHEMA = "mncs.continuous-status/1"
 REPAIR_RESULT_SCHEMA = "mncs.continuous-repair/1"
 CONTINUOUS_LIFECYCLE_SCHEMA = "mncs.continuous-lifecycle/1"
 ENVIRONMENT_ENTRY_SCHEMA = "mncs.environment-entry/1"
+CONTINUOUS_RECENT_RESULTS = 32
+CONTINUOUS_ATTENTION_CAPACITY = 64
+CONTINUOUS_REPAIR_CAPACITY = 32
+CONTINUOUS_SELECTED_TEST_CAPACITY = 256
+CONTINUOUS_PENDING_CAPACITY = 128
+CONTINUOUS_EVENT_BATCH_CAPACITY = 64
+CONTINUOUS_EVENT_VERIFIER_CAPACITY = 16
+CONTINUOUS_STATUS_MAX_BYTES = 8 * 1024 * 1024
+_COUNTER_MAX = (1 << 63) - 1
 
 
 def _mapping(value: object) -> dict[str, Any]:
@@ -46,6 +56,200 @@ def _mapping(value: object) -> dict[str, Any]:
 
 def _list(value: object) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _compact_resource_evidence(value: object) -> dict[str, object]:
+    evidence = _mapping(value)
+    compact = {
+        key: evidence[key]
+        for key in (
+            "resource_envelope_identity",
+            "unit_identity",
+            "resource_exhausted",
+            "resource_metric",
+            "resource_bound",
+            "resource_observed",
+            "cleanup_succeeded",
+            "termination_reason",
+            "systemd_result",
+            "deferred",
+            "limitation",
+        )
+        if key in evidence
+    }
+    for key, capacity in (
+        ("resource_envelope_identity", 128),
+        ("unit_identity", 128),
+        ("resource_metric", 64),
+        ("termination_reason", 128),
+        ("systemd_result", 64),
+        ("limitation", 512),
+    ):
+        if isinstance(compact.get(key), str):
+            compact[key] = str(compact[key])[:capacity]
+    context = _mapping(evidence.get("job_context"))
+    if context:
+        bounded_context: dict[str, object] = {}
+        for key, capacity in (
+            ("identity", 128),
+            ("generation", None),
+            ("source_identity", 256),
+            ("candidate_identity", 256),
+            ("cursor", None),
+            ("trigger_id", 128),
+            ("action", 64),
+            ("verifier_count", None),
+        ):
+            item = context.get(key)
+            if capacity is None and isinstance(item, int) and not isinstance(item, bool):
+                bounded_context[key] = item
+            elif capacity is not None and isinstance(item, str):
+                bounded_context[key] = item[:capacity]
+        verifier_ids = context.get("verifier_ids")
+        if isinstance(verifier_ids, list):
+            bounded_context["verifier_ids"] = [str(item)[:128] for item in verifier_ids[:32]]
+        compact["job_context"] = bounded_context
+    resource_observations = _mapping(evidence.get("resource_observations"))
+    if resource_observations:
+        compact["resource_observations"] = {
+            key: resource_observations[key]
+            for key in (
+                "memory_current_bytes",
+                "cgroup_memory_peak_bytes",
+                "process_rss_peak_bytes",
+                "process_count_current",
+                "process_count_peak",
+                "memory_max_events",
+                "memory_oom_events",
+                "memory_oom_kill_events",
+                "memory_oom_group_kill_events",
+                "memory_high_events",
+                "process_limit_events",
+                "cpu_time_microseconds",
+            )
+            if key in resource_observations
+        }
+    return compact
+
+
+def _compact_verification_result(value: object) -> dict[str, object]:
+    result = _mapping(value)
+    keep = (
+        "obligation_identity",
+        "verifier_id",
+        "status",
+        "reused",
+        "error_code",
+        "resource_exhausted",
+        "resource_envelope_identity",
+        "resource_metric",
+        "resource_bound",
+        "resource_observed",
+        "cleanup_succeeded",
+        "generation",
+        "source_identity",
+        "source_uri",
+        "candidate_identity",
+        "trigger_id",
+        "action",
+        "cursor",
+    )
+    compact = {key: result[key] for key in keep if key in result}
+    for key, capacity in (
+        ("obligation_identity", 128),
+        ("source_identity", 256),
+        ("source_uri", 1024),
+        ("candidate_identity", 256),
+        ("trigger_id", 128),
+        ("action", 64),
+    ):
+        if isinstance(compact.get(key), str):
+            compact[key] = str(compact[key])[:capacity]
+    verifier_id = result.get("verifier_id")
+    if isinstance(verifier_id, str):
+        compact["verifier_id"] = verifier_id[:128]
+    for key, capacity in (
+        ("resource_envelope_identity", 128),
+        ("resource_metric", 64),
+    ):
+        if isinstance(compact.get(key), str):
+            compact[key] = str(compact[key])[:capacity]
+    if isinstance(compact.get("status"), str):
+        compact["status"] = str(compact["status"])[:32]
+    if isinstance(compact.get("error_code"), str):
+        compact["error_code"] = str(compact["error_code"])[:128]
+    operational_error = _mapping(result.get("operational_error"))
+    if isinstance(operational_error.get("code"), str):
+        compact["error_code"] = str(operational_error["code"])[:128]
+    for key in ("reason", "reuse_blocked"):
+        if isinstance(result.get(key), str):
+            compact[key] = str(result[key])[:256]
+    extensions = _mapping(result.get("extensions"))
+    mncs_extensions = _mapping(extensions.get("mncs_forge"))
+    resource_evidence = mncs_extensions.get("resource_evidence") or result.get("resource_evidence")
+    if resource_evidence:
+        compact["resource_evidence"] = _compact_resource_evidence(resource_evidence)
+    return compact
+
+
+def _compact_event_result(value: dict[str, object]) -> dict[str, object]:
+    """Retain a bounded status projection; complete evidence stays in its owner."""
+
+    compact: dict[str, object] = {
+        key: value[key]
+        for key in ("generation", "cursor", "status", "repair_pending_rebound")
+        if key in value
+    }
+    for key in ("reason",):
+        if isinstance(value.get(key), str):
+            compact[key] = str(value[key])[:256]
+    actions = value.get("actions")
+    if isinstance(actions, list):
+        compact_actions: list[dict[str, object]] = []
+        for action in actions[:8]:
+            if not isinstance(action, dict):
+                continue
+            entry: dict[str, object] = {}
+            for key, capacity in (("trigger", 128), ("action", 64)):
+                if isinstance(action.get(key), str):
+                    entry[key] = str(action[key])[:capacity]
+            result = _mapping(action.get("result"))
+            if isinstance(result.get("results"), list):
+                entry["result"] = {
+                    "status": result.get("status"),
+                    "tier": result.get("tier"),
+                    "results": [
+                        _compact_verification_result(item)
+                        for item in result["results"][:16]
+                        if isinstance(item, dict)
+                    ],
+                }
+            elif result.get("repair") is not None:
+                repair = _mapping(result.get("repair"))
+                compact_repair: dict[str, object] = {}
+                for key in ("original_source_identity", "resulting_source_identity"):
+                    if isinstance(repair.get(key), str):
+                        compact_repair[key] = str(repair[key])[:256]
+                if isinstance(repair.get("repair_rounds"), int):
+                    compact_repair["repair_rounds"] = repair["repair_rounds"]
+                if isinstance(repair.get("failure_conflict_reason"), str):
+                    compact_repair["failure_conflict_reason"] = str(
+                        repair["failure_conflict_reason"]
+                    )[:512]
+                entry["result"] = {
+                    "status": result.get("status"),
+                    "repair": compact_repair,
+                }
+            else:
+                entry["result"] = _compact_verification_result(result)
+            compact_actions.append(entry)
+        compact["actions"] = compact_actions
+    selected = value.get("selected_test_identities")
+    if isinstance(selected, list):
+        compact["selected_test_identities"] = [str(item)[:256] for item in selected[:128]]
+        compact["selected_test_count"] = len(selected)
+        compact["selected_test_identities_truncated"] = len(selected) > 128
+    return compact
 
 
 def _source_path(uri: str, root: Path) -> Path:
@@ -71,13 +275,23 @@ def _language_service_lease_path(config: Any) -> Path:
 
 def _read_json_path(path: Path) -> dict[str, object] | None:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        with path.open("rb") as stream:
+            encoded = stream.read(CONTINUOUS_STATUS_MAX_BYTES + 1)
+        if len(encoded) > CONTINUOUS_STATUS_MAX_BYTES:
+            return None
+        value = json.loads(encoded.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
 
 
 def _write_json_path(path: Path, value: dict[str, object]) -> None:
+    encoded = json.dumps(value, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    if len(encoded) > CONTINUOUS_STATUS_MAX_BYTES:
+        raise ForgeError(
+            "CONTINUOUS_STATUS_LIMIT",
+            f"resident status exceeds the {CONTINUOUS_STATUS_MAX_BYTES}-byte bound",
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -87,8 +301,7 @@ def _write_json_path(path: Path, value: dict[str, object]) -> None:
         suffix=".tmp",
         delete=False,
     ) as staged:
-        json.dump(value, staged, indent=2, sort_keys=True)
-        staged.write("\n")
+        staged.write(encoded.decode("utf-8"))
         staged.flush()
         os.fsync(staged.fileno())
         temporary = Path(staged.name)
@@ -123,7 +336,11 @@ def _language_service_socket(config: Any) -> Path:
 
 
 def _probe_language_service(config: Any) -> dict[str, object]:
-    result = _mapping(LanguageServiceSocket(_language_service_socket(config), timeout=0.75).request("workspace_status", {}))
+    result = _mapping(
+        LanguageServiceSocket(_language_service_socket(config), timeout=0.75).request(
+            "workspace_status", {}
+        )
+    )
     observed_root = result.get("workspace_root")
     if not isinstance(observed_root, str) or Path(observed_root).resolve() != config.root.resolve():
         raise ForgeError(
@@ -143,8 +360,16 @@ def _language_service_command(config: Any) -> list[str]:
     candidates = []
     language_root = os.environ.get("MNCS_LANGUAGE_SERVICE_ROOT")
     if language_root:
-        candidates.append(Path(language_root).expanduser() / "target" / "debug" / "mnls-language-service-host")
-    candidates.append(config.root.parent / "mncs-language-service" / "target" / "debug" / "mnls-language-service-host")
+        candidates.append(
+            Path(language_root).expanduser() / "target" / "debug" / "mnls-language-service-host"
+        )
+    candidates.append(
+        config.root.parent
+        / "mncs-language-service"
+        / "target"
+        / "debug"
+        / "mnls-language-service-host"
+    )
     candidates.append(
         Path(__file__).resolve().parents[3]
         / "mncs-language-service"
@@ -161,7 +386,9 @@ def _language_service_command(config: Any) -> list[str]:
     )
 
 
-def _terminate_language_service_start(process: subprocess.Popen[bytes], lease_path: Path, socket_path: Path) -> None:
+def _terminate_language_service_start(
+    process: subprocess.Popen[bytes], lease_path: Path, socket_path: Path
+) -> None:
     if process.poll() is None:
         process.terminate()
         try:
@@ -261,7 +488,9 @@ def _language_service_status(config: Any) -> dict[str, object]:
     }
 
 
-def continuous_lifecycle(config: Any, action: str, *, mode: str = "development") -> dict[str, object]:
+def continuous_lifecycle(
+    config: Any, action: str, *, mode: str = "development"
+) -> dict[str, object]:
     """Bounded lifecycle control around the one canonical supervisor loop."""
 
     lifecycle = _lifecycle_dir(config)
@@ -271,11 +500,81 @@ def continuous_lifecycle(config: Any, action: str, *, mode: str = "development")
         with lock:
             if action == "status":
                 status_file = _read_json_path(config.state_dir / "continuous" / "status.json") or {}
+                supervisor = _supervisor_status(config)
+                resource_state: dict[str, object] = {}
+                if bool(config.continuous_settings.get("enabled", False)):
+                    from .resource_envelope import SystemdCgroupEnvelope
+
+                    try:
+                        envelope = SystemdCgroupEnvelope(
+                            _mapping(config.continuous_settings.get("resource_envelope")),
+                            required=True,
+                        )
+                        resource_state = envelope.status()
+                    except ForgeError as error:
+                        resource_state = {
+                            "state": "unavailable",
+                            "mechanism": "systemd-user-service+cgroup-v2",
+                            "limitation": error.code,
+                        }
+                supervisor["resource_state"] = resource_state
+                persisted_resources = _mapping(status_file.get("resources"))
+                resources = {**persisted_resources, **resource_state}
+                for key in ("resource_exhaustion_events", "deferred_jobs"):
+                    resources[key] = max(
+                        int(persisted_resources.get(key, 0) or 0),
+                        int(resource_state.get(key, 0) or 0),
+                    )
+                if not resource_state.get("last_resource_event"):
+                    resources["last_resource_event"] = persisted_resources.get(
+                        "last_resource_event"
+                    )
+                status_file["resources"] = resources
+                active_job = _mapping(status_file.get("active_job"))
+                if active_job:
+                    started = active_job.get("started_monotonic")
+                    if isinstance(started, (int, float)) and not isinstance(started, bool):
+                        active_job["elapsed_seconds"] = round(time.monotonic() - float(started), 3)
+                    active_job["resource_protection_state"] = resource_state.get("state")
+                    active_job["resource_envelope_identity"] = resource_state.get(
+                        "resource_envelope_identity"
+                    )
+                    active_job["execution_memory_current_bytes"] = resource_state.get(
+                        "aggregate_memory_current_bytes"
+                    )
+                    active_job["execution_memory_peak_bytes"] = resource_state.get(
+                        "aggregate_memory_peak_bytes"
+                    )
+                    active_job["execution_process_count_current"] = resource_state.get(
+                        "aggregate_process_count"
+                    )
+                    status_file["active_job"] = active_job
+                    resources["active_jobs"] = [
+                        {
+                            key: active_job[key]
+                            for key in (
+                                "identity",
+                                "generation",
+                                "source_identity",
+                                "candidate_identity",
+                                "action",
+                                "elapsed_seconds",
+                                "resource_protection_state",
+                                "resource_envelope_identity",
+                                "execution_process_count_current",
+                            )
+                            if key in active_job
+                        }
+                    ]
+                    resources["concurrency"] = int(
+                        isinstance(active_job.get("execution_process_count_current"), int)
+                        and int(active_job["execution_process_count_current"]) > 0
+                    )
                 return {
                     "schema_version": CONTINUOUS_LIFECYCLE_SCHEMA,
                     "workspace_root": str(config.root),
                     "language_service": _language_service_status(config),
-                    "supervisor": _supervisor_status(config),
+                    "supervisor": supervisor,
                     "continuous": status_file,
                 }
             if action == "start":
@@ -369,7 +668,9 @@ def continuous_lifecycle(config: Any, action: str, *, mode: str = "development")
                 }
             raise ForgeError("CONTINUOUS_LIFECYCLE", f"unknown lifecycle action: {action}")
     except Timeout as error:
-        raise ForgeError("CONTINUOUS_LIFECYCLE_BUSY", "workspace lifecycle is already changing") from error
+        raise ForgeError(
+            "CONTINUOUS_LIFECYCLE_BUSY", "workspace lifecycle is already changing"
+        ) from error
 
 
 def _bounded_repository_state(root: Path) -> dict[str, object]:
@@ -438,6 +739,10 @@ def environment_enter(config: Any, *, mode: str = "development") -> dict[str, ob
     verification = _mapping(family.get("verification"))
     completeness = _mapping(family.get("completeness"))
     continuous = _mapping(lifecycle.get("continuous"))
+    supervisor = _mapping(lifecycle.get("supervisor"))
+    resource_summary = _mapping(continuous.get("resources")) or _mapping(
+        supervisor.get("resource_state")
+    )
     pressures = [
         item
         for item in family.get("pressures", [])
@@ -454,6 +759,11 @@ def environment_enter(config: Any, *, mode: str = "development") -> dict[str, ob
         "pending_checks": [
             item for item in continuous.get("pending_checks", []) if isinstance(item, dict)
         ][:16],
+        "pending_check_capacity": continuous.get("pending_check_capacity"),
+        "pending_check_overflow_count": continuous.get("pending_check_overflow_count"),
+        "pending_check_overflow_identity": continuous.get(
+            "pending_check_overflow_identity"
+        ),
         "counts": counts,
         "stale_evidence_count": continuous.get("stale_evidence_count"),
         "active_verification_tier": continuous.get("active_verification_tier"),
@@ -463,6 +773,12 @@ def environment_enter(config: Any, *, mode: str = "development") -> dict[str, ob
         "evidence_reused": continuous.get("evidence_reused"),
         "evidence_recomputed": continuous.get("evidence_recomputed"),
         "queued_jobs_cancelled": continuous.get("queued_jobs_cancelled"),
+        "deferred_jobs": continuous.get("deferred_jobs"),
+        "resource_exhaustion_events": continuous.get("resource_exhaustion_events"),
+        "cancellation_requested": continuous.get("cancellation_requested"),
+        "resources": resource_summary,
+        "active_job": _mapping(continuous.get("active_job")) or None,
+        "queue": _mapping(continuous.get("queue")),
     }
     manifest_identity = repository.get("manifest_identity")
     language_identity = language.get("content_identity")
@@ -500,8 +816,9 @@ def environment_enter(config: Any, *, mode: str = "development") -> dict[str, ob
                 "stream_identity": stream_identity,
             },
             "forge_supervisor": {
-                "state": _mapping(lifecycle.get("supervisor")).get("state"),
-                "pid": _mapping(lifecycle.get("supervisor")).get("pid"),
+                "state": supervisor.get("state"),
+                "pid": supervisor.get("pid"),
+                "resources": _mapping(supervisor.get("resource_state")),
             },
         },
         "canonical_authority": {
@@ -528,9 +845,7 @@ def environment_enter(config: Any, *, mode: str = "development") -> dict[str, ob
             "continuous_status": continuous_summary,
         },
         "negative_knowledge": [
-            item
-            for item in family.get("negative_knowledge", [])
-            if isinstance(item, dict)
+            item for item in family.get("negative_knowledge", []) if isinstance(item, dict)
         ][:16],
         "query_handles": [
             "family_agent_context",
@@ -545,9 +860,7 @@ def environment_enter(config: Any, *, mode: str = "development") -> dict[str, ob
             "language_service_state": _mapping(lifecycle_start.get("language_service")).get(
                 "state"
             ),
-            "forge_supervisor_state": _mapping(lifecycle_start.get("supervisor")).get(
-                "state"
-            ),
+            "forge_supervisor_state": _mapping(lifecycle_start.get("supervisor")).get("state"),
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
         },
     }
@@ -600,11 +913,19 @@ class ContinuousSupervisor:
         self.forge = forge
         self.config = forge.config
         self.settings = self.config.continuous_settings
-        self.statuses: list[str] = []
-        self.pending: dict[str, dict[str, object]] = {}
+        self.status_counts: Counter[str] = Counter()
+        self.pending: OrderedDict[str, dict[str, object]] = OrderedDict()
         self.attention: list[dict[str, object]] = []
         self.repairs: list[dict[str, object]] = []
         self.selected_test_ids: list[str] = []
+        self.selected_test_count = 0
+        self.attention_evictions = 0
+        self.repair_evictions = 0
+        self.pending_overflow_count = 0
+        self.pending_overflow_identity: str | None = None
+        self.resource_exhaustion_events = 0
+        self.deferred_jobs = 0
+        self.active_job: dict[str, object] | None = None
         self.stale_jobs = 0
         self.cancelled_jobs = 0
         self.reused_evidence = 0
@@ -614,11 +935,20 @@ class ContinuousSupervisor:
         self.current_cursor = 0
         self.stream_identity: str | None = None
         self.active_tier = "edit-time"
-        self._queued: deque[dict[str, object]] = deque()
         self._stop_requested = False
 
     def request_stop(self) -> None:
         self._stop_requested = True
+        try:
+            retained = self.read_status()
+            retained["cancellation_requested"] = True
+            active_job = _mapping(retained.get("active_job"))
+            if active_job:
+                active_job["cancellation_requested"] = True
+                retained["active_job"] = active_job
+            self._write_status(retained)
+        except (OSError, ForgeError):
+            pass
 
     def _socket(self) -> LanguageServiceSocket:
         value = self.settings.get("language_service_socket", ".mncs/mnls-language-service.sock")
@@ -662,17 +992,61 @@ class ContinuousSupervisor:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
+    @contextmanager
+    def _job_scope(self, event: dict[str, object], trigger: dict[str, object], action: str) -> Any:
+        current = _mapping(event.get("current"))
+        verifier_ids = _list(trigger.get("verifier_ids"))
+        job: dict[str, object] = {
+            "generation": int(event.get("current_generation", 0)),
+            "source_identity": str(current.get("identity") or "")[:256] or None,
+            "candidate_identity": str(self.settings.get("candidate_identity") or "")[:256] or None,
+            "cursor": int(event.get("cursor", 0)),
+            "trigger_id": str(trigger.get("id", ""))[:128],
+            "action": action[:64],
+            "verifier_ids": [item[:128] for item in verifier_ids[:32]],
+            "verifier_count": len(verifier_ids),
+            "verifier_ids_truncated": len(verifier_ids) > 32,
+            "started_at": now(),
+            "started_monotonic": time.monotonic(),
+        }
+        job["identity"] = local_json_identity(
+            {
+                key: value
+                for key, value in job.items()
+                if key not in {"started_at", "started_monotonic"}
+            }
+        )
+        self.active_job = job
+        runner = getattr(getattr(self, "forge", None), "_executor", None)
+        set_context = getattr(runner, "set_job_context", None)
+        if callable(set_context):
+            set_context(job)
+        if getattr(getattr(self, "config", None), "state_dir", None) is not None:
+            self._write_status(self.status())
+        try:
+            yield
+        finally:
+            self.active_job = None
+            if callable(set_context):
+                set_context(None)
+            if getattr(getattr(self, "config", None), "state_dir", None) is not None:
+                self._write_status(self.status())
+
     def _attention(
         self, event: dict[str, object], reason: str, *, tier: str = "incremental"
     ) -> None:
         entry = {
             "generation": event.get("current_generation"),
             "cursor": event.get("cursor"),
-            "source_identity": _mapping(event.get("current")).get("identity"),
-            "reason": reason,
+            "source_identity": str(_mapping(event.get("current")).get("identity") or "")[:256]
+            or None,
+            "reason": reason[:512],
             "tier": tier,
         }
         if entry not in self.attention:
+            if len(self.attention) >= CONTINUOUS_ATTENTION_CAPACITY:
+                del self.attention[0]
+                self.attention_evictions = min(_COUNTER_MAX, self.attention_evictions + 1)
             self.attention.append(entry)
 
     def _escalate(
@@ -691,7 +1065,148 @@ class ContinuousSupervisor:
 
     def _record_status(self, status: str) -> None:
         if status in {"PASS", "FAIL", "UNKNOWN"}:
-            self.statuses.append(status)
+            if not hasattr(self, "status_counts"):
+                self.status_counts = Counter()
+            self.status_counts[status] = min(_COUNTER_MAX, self.status_counts[status] + 1)
+
+    def _remember_pending(self, identity: str, value: dict[str, object]) -> None:
+        """Retain only the newest bounded pending obligations by exact identity."""
+
+        bounded_identity = identity if len(identity) <= 256 else local_json_identity(identity)
+        if bounded_identity in self.pending:
+            self.pending.move_to_end(bounded_identity)
+        elif len(self.pending) >= CONTINUOUS_PENDING_CAPACITY:
+            self.pending_overflow_count = min(_COUNTER_MAX, self.pending_overflow_count + 1)
+            self.pending_overflow_identity = local_json_identity(
+                {
+                    "previous_overflow_identity": self.pending_overflow_identity,
+                    "deferred_obligation_identity": bounded_identity,
+                }
+            )
+            return
+        compact = _compact_verification_result(value)
+        compact["obligation_identity"] = bounded_identity[:128]
+        self.pending[bounded_identity] = compact
+
+    @staticmethod
+    def _pending_identity(generation: int, candidate: str, verifier_id: str) -> str:
+        return local_json_identity(
+            {
+                "generation": generation,
+                "candidate_identity": candidate,
+                "verifier_id": verifier_id,
+            }
+        )
+
+    def _resolve_micro_pending(
+        self, event: dict[str, object], candidate: str, verifier_id: str
+    ) -> None:
+        self.pending.pop(
+            self._pending_identity(
+                int(event.get("current_generation", 0)), candidate, verifier_id
+            ),
+            None,
+        )
+
+    def _remember_micro_pending(
+        self,
+        event: dict[str, object],
+        trigger: dict[str, object],
+        candidate: str,
+        verifier_id: str,
+        reason: str,
+        outcome: object | None = None,
+    ) -> None:
+        generation = int(event.get("current_generation", 0))
+        current = _mapping(event.get("current"))
+        value: dict[str, object] = {
+            "verifier_id": verifier_id,
+            "status": "UNKNOWN",
+            "reason": reason[:256],
+            "reused": False,
+            "generation": generation,
+            "source_identity": str(current.get("identity") or "")[:256],
+            "source_uri": str(current.get("uri") or "")[:1024],
+            "candidate_identity": candidate[:256],
+            "trigger_id": str(trigger.get("id") or "")[:128],
+            "action": str(trigger.get("action") or "")[:64],
+            "cursor": int(event.get("cursor", 0)),
+        }
+        if outcome is not None:
+            value.update(_compact_verification_result(outcome))
+        identity = self._pending_identity(generation, candidate, verifier_id)
+        self._remember_pending(identity, value)
+
+    def _restore_pending(self, prior: dict[str, object]) -> None:
+        count = prior.get("pending_check_overflow_count")
+        if isinstance(count, int) and not isinstance(count, bool):
+            self.pending_overflow_count = min(_COUNTER_MAX, max(0, count))
+        identity = prior.get("pending_check_overflow_identity")
+        if isinstance(identity, str):
+            self.pending_overflow_identity = identity[:128]
+        values = prior.get("pending_checks")
+        if not isinstance(values, list):
+            return
+        for item in values[:CONTINUOUS_PENDING_CAPACITY]:
+            if not isinstance(item, dict):
+                continue
+            identity = item.get("obligation_identity")
+            key = identity if isinstance(identity, str) and identity else local_json_identity(item)
+            self._remember_pending(key, item)
+
+    def _cancel_superseded_pending(self, event: dict[str, object]) -> None:
+        current = _mapping(event.get("current"))
+        uri = str(current.get("uri") or "")[:1024]
+        identity = str(current.get("identity") or "")[:256]
+        if not uri or not identity:
+            return
+        stale = [
+            key
+            for key, item in self.pending.items()
+            if item.get("source_uri") == uri
+            and isinstance(item.get("source_identity"), str)
+            and item.get("source_identity") != identity
+        ]
+        for key in stale:
+            self.pending.pop(key, None)
+        self.cancelled_jobs = min(_COUNTER_MAX, self.cancelled_jobs + len(stale))
+
+    def _remember_repair(self, value: dict[str, object]) -> None:
+        """Retain only the bounded user-facing summary of a completed repair."""
+
+        compact: dict[str, object] = {}
+        if "repair_rounds" in value:
+            compact["repair_rounds"] = value["repair_rounds"]
+        for key in ("original_source_identity", "resulting_source_identity"):
+            if isinstance(value.get(key), str):
+                compact[key] = str(value[key])[:256]
+        for key in ("doctor_fix_identities", "migration_rule_identities"):
+            identities = value.get(key)
+            if isinstance(identities, list):
+                compact[key] = [str(item)[:256] for item in identities[:32]]
+                compact[f"{key}_truncated"] = len(identities) > 32
+        for key in ("validation_result", "focused_verification_result"):
+            if value.get(key) is not None:
+                compact[key] = _compact_verification_result(value[key])
+        conflict = value.get("failure_conflict_reason")
+        if isinstance(conflict, str) and conflict:
+            compact["failure_conflict_reason"] = conflict[:512]
+        if len(self.repairs) >= CONTINUOUS_REPAIR_CAPACITY:
+            del self.repairs[0]
+            self.repair_evictions = min(_COUNTER_MAX, self.repair_evictions + 1)
+        self.repairs.append(compact)
+
+    def _set_selected_test_ids(self, identities: list[str]) -> None:
+        seen: set[str] = set()
+        selected: list[str] = []
+        for identity in identities[:CONTINUOUS_SELECTED_TEST_CAPACITY]:
+            bounded = str(identity)[:256]
+            if bounded in seen:
+                continue
+            seen.add(bounded)
+            selected.append(bounded)
+        self.selected_test_count = len(identities)
+        self.selected_test_ids = sorted(selected)
 
     def _run_command(self, command: list[str], *, cwd: Path, timeout: float) -> dict[str, object]:
         environment = {
@@ -720,6 +1235,12 @@ class ContinuousSupervisor:
             "stderr": stderr[-4096:],
             "duration_seconds": session.observation.duration_seconds,
             "error_code": session.error_code,
+            "resource_evidence": {
+                "resource_envelope": dict(session.observation.resource_envelope),
+                **dict(session.observation.resource_observations),
+            }
+            if session.observation.resource_envelope or session.observation.resource_observations
+            else {},
         }
 
     @staticmethod
@@ -898,6 +1419,8 @@ class ContinuousSupervisor:
             return {
                 "status": "UNKNOWN",
                 "reason": "malformed Doctor dry-run report",
+                "error_code": dry.get("error_code"),
+                "resource_evidence": dry.get("resource_evidence"),
                 "execution": dry,
             }
         planned = dry_report.get("planned_diffs")
@@ -923,6 +1446,8 @@ class ContinuousSupervisor:
             return {
                 "status": "UNKNOWN",
                 "reason": "malformed Doctor apply report",
+                "error_code": applied_execution.get("error_code"),
+                "resource_evidence": applied_execution.get("resource_evidence"),
                 "execution": applied_execution,
             }
         convergence = (
@@ -974,7 +1499,18 @@ class ContinuousSupervisor:
                 )
         except ForgeError as error:
             result["failure_conflict_reason"] = str(error)
-        self.repairs.append(result)
+        repair_summary = {
+            "original_source_identity": result.get("original_source_identity"),
+            "resulting_source_identity": result.get("resulting_source_identity"),
+            "doctor_fix_identities": list(result.get("doctor_fix_identities", []))[:32],
+            "migration_rule_identities": list(result.get("migration_rule_identities", []))[:32],
+            "repair_rounds": result.get("repair_rounds"),
+            "validation_result": _compact_verification_result(result.get("validation_result")),
+            "focused_verification_result": None,
+            "failure_conflict_reason": str(result.get("failure_conflict_reason") or "")[:512]
+            or None,
+        }
+        self._remember_repair(repair_summary)
         self._persist_repair(event, result, applied_execution)
         status = "PASS" if result.get("failure_conflict_reason") is None else "UNKNOWN"
         self._record_status(status)
@@ -1090,6 +1626,7 @@ class ContinuousSupervisor:
             raise ForgeError(
                 "VERIFICATION_UNKNOWN",
                 f"RAVEL did not produce a plan: {execution.get('stderr', '')}",
+                details={"resource_evidence": execution.get("resource_evidence", {})},
             )
         try:
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -1139,7 +1676,7 @@ class ContinuousSupervisor:
         try:
             plan = self._ravel_plan(event, source_path, run_dir)
             selected = _list(_mapping(plan.get("selection")).get("selected_test_identities"))
-            self.selected_test_ids = sorted(set(selected))
+            self._set_selected_test_ids(selected)
             commands = self.config.public_commands()
             mncs = commands.get("mncs")
             loop = self.forge.mncs_failure_loop(
@@ -1172,7 +1709,9 @@ class ContinuousSupervisor:
                     (run_dir / "verification-plan.json").relative_to(self.config.root)
                 ),
                 ravel_command=commands.get("ravel_impact"),
-                actions_evidence_files=[str(value) for value in self.settings.get("actions_evidence_files", [])],
+                actions_evidence_files=[
+                    str(value) for value in self.settings.get("actions_evidence_files", [])
+                ],
                 actions_command=commands.get("mncs_actions"),
                 family_graph_file=(
                     str(self.settings.get("family_graph_file"))
@@ -1193,14 +1732,23 @@ class ContinuousSupervisor:
         except ForgeError as error:
             self._escalate(event, trigger, str(error))
             self._record_status("UNKNOWN")
-            return {
+            result: dict[str, object] = {
                 "status": "UNKNOWN",
                 "reason": str(error),
-                "selected_test_identities": self.selected_test_ids,
+                "selected_test_identities": list(self.selected_test_ids),
+                "selected_test_count": self.selected_test_count,
+                "selected_test_identities_truncated": self.selected_test_count
+                > CONTINUOUS_SELECTED_TEST_CAPACITY,
             }
+            result["error_code"] = error.code
+            if isinstance(error.details.get("resource_evidence"), dict):
+                result["resource_evidence"] = _compact_resource_evidence(
+                    error.details["resource_evidence"]
+                )
+            return result
         current = _mapping(client.request("workspace_status", {}))
         if int(current.get("generation", 0)) > int(event.get("current_generation", 0)):
-            self.stale_jobs += 1
+            self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
             self._record_status("UNKNOWN")
             return {
                 "status": "STALE",
@@ -1281,6 +1829,29 @@ class ContinuousSupervisor:
             }
         return None
 
+    def _defer_micro_verifiers(
+        self,
+        event: dict[str, object],
+        trigger: dict[str, object],
+        candidate: str,
+        verifier_ids: list[str],
+        reason: str,
+    ) -> None:
+        if not verifier_ids:
+            return
+        generation = int(event.get("current_generation", 0))
+        for verifier_id in verifier_ids:
+            self._remember_micro_pending(event, trigger, candidate, verifier_id, reason)
+        self.deferred_jobs = min(_COUNTER_MAX, self.deferred_jobs + len(verifier_ids))
+        self._escalate(event, trigger, reason, status="UNKNOWN", tier="micro")
+
+    @staticmethod
+    def _resource_evidence_in_result(value: object) -> dict[str, object]:
+        result = _mapping(value)
+        extensions = _mapping(result.get("extensions"))
+        mncs = _mapping(extensions.get("mncs_forge"))
+        return _mapping(mncs.get("resource_evidence") or result.get("resource_evidence"))
+
     def _micro(self, event: dict[str, object], trigger: dict[str, object]) -> dict[str, object]:
         verifier_ids = _list(trigger.get("verifier_ids"))
         if not verifier_ids:
@@ -1294,7 +1865,9 @@ class ContinuousSupervisor:
             self._record_status("UNKNOWN")
             return {"status": "UNKNOWN", "reason": "candidate identity unavailable"}
         results = []
-        for verifier_id in verifier_ids:
+        selected_ids = verifier_ids[:CONTINUOUS_EVENT_VERIFIER_CAPACITY]
+        capacity_deferred = verifier_ids[CONTINUOUS_EVENT_VERIFIER_CAPACITY:]
+        for index, verifier_id in enumerate(selected_ids):
             if not self._trigger_cost_allowed(trigger, verifier_id):
                 self._escalate(
                     event,
@@ -1313,11 +1886,14 @@ class ContinuousSupervisor:
                 continue
             reused = self._reusable_result(event, trigger, verifier_id)
             if reused is not None:
-                self.reused_evidence += 1
+                self.reused_evidence = min(_COUNTER_MAX, self.reused_evidence + 1)
                 results.append({"verifier_id": verifier_id, **reused})
-                self._record_status(str(reused["status"]))
+                reused_status = str(reused["status"])
+                self._record_status(reused_status)
+                if reused_status in {"PASS", "FAIL"}:
+                    self._resolve_micro_pending(event, candidate, verifier_id)
                 continue
-            self.recomputed_evidence += 1
+            self.recomputed_evidence = min(_COUNTER_MAX, self.recomputed_evidence + 1)
             try:
                 path = _source_path(
                     str(_mapping(event.get("current")).get("uri", "")), self.config.root
@@ -1338,18 +1914,95 @@ class ContinuousSupervisor:
                         "reuse_blocked": "verifier did not declare a complete dependency envelope",
                     }
                 results.append({"verifier_id": verifier_id, **result, "reused": False})
-                self._record_status(str(result.get("status", "UNKNOWN")))
+                result_status = str(result.get("status", "UNKNOWN"))
+                self._record_status(result_status)
+                resource_evidence = self._resource_evidence_in_result(result)
+                if resource_evidence.get("resource_exhausted") or resource_evidence.get("deferred"):
+                    self.deferred_jobs = min(_COUNTER_MAX, self.deferred_jobs + 1)
+                    self._remember_micro_pending(
+                        event,
+                        trigger,
+                        candidate,
+                        verifier_id,
+                        "current micro-verifier result was resource-limited",
+                        result,
+                    )
+                    capacity_deferred = [*selected_ids[index + 1 :], *capacity_deferred]
+                    self._defer_micro_verifiers(
+                        event,
+                        trigger,
+                        candidate,
+                        capacity_deferred,
+                        "later micro-verifiers deferred after resource pressure",
+                    )
+                    capacity_deferred = []
+                    break
+                if result_status in {"PASS", "FAIL"}:
+                    self._resolve_micro_pending(event, candidate, verifier_id)
             except ForgeError as error:
                 self._escalate(event, trigger, f"micro-verifier {verifier_id}: {error}")
                 self._record_status("UNKNOWN")
-                results.append(
-                    {
-                        "verifier_id": verifier_id,
-                        "status": "UNKNOWN",
-                        "reason": str(error),
-                        "reused": False,
+                failure: dict[str, object] = {
+                    "verifier_id": verifier_id,
+                    "status": "UNKNOWN",
+                    "reason": str(error)[:512],
+                    "error_code": error.code,
+                    "reused": False,
+                }
+                if isinstance(error.details.get("resource_evidence"), dict):
+                    failure["resource_evidence"] = _compact_resource_evidence(
+                        error.details["resource_evidence"]
+                    )
+                results.append(failure)
+                resource_evidence = _mapping(error.details.get("resource_evidence"))
+                resource_limited = bool(
+                    resource_evidence.get("resource_exhausted")
+                    or resource_evidence.get("deferred")
+                    or error.code
+                    in {
+                        "RESOURCE_ENVELOPE_UNAVAILABLE",
+                        "RESOURCE_PRESSURE",
+                        "RESOURCE_CONCURRENCY_LIMIT",
+                        "RESOURCE_LIMIT",
+                        "TIMEOUT",
+                        "OUTPUT_LIMIT",
                     }
                 )
+                if resource_limited:
+                    self.deferred_jobs = min(_COUNTER_MAX, self.deferred_jobs + 1)
+                    self._remember_micro_pending(
+                        event,
+                        trigger,
+                        candidate,
+                        verifier_id,
+                        "current micro-verifier was resource-limited",
+                        failure,
+                    )
+                    capacity_deferred = [*selected_ids[index + 1 :], *capacity_deferred]
+                    self._defer_micro_verifiers(
+                        event,
+                        trigger,
+                        candidate,
+                        capacity_deferred,
+                        "later micro-verifiers deferred after resource pressure",
+                    )
+                    capacity_deferred = []
+                    break
+        if capacity_deferred:
+            self._defer_micro_verifiers(
+                event,
+                trigger,
+                candidate,
+                capacity_deferred,
+                "per-event micro-verifier capacity reached",
+            )
+            results.append(
+                {
+                    "status": "UNKNOWN",
+                    "reason": "per-event micro-verifier capacity reached",
+                    "deferred_verifier_count": len(capacity_deferred),
+                }
+            )
         statuses = [str(result.get("status", "UNKNOWN")) for result in results]
         status = "FAIL" if "FAIL" in statuses else "UNKNOWN" if "UNKNOWN" in statuses else "PASS"
         if status in {"FAIL", "UNKNOWN"}:
@@ -1367,8 +2020,9 @@ class ContinuousSupervisor:
     ) -> dict[str, object]:
         generation = int(event.get("current_generation", 0))
         if generation < self.current_generation:
-            self.stale_jobs += 1
+            self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
             return {"status": "STALE", "reason": "event generation is older than current"}
+        self._cancel_superseded_pending(event)
         self.current_generation = generation
         self.current_source_identity = _mapping(event.get("current")).get("identity") or None
         self.current_cursor = max(self.current_cursor, int(event.get("cursor", 0)))
@@ -1383,7 +2037,8 @@ class ContinuousSupervisor:
         for trigger in matched:
             action = str(trigger.get("action"))
             if action == "doctor_safe":
-                result = self._doctor_safe(client, trigger, event)
+                with self._job_scope(event, trigger, action):
+                    result = self._doctor_safe(client, trigger, event)
                 action_results.append(
                     {"trigger": trigger.get("id"), "action": action, "result": result}
                 )
@@ -1401,20 +2056,24 @@ class ContinuousSupervisor:
             action = str(trigger.get("action"))
             if action == "verification_plan":
                 self.active_tier = "incremental"
+                with self._job_scope(event, trigger, action):
+                    result = self._selected_verification(client, event, trigger)
                 action_results.append(
                     {
                         "trigger": trigger.get("id"),
                         "action": action,
-                        "result": self._selected_verification(client, event, trigger),
+                        "result": result,
                     }
                 )
             elif action in {"micro_verifier", "security_micro_verifier"}:
                 self.active_tier = "micro"
+                with self._job_scope(event, trigger, action):
+                    result = self._micro(event, trigger)
                 action_results.append(
                     {
                         "trigger": trigger.get("id"),
                         "action": action,
-                        "result": self._micro(event, trigger),
+                        "result": result,
                     }
                 )
         rebound_verification = next(
@@ -1458,7 +2117,7 @@ class ContinuousSupervisor:
                 "actions": action_results,
             }
         if int(current.get("generation", 0)) > generation:
-            self.stale_jobs += 1
+            self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
             self._record_status("UNKNOWN")
             return {
                 "generation": generation,
@@ -1475,23 +2134,78 @@ class ContinuousSupervisor:
         }
 
     def status(self) -> dict[str, object]:
-        counts = Counter(self.statuses)
+        counts = {key: self.status_counts.get(key, 0) for key in ("PASS", "FAIL", "UNKNOWN")}
+        runner = getattr(getattr(self, "forge", None), "_executor", None)
+        resource_status = getattr(runner, "resource_status", None)
+        resources = (
+            resource_status()
+            if callable(resource_status)
+            else {
+                "state": "unknown",
+                "mechanism": None,
+                "limitation": "the configured Runner does not expose resource status",
+            }
+        )
+        native = getattr(self.forge, "_native", None)
+        cache_status = getattr(native, "cache_status", None)
+        record_store = getattr(self.forge, "record_store", None)
+        store_status = getattr(record_store, "resident_status", None)
+        resources = {
+            **resources,
+            "configured_output_limit_bytes": int(getattr(self.config, "output_cap", 0)),
+            "native_projection_caches": cache_status() if callable(cache_status) else {},
+            "store_projection": store_status() if callable(store_status) else {},
+        }
+        self.resource_exhaustion_events = max(
+            self.resource_exhaustion_events,
+            int(resources.get("resource_exhaustion_events", 0) or 0),
+        )
+        self.deferred_jobs = max(self.deferred_jobs, int(resources.get("deferred_jobs", 0) or 0))
+        active_job = dict(self.active_job) if self.active_job is not None else None
+        if active_job is not None:
+            active_job["cancellation_requested"] = self._stop_requested
+            started = active_job.get("started_monotonic")
+            if isinstance(started, (int, float)) and not isinstance(started, bool):
+                active_job["elapsed_seconds"] = round(time.monotonic() - float(started), 3)
         return {
             "schema_version": CONTINUOUS_STATUS_SCHEMA,
             "workspace_generation": self.current_generation,
             "current_source_identity": self.current_source_identity,
-            "pending_checks": list(self.pending.values()),
-            "counts": {key: counts.get(key, 0) for key in ("PASS", "FAIL", "UNKNOWN")},
+            "pending_checks": [
+                _compact_verification_result(item)
+                for item in list(self.pending.values())[-CONTINUOUS_PENDING_CAPACITY:]
+            ],
+            "pending_check_capacity": CONTINUOUS_PENDING_CAPACITY,
+            "pending_check_overflow_count": self.pending_overflow_count,
+            "pending_check_overflow_identity": self.pending_overflow_identity,
+            "counts": counts,
             "stale_evidence_count": self.stale_jobs,
-            "automatic_repairs_applied": self.repairs,
-            "selected_test_identities": self.selected_test_ids,
+            "automatic_repairs_applied": list(self.repairs),
+            "repair_history_capacity": CONTINUOUS_REPAIR_CAPACITY,
+            "repair_history_evictions": self.repair_evictions,
+            "selected_test_identities": list(self.selected_test_ids),
+            "selected_test_count": self.selected_test_count,
+            "selected_test_identities_truncated": self.selected_test_count
+            > CONTINUOUS_SELECTED_TEST_CAPACITY,
             "active_verification_tier": self.active_tier,
-            "blocking_attention_events": self.attention,
+            "blocking_attention_events": list(self.attention),
+            "attention_capacity": CONTINUOUS_ATTENTION_CAPACITY,
+            "attention_evictions": self.attention_evictions,
+            "active_job": active_job,
+            "cancellation_requested": self._stop_requested,
+            "queue": {
+                "depth": 0,
+                "capacity": 1,
+                "policy": "single synchronous job; incoming same-source events coalesce",
+            },
             "event_cursor": self.current_cursor,
             "event_stream_identity": self.stream_identity,
             "evidence_reused": self.reused_evidence,
             "evidence_recomputed": self.recomputed_evidence,
             "queued_jobs_cancelled": self.cancelled_jobs,
+            "deferred_jobs": self.deferred_jobs,
+            "resource_exhaustion_events": self.resource_exhaustion_events,
+            "resources": resources,
             "limitations": [
                 (
                     "ReferenceCompiler frontend work remains synchronous; late results are "
@@ -1506,11 +2220,8 @@ class ContinuousSupervisor:
 
     def read_status(self) -> dict[str, object]:
         path = self._status_path()
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return self.status()
-        return value if isinstance(value, dict) else self.status()
+        value = _read_json_path(path)
+        return value if value is not None else self.status()
 
     def run(
         self,
@@ -1528,11 +2239,13 @@ class ContinuousSupervisor:
             )
             return self.status()
         client = self._socket()
-        limit = int(max_events or self.settings.get("poll_max_events", 32))
+        requested_limit = int(max_events or self.settings.get("poll_max_events", 32))
+        limit = min(max(requested_limit, 1), CONTINUOUS_EVENT_BATCH_CAPACITY)
         interval = float(poll_interval_seconds or self.settings.get("poll_interval_seconds", 0.2))
         try:
             client.request("refresh_workspace", {})
             prior = self.read_status()
+            self._restore_pending(prior)
             prior_stream = prior.get("event_stream_identity")
             if self.stream_identity is None and isinstance(prior_stream, str) and prior_stream:
                 self.stream_identity = prior_stream
@@ -1597,15 +2310,15 @@ class ContinuousSupervisor:
             uri = str(_mapping(event.get("current")).get("uri", event.get("cursor")))
             previous = latest.get(uri)
             if previous is not None:
-                self.cancelled_jobs += 1
+                self.cancelled_jobs = min(_COUNTER_MAX, self.cancelled_jobs + 1)
             latest[uri] = event
-        result_history: deque[dict[str, object]] = deque(maxlen=64)
+        result_history: deque[dict[str, object]] = deque(maxlen=CONTINUOUS_RECENT_RESULTS)
         events_processed = 0
 
         def record_result(value: dict[str, object]) -> None:
             nonlocal events_processed
-            events_processed += 1
-            result_history.append(value)
+            events_processed = min(_COUNTER_MAX, events_processed + 1)
+            result_history.append(_compact_event_result(value))
 
         for event in latest.values():
             record_result(self._process_event(client, event))
@@ -1627,9 +2340,7 @@ class ContinuousSupervisor:
             for _ in range(8):
                 try:
                     client.request("refresh_workspace", {})
-                    rebound = self._poll(
-                        client, after_cursor=self.current_cursor, max_events=limit
-                    )
+                    rebound = self._poll(client, after_cursor=self.current_cursor, max_events=limit)
                 except ForgeError as error:
                     self._attention({"current_generation": self.current_generation}, str(error))
                     self._record_status("UNKNOWN")
@@ -1652,9 +2363,7 @@ class ContinuousSupervisor:
                     break
                 try:
                     client.request("refresh_workspace", {})
-                    poll = self._poll(
-                        client, after_cursor=self.current_cursor, max_events=limit
-                    )
+                    poll = self._poll(client, after_cursor=self.current_cursor, max_events=limit)
                 except ForgeError as error:
                     self._attention({"current_generation": self.current_generation}, str(error))
                     self._record_status("UNKNOWN")

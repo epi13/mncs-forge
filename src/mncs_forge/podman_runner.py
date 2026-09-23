@@ -29,6 +29,8 @@ from .execution_observations import ExecutionObservationBuilder, canonical_sha25
 from .identity import file_identity
 from .paths import resolve_contained, validate_relative_path
 from .ports import ExecutionObservation, ExecutionResult, ExecutionSession, RunnerCapabilities
+from .resource_envelope import SystemdCgroupEnvelope
+from .resource_process import CURRENT_CGROUP_PARENT_PLACEHOLDER
 
 _MIN_PODMAN_MAJOR = 4
 _PROBE_TIMEOUT_SECONDS = 60.0
@@ -62,6 +64,7 @@ class PodmanRunner:
         memory: str | None = None,
         cpus: str | None = None,
         pids_limit: int | None = None,
+        resource_envelope: SystemdCgroupEnvelope | None = None,
     ) -> None:
         if os.name != "posix":
             raise ForgeError(
@@ -83,6 +86,7 @@ class PodmanRunner:
         self._memory = memory
         self._cpus = cpus
         self._pids_limit = pids_limit
+        self._resource_envelope = resource_envelope
         version_text = self._probe(["--version"])
         parsed = _parse_version(version_text)
         if parsed is None or parsed[0] < _MIN_PODMAN_MAJOR:
@@ -117,6 +121,7 @@ class PodmanRunner:
                 timeout=_PROBE_TIMEOUT_SECONDS,
                 output_cap=1_048_576,
                 environment=dict(os.environ),
+                resource_envelope=self._resource_envelope,
             )
         except ForgeError as exc:
             raise ForgeError("RUNNER_UNAVAILABLE", f"podman probe failed: {exc.code}") from exc
@@ -142,6 +147,7 @@ class PodmanRunner:
                 timeout=_PROBE_TIMEOUT_SECONDS,
                 output_cap=65536,
                 environment=dict(os.environ),
+                resource_envelope=self._resource_envelope,
             )
         except ForgeError as exc:
             if exc.code == "TIMEOUT":
@@ -273,9 +279,13 @@ class PodmanRunner:
                 timeout=timeout,
                 output_cap=output_cap,
                 stderr_cap=stderr_cap,
-                environment=dict(os.environ),
+                # Podman resolves bare --env=NAME from its own environment.
+                # Keep provider values out of transient-unit ExecStart argv;
+                # the cgroup Runner stages this environment in its private file.
+                environment={**os.environ, **environment},
                 stdin=stdin,
                 _observation=builder,
+                resource_envelope=self._resource_envelope,
             )
         except ForgeError as exc:
             builder.failed(exc)
@@ -285,6 +295,11 @@ class PodmanRunner:
         return builder.session(result, None)
 
     def inspect_capabilities(self) -> RunnerCapabilities:
+        envelope_capability = (
+            self._resource_envelope.resource_limit_capability
+            if self._resource_envelope is not None
+            else "unknown"
+        )
         return RunnerCapabilities(
             runner_kind="podman-rootless",
             runner_version=self._client_version,
@@ -299,7 +314,26 @@ class PodmanRunner:
             sandbox_isolation=("enforced" if self._rootless_confirmed else "not-provided"),
             network_isolation="enforced",
             filesystem_isolation="enforced",
+            memory_limit=("enforced" if self._memory else envelope_capability),
+            process_count_limit=("enforced" if self._pids_limit else envelope_capability),
+            aggregate_concurrency_limit=envelope_capability,
         )
+
+    def resource_status(self) -> dict[str, object]:
+        if self._resource_envelope is None:
+            return {
+                "state": "runner-limits-only",
+                "mechanism": "podman-configured-limits",
+                "configured_memory": self._memory,
+                "configured_process_count": self._pids_limit,
+                "configured_concurrency_max": None,
+                "limitation": "aggregate concurrency and host headroom are not enforced",
+            }
+        return self._resource_envelope.status()
+
+    def set_job_context(self, value: dict[str, object] | None) -> None:
+        if self._resource_envelope is not None:
+            self._resource_envelope.set_job_context(value)
 
     def inspect_runtime(self) -> dict[str, object]:
         """Report the exact enforced property set beyond the fixed port shape."""
@@ -354,6 +388,13 @@ class PodmanRunner:
             f"--name={container_name}",
             f"--volume={cwd.resolve(strict=True)}:/workspace:ro",
         ]
+        if self._resource_envelope is not None:
+            # The transport helper substitutes the actual transient-service
+            # cgroup path before exec.  Podman's complete container tree then
+            # inherits this service's memory/PID limits and KillMode cleanup.
+            container_argv.append(
+                f"--cgroup-parent={CURRENT_CGROUP_PARENT_PLACEHOLDER}"
+            )
         for source, target in mounts:
             # ``Z`` gives the container a private SELinux label so declared
             # writable mounts are usable on SELinux hosts; podman may relabel
@@ -370,7 +411,7 @@ class PodmanRunner:
             container_argv.append(f"--pids-limit={self._pids_limit}")
         container_argv.append("--workdir=/workspace")
         for key in sorted(environment):
-            container_argv.append(f"--env={key}={environment[key]}")
+            container_argv.append(f"--env={key}")
         container_argv.extend(["--", self._image, *argv])
         return container_argv
 
@@ -397,6 +438,7 @@ class PodmanRunner:
                 timeout=15.0,
                 output_cap=65536,
                 environment=dict(os.environ),
+                resource_envelope=self._resource_envelope,
             )
 
     def _container_name(self, argv: list[str]) -> str:
@@ -428,7 +470,9 @@ class PodmanRunner:
         return f"host.podman-{digest[:32]}"
 
 
-def build_podman_runner(settings: dict[str, object]) -> PodmanRunner:
+def build_podman_runner(
+    settings: dict[str, object], *, resource_envelope: SystemdCgroupEnvelope | None = None
+) -> PodmanRunner:
     """Construct a validated runner from the declared [runner] configuration."""
 
     kind = settings.get("kind", "local-process")
@@ -448,6 +492,7 @@ def build_podman_runner(settings: dict[str, object]) -> PodmanRunner:
         memory=_optional_text(settings.get("memory")),
         cpus=_optional_text(settings.get("cpus")),
         pids_limit=_optional_int(settings.get("pids_limit")),
+        resource_envelope=resource_envelope,
     )
 
 

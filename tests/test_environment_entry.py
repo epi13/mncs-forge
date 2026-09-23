@@ -45,6 +45,17 @@ def test_continuous_enter_composes_bounded_resident_capsule(
                 "workspace_generation": 7,
                 "counts": {"PASS": 2, "FAIL": 0, "UNKNOWN": 0},
                 "blocking_attention_events": [],
+                "resources": {
+                    "state": "protected",
+                    "resource_envelope_identity": "envelope-1",
+                    "aggregate_process_count": 0,
+                },
+                "active_job": {
+                    "generation": 7,
+                    "elapsed_seconds": 1.25,
+                    "resource_protection_state": "protected",
+                },
+                "queue": {"depth": 0, "capacity": 1},
             },
         }
 
@@ -75,6 +86,11 @@ def test_continuous_enter_composes_bounded_resident_capsule(
     assert calls == ["start", "status"]
     assert capsule["schema_version"] == "mncs.environment-entry/1"
     assert capsule["workspace_generation"] == 7
+    assert capsule["task_environment"]["continuous_status"]["resources"]["state"] == (
+        "protected"
+    )
+    assert capsule["task_environment"]["continuous_status"]["active_job"]["generation"] == 7
+    assert capsule["task_environment"]["continuous_status"]["queue"]["capacity"] == 1
     assert capsule["language_identity"] == "language-1"
     assert capsule["architecture_identity"] == "architecture-1"
     assert capsule["resident_services"] == {
@@ -83,7 +99,7 @@ def test_continuous_enter_composes_bounded_resident_capsule(
             "pid": 41,
             "stream_identity": "stream-1",
         },
-        "forge_supervisor": {"state": "running", "pid": 42},
+        "forge_supervisor": {"state": "running", "pid": 42, "resources": {}},
     }
     assert capsule["negative_knowledge"] == [{"identity": "negative-1"}]
     assert "family_agent_context" in capsule["query_handles"]

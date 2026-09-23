@@ -73,7 +73,140 @@ def run_bounded(
     environment: dict[str, str],
     stdin: bytes = b"",
     _observation: ExecutionObservationSink | None = None,
+    resource_envelope: Any | None = None,
 ) -> ExecutionResult:
+    """Run inside a declared aggregate envelope when the caller requires one."""
+
+    argv = validate_argv(command)
+    validate_limits(timeout, output_cap, stderr_cap)
+    if resource_envelope is None:
+        return _run_bounded_process(
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            output_cap=output_cap,
+            stderr_cap=stderr_cap,
+            environment=environment,
+            stdin=stdin,
+            _observation=_observation,
+        )
+    with resource_envelope.execution_lock():
+        prepared = resource_envelope.prepare_execution(
+            argv, cwd=cwd, environment=environment, timeout=timeout
+        )
+        if prepared is None:
+            return _run_bounded_process(
+                argv,
+                cwd=cwd,
+                timeout=timeout,
+                output_cap=output_cap,
+                stderr_cap=stderr_cap,
+                environment=environment,
+                stdin=stdin,
+                _observation=_observation,
+            )
+        budget = resource_envelope.budget.to_dict()
+        launcher_environment = resource_envelope.launcher_environment(environment)
+        if _observation is not None:
+            _observation.resource_started(budget)  # type: ignore[attr-defined]
+        result: ExecutionResult | None = None
+        failure: ForgeError | None = None
+        try:
+            result = _run_bounded_process(
+                list(prepared.argv),
+                cwd=cwd,
+                timeout=prepared.timeout_seconds,
+                output_cap=output_cap,
+                stderr_cap=stderr_cap,
+                environment=launcher_environment,
+                stdin=stdin,
+                _observation=_observation,
+                _poll_callback=lambda: resource_envelope.observe_execution(prepared),
+            )
+        except ForgeError as error:
+            failure = error
+        except BaseException:
+            # Cancellation, KeyboardInterrupt, and unexpected runner failures
+            # must not abandon a transient systemd tree or its active-job slot.
+            try:
+                resource_envelope.finish_execution(prepared)
+            except Exception:
+                pass
+            raise
+        facts = resource_envelope.finish_execution(
+            prepared,
+            timed_out=failure is not None and failure.code == "TIMEOUT",
+            failure=failure,
+            wrapper_returncode=result.returncode if result is not None else None,
+        )
+        evidence = {
+            **facts,
+            "configured_limits": budget,
+        }
+        if _observation is not None:
+            _observation.resource_finished(evidence)  # type: ignore[attr-defined]
+        if bool(facts.get("resource_exhausted")) and failure is None:
+            metric = facts.get("resource_metric") or "declared-limit"
+            bound = facts.get("resource_bound")
+            observed = facts.get("resource_observed")
+            raise ForgeError(
+                "RESOURCE_LIMIT",
+                f"verifier exceeded its {metric} envelope (observed={observed}, bound={bound})",
+                details={"resource_evidence": evidence},
+            ) from failure
+        if failure is not None:
+            prior_evidence = failure.details.get("resource_evidence")
+            raise ForgeError(
+                failure.code,
+                failure.message,
+                details={
+                    **failure.details,
+                    "resource_evidence": {
+                        **(dict(prior_evidence) if isinstance(prior_evidence, dict) else {}),
+                        **evidence,
+                    },
+                },
+            ) from failure
+        assert result is not None
+        command_returncode = facts.get("command_returncode")
+        if not isinstance(command_returncode, int):
+            raise ForgeError(
+                "RESOURCE_EXECUTION_UNKNOWN",
+                "systemd completed the unit but did not preserve its command exit status",
+                details={
+                    "resource_evidence": {
+                        **evidence,
+                        "resource_exhausted": False,
+                        "deferred": True,
+                        "limitation": "the transient unit's command exit status was unavailable",
+                    }
+                },
+            )
+        return ExecutionResult(
+            argv=list(argv),
+            returncode=command_returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            duration_seconds=result.duration_seconds,
+            resource_envelope=budget,
+            resource_observations=evidence,
+        )
+
+
+def _run_bounded_process(
+    command: object,
+    *,
+    cwd: Path,
+    timeout: float,
+    output_cap: int,
+    stderr_cap: int | None = None,
+    environment: dict[str, str],
+    stdin: bytes = b"",
+    _observation: ExecutionObservationSink | None = None,
+    _poll_callback: Any | None = None,
+) -> ExecutionResult:
+    """Run one already-bounded direct process (or the declared envelope launcher)."""
+
     argv = validate_argv(command)
     validate_limits(timeout, output_cap, stderr_cap)
     caps = {"stdout": output_cap, "stderr": stderr_cap or output_cap}
@@ -93,6 +226,8 @@ def run_bounded(
         raise ForgeError("COMMAND_START", f"cannot start declared command: {exc}") from exc
     if _observation is not None:
         _observation.process_started()
+    if _poll_callback is not None:
+        _poll_callback()
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
@@ -126,8 +261,21 @@ def run_bounded(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 _terminate(process)
-                raise ForgeError("TIMEOUT", f"declared command exceeded {timeout:g} seconds")
-            events = selector.select(min(remaining, 0.1))
+                raise ForgeError(
+                    "TIMEOUT",
+                    f"declared command exceeded {timeout:g} seconds",
+                    details={
+                        "resource_evidence": {
+                            "resource_metric": "wall-duration",
+                            "resource_bound": timeout,
+                            "resource_observed": round(time.monotonic() - started, 6),
+                            "resource_exhausted": True,
+                        }
+                    },
+                )
+            events = selector.select(min(remaining, 0.005 if _poll_callback else 0.1))
+            if _poll_callback is not None:
+                _poll_callback()
             if not events and process.poll() is not None:
                 events = [(key, selectors.EVENT_READ) for key in selector.get_map().values()]
             for key, _ in events:
@@ -144,11 +292,33 @@ def run_bounded(
                     if _observation is not None:
                         _observation.mark_limit(str(key.data), cap)
                     _terminate(process)
-                    raise ForgeError("OUTPUT_LIMIT", f"{key.data} exceeded the {cap}-byte cap")
+                    raise ForgeError(
+                        "OUTPUT_LIMIT",
+                        f"{key.data} exceeded the {cap}-byte cap",
+                        details={
+                            "resource_evidence": {
+                                "resource_metric": "output-bytes",
+                                "resource_bound": cap,
+                                "resource_observed": len(target),
+                                "resource_exhausted": True,
+                            }
+                        },
+                    )
         returncode = process.wait(timeout=max(0.1, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as exc:
         _terminate(process)
-        raise ForgeError("TIMEOUT", f"declared command exceeded {timeout:g} seconds") from exc
+        raise ForgeError(
+            "TIMEOUT",
+            f"declared command exceeded {timeout:g} seconds",
+            details={
+                "resource_evidence": {
+                    "resource_metric": "wall-duration",
+                    "resource_bound": timeout,
+                    "resource_observed": round(time.monotonic() - started, 6),
+                    "resource_exhausted": True,
+                }
+            },
+        ) from exc
     finally:
         selector.close()
         if process.poll() is None:
