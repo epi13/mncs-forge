@@ -19,7 +19,7 @@ from .execution_observations import ExecutionObservationBuilder
 from .identity import content_identity, file_identity, identity_map
 from .paths import is_within, resolve_contained, validate_relative_path
 from .ports import ExecutionObservation, ExecutionResult, ExecutionSession, RunnerCapabilities
-from .resource_envelope import SystemdCgroupEnvelope
+from .resource_envelope import ResourceSemantics, SystemdCgroupEnvelope
 from .serialization import local_json_identity, read_json
 
 if TYPE_CHECKING:
@@ -199,7 +199,9 @@ class LocalProcessRunner:
 LocalCommandExecutor = LocalProcessRunner
 
 
-def build_runner(config: ForgeConfig) -> LocalProcessRunner | PodmanRunner:
+def build_runner(
+    config: ForgeConfig, *, resource_semantics: ResourceSemantics | None = None
+) -> LocalProcessRunner | PodmanRunner:
     """Construct the declared project runner, failing closed when unavailable."""
 
     settings = config.runner_settings
@@ -207,7 +209,9 @@ def build_runner(config: ForgeConfig) -> LocalProcessRunner | PodmanRunner:
     continuous_enabled = bool(config.continuous_settings.get("enabled", False))
     resource_envelope = (
         SystemdCgroupEnvelope(
-            _mapping(config.continuous_settings.get("resource_envelope")), required=True
+            _mapping(config.continuous_settings.get("resource_envelope")),
+            required=True,
+            resource_semantics=resource_semantics,
         )
         if continuous_enabled
         else None

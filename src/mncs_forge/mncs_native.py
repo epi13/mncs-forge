@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import threading
@@ -36,6 +38,7 @@ NATIVE_STATUS_CODES = {"PASS": 1, "FAIL": 2, "UNKNOWN": 3}
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_OUTPUT_BYTES = 1_000_000
 NATIVE_ARTIFACT_OUTPUT_BYTES = 128_000_000
+NATIVE_ABI_OUTPUT_BYTES = 8_000_000
 NATIVE_BACKEND = "mncs-research-bytecode"
 NATIVE_SOURCE_PROFILE = "0.10"
 _MNCS_TYPE_PREFIX = "mncs:0.2:finite-type:"
@@ -334,6 +337,71 @@ class NativeAssuranceDecision:
     phase: str
     terminal: bool
     valid: bool
+    duration_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class NativeResourceBudgetDecision:
+    """Typed result of Forge's canonical native resource-budget policy."""
+
+    status: str
+    memory_high_bytes: int
+    memory_max_bytes: int
+    memory_swap_max_bytes: int
+    tasks_max: int
+    concurrency_max: int
+    runtime_max_seconds: float
+    effective_host_memory_bytes: int
+    duration_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class NativeResourceAdmissionDecision:
+    """Typed MNCS decision for one bounded verifier admission."""
+
+    status: str
+    reason: str
+    deferred: bool
+    required_headroom_bytes: int
+    runtime_seconds: float
+    duration_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class NativeResourceOutcomeDecision:
+    """MNCS classification of raw process, cgroup, and cleanup observations."""
+
+    status: str
+    metric: str
+    resource_exhausted: bool
+    deferred: bool
+    cancellation_requested: bool
+    superseded: bool
+    has_execution_exit_status: bool
+    execution_exit_status: int
+    duration_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class NativeVerificationTransition:
+    """MNCS transition for one continuous verification obligation."""
+
+    disposition: str
+    evidence_status: str
+    retain_current_pending: bool
+    defer_remaining: bool
+    cancel_owned_work: bool
+    cleanup_required: bool
+    duration_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class NativeVerificationStatusDecision:
+    """Native aggregate status, staleness and escalation decision."""
+
+    status: str
+    stale_observed: bool
+    escalation_required: bool
     duration_seconds: float
 
 
@@ -923,7 +991,13 @@ class NativeForgeAdapter:
         )
         return environment
 
-    def invoke(self, arguments: list[str], *, stdin: bytes = b"") -> NativeInvocation:
+    def invoke(
+        self,
+        arguments: list[str],
+        *,
+        stdin: bytes = b"",
+        output_cap: int | None = None,
+    ) -> NativeInvocation:
         if self.language_root is None:
             raise ForgeError(
                 "NATIVE_UNAVAILABLE",
@@ -933,13 +1007,16 @@ class NativeForgeAdapter:
             raise ForgeError("NATIVE_CONFIG_INVALID", "Forge root is not a directory")
         command = [*self._command(), *arguments]
         self._process_invocations = min(_COUNTER_MAX, self._process_invocations + 1)
+        selected_output_cap = self.output_bytes if output_cap is None else output_cap
+        if not 1 <= selected_output_cap <= NATIVE_ARTIFACT_OUTPUT_BYTES:
+            raise ForgeError("NATIVE_CONFIG_INVALID", "native output cap is outside its hard bound")
         if self.runner is not None:
             result = self.runner.execute(
                 command,
                 cwd=self.forge_root,
                 timeout=self.timeout_seconds,
-                output_cap=self.output_bytes,
-                stderr_cap=self.output_bytes,
+                output_cap=selected_output_cap,
+                stderr_cap=selected_output_cap,
                 environment=self._environment(),
                 stdin=stdin,
             )
@@ -948,8 +1025,8 @@ class NativeForgeAdapter:
                 command,
                 cwd=self.forge_root,
                 timeout=self.timeout_seconds,
-                output_cap=self.output_bytes,
-                stderr_cap=self.output_bytes,
+                output_cap=selected_output_cap,
+                stderr_cap=selected_output_cap,
                 environment=self._environment(),
                 stdin=stdin,
             )
@@ -1243,7 +1320,15 @@ class NativeForgeAdapter:
         function = target.get("function")
         if not isinstance(module, str) or not isinstance(function, str):
             raise ForgeError("NATIVE_REQUEST_INVALID", "native target is invalid")
+        grants = request.get("grants", [])
+        if not isinstance(grants, list) or any(not isinstance(grant, Mapping) for grant in grants):
+            raise ForgeError("NATIVE_REQUEST_INVALID", "native grants are not a list of objects")
         if self._execute_is_overridden() or self._embed_library() is None:
+            if grants:
+                raise ForgeError(
+                    "NATIVE_EMBED_UNAVAILABLE",
+                    "native host-granted calls require the retained language embedding",
+                )
             with tempfile.TemporaryDirectory(prefix=".mncs-native-", dir=self.forge_root) as directory:
                 request_path = Path(directory) / request_name
                 request_path.write_text(json.dumps(request), encoding="utf-8")
@@ -1255,6 +1340,7 @@ class NativeForgeAdapter:
                 function,
                 arguments,
                 step_budget=int(request.get("step_budget", 0)),
+                grants=[dict(grant) for grant in grants],
             )
         except RetainedEmbedError as exc:
             raise ForgeError("NATIVE_EXECUTION", str(exc)) from exc
@@ -1478,6 +1564,750 @@ class NativeForgeAdapter:
             duration_seconds=invocation.duration_seconds,
         )
 
+    def resource_budget_select(
+        self,
+        observation: Mapping[str, object],
+        settings: Mapping[str, object],
+    ) -> NativeResourceBudgetDecision:
+        """Serialize host observations/configuration and execute native policy."""
+
+        self.ensure_available()
+        if self._embed_library() is None:
+            raise ForgeError(
+                "NATIVE_EMBED_UNAVAILABLE",
+                "native resource policy requires a retained mncs-embed session",
+            )
+        abi = self.language_owned_abi()
+        function_contract = abi.functions.get("resource_budget_select")
+        if function_contract is None:
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "resource budget function is absent")
+        inputs = function_contract.get("inputs")
+        outputs = function_contract.get("outputs")
+        if (
+            not isinstance(inputs, list)
+            or len(inputs) != 2
+            or not isinstance(outputs, list)
+            or len(outputs) != 1
+        ):
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "resource budget function ABI has invalid arity")
+
+        observation_type = self._abi_record_type(
+            abi, "ResourceObservation", context="ResourceObservation"
+        )
+        policy_type = self._abi_record_type(abi, "ResourcePolicy", context="ResourcePolicy")
+        output_type = self._abi_record_type(
+            abi, "ResourceBudgetDecision", context="ResourceBudgetDecision"
+        )
+        host_total = observation.get("host_memory_total_bytes")
+        cgroup_max = observation.get("cgroup_memory_max_bytes")
+        has_host_total = isinstance(host_total, int) and not isinstance(host_total, bool)
+        has_cgroup_max = isinstance(cgroup_max, int) and not isinstance(cgroup_max, bool)
+        for value, present, context in (
+            (host_total, has_host_total, "host memory observation"),
+            (cgroup_max, has_cgroup_max, "cgroup memory observation"),
+        ):
+            if present and not -(1 << 63) <= int(value) < (1 << 63):
+                raise ForgeError("NATIVE_RESOURCE_INPUT", f"{context} is outside the i64 ABI")
+
+        fields_valid = True
+
+        def integer_setting(key: str, *, ignore_invalid: bool = False) -> tuple[bool, int]:
+            nonlocal fields_valid
+            if key not in settings:
+                return False, 0
+            raw = settings[key]
+            if not isinstance(raw, int) or isinstance(raw, bool):
+                if not ignore_invalid:
+                    fields_valid = False
+                return False, 0
+            return True, min((1 << 63) - 1, max(-(1 << 63), raw))
+
+        def float_setting(key: str) -> tuple[bool, float]:
+            nonlocal fields_valid
+            if key not in settings:
+                return False, 0.0
+            raw = settings[key]
+            if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+                fields_valid = False
+                return True, 0.0
+            try:
+                value = float(raw)
+            except (OverflowError, ValueError):
+                fields_valid = False
+                return True, 0.0
+            if not math.isfinite(value):
+                fields_valid = False
+                return True, 0.0
+            return True, value
+
+        has_fraction, fraction = float_setting("memory_fraction")
+        has_memory_cap, memory_cap = integer_setting("memory_cap_bytes")
+        has_memory_max, memory_max = integer_setting("memory_max_bytes", ignore_invalid=True)
+        has_tasks_max, tasks_max = integer_setting("pids_limit")
+        has_concurrency_max, concurrency_max = integer_setting("concurrency_limit")
+        has_runtime_max, runtime_max = float_setting("runtime_max_seconds")
+
+        observation_value = self._record_value(
+            observation_type,
+            "ResourceObservation",
+            {
+                "has_host_memory_total": self._mncs_boolean(has_host_total),
+                "host_memory_total_bytes": self._mncs_integer(int(host_total) if has_host_total else 0),
+                "has_cgroup_memory_max": self._mncs_boolean(has_cgroup_max),
+                "cgroup_memory_max_bytes": self._mncs_integer(int(cgroup_max) if has_cgroup_max else 0),
+            },
+        )
+        policy_value = self._record_value(
+            policy_type,
+            "ResourcePolicy",
+            {
+                "fields_valid": self._mncs_boolean(fields_valid),
+                "has_memory_fraction": self._mncs_boolean(has_fraction),
+                "memory_fraction": self._mncs_float(fraction),
+                "has_memory_cap": self._mncs_boolean(has_memory_cap),
+                "memory_cap_bytes": self._mncs_integer(memory_cap),
+                "has_memory_max": self._mncs_boolean(has_memory_max),
+                "memory_max_bytes": self._mncs_integer(memory_max),
+                "has_tasks_max": self._mncs_boolean(has_tasks_max),
+                "tasks_max": self._mncs_integer(tasks_max),
+                "has_concurrency_max": self._mncs_boolean(has_concurrency_max),
+                "concurrency_max": self._mncs_integer(concurrency_max),
+                "has_runtime_max": self._mncs_boolean(has_runtime_max),
+                "runtime_max_seconds": self._mncs_float(runtime_max),
+            },
+        )
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "resource_budget_select"},
+            "arguments": [observation_value, policy_value],
+            "step_budget": 20_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="resource-budget-request.json")
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource budget call failed")
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource budget did not return")
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "resource budget result arity is invalid")
+        result_fields = self._record_value_fields(
+            returned[0], output_type, context="resource budget result"
+        )
+        status = self._abi_finite_variant(
+            result_fields.get("status"),
+            abi,
+            "ResourceBudgetStatus",
+            context="resource budget status",
+        )
+        if status not in {"Selected", "Unavailable", "InvalidPolicy"}:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "resource budget status is unknown")
+        return NativeResourceBudgetDecision(
+            status=status,
+            memory_high_bytes=self._integer(
+                result_fields.get("memory_high_bytes"), context="resource budget MemoryHigh"
+            ),
+            memory_max_bytes=self._integer(
+                result_fields.get("memory_max_bytes"), context="resource budget MemoryMax"
+            ),
+            memory_swap_max_bytes=self._integer(
+                result_fields.get("memory_swap_max_bytes"), context="resource budget swap maximum"
+            ),
+            tasks_max=self._integer(result_fields.get("tasks_max"), context="resource budget TasksMax"),
+            concurrency_max=self._integer(
+                result_fields.get("concurrency_max"), context="resource budget concurrency"
+            ),
+            runtime_max_seconds=self._native_float(
+                result_fields.get("runtime_max_seconds"), context="resource budget runtime"
+            ),
+            effective_host_memory_bytes=self._integer(
+                result_fields.get("effective_host_memory_bytes"),
+                context="resource budget effective host memory",
+            ),
+            duration_seconds=invocation.duration_seconds,
+        )
+
+    def resource_budget_identity(self, decision: NativeResourceBudgetDecision) -> str:
+        """Return the language-generated structured digest for one decision."""
+
+        if not isinstance(decision, NativeResourceBudgetDecision):
+            raise ForgeError("NATIVE_RESOURCE_INPUT", "resource budget decision is not typed")
+        if decision.status != "Selected":
+            raise ForgeError(
+                "NATIVE_RESOURCE_INPUT", "only a selected resource budget has an envelope identity"
+            )
+        abi = self.language_owned_abi()
+        decision_type = self._abi_record_type(
+            abi, "ResourceBudgetDecision", context="ResourceBudgetDecision"
+        )
+        decision_value = self._record_value(
+            decision_type,
+            "ResourceBudgetDecision",
+            {
+                "status": self._abi_finite_value(
+                    abi,
+                    "ResourceBudgetStatus",
+                    decision.status,
+                    context="resource budget identity status",
+                ),
+                "memory_high_bytes": self._mncs_integer(decision.memory_high_bytes),
+                "memory_max_bytes": self._mncs_integer(decision.memory_max_bytes),
+                "memory_swap_max_bytes": self._mncs_integer(decision.memory_swap_max_bytes),
+                "tasks_max": self._mncs_integer(decision.tasks_max),
+                "concurrency_max": self._mncs_integer(decision.concurrency_max),
+                "runtime_max_seconds": self._mncs_float(decision.runtime_max_seconds),
+                "effective_host_memory_bytes": self._mncs_integer(
+                    decision.effective_host_memory_bytes
+                ),
+            },
+        )
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "resource_budget_identity"},
+            "arguments": [decision_value],
+            "grants": [
+                {
+                    "capability": "resource_budget_identity",
+                    "locator": "forge-resource-budget-identity",
+                    "bytes": [],
+                }
+            ],
+            "step_budget": 20_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="resource-budget-identity.json")
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource identity call failed")
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource identity did not return")
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "resource identity result arity is invalid")
+        value = returned[0]
+        if not isinstance(value, Mapping) or not isinstance(value.get("sequence"), Mapping):
+            raise ForgeError("NATIVE_ABI_MISMATCH", "resource identity is not a byte sequence")
+        raw_values = value["sequence"].get("values")
+        if not isinstance(raw_values, list) or len(raw_values) != 32:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "resource identity is not a SHA-256 digest")
+        digest = bytes(
+            self._byte(item, context="resource identity byte") for item in raw_values
+        )
+        return digest.hex()
+
+    def resource_admission(
+        self,
+        observation: Mapping[str, object],
+        policy: Mapping[str, object],
+    ) -> NativeResourceAdmissionDecision:
+        """Run native admission over raw containment, memory, process, and slot facts."""
+
+        self.ensure_available()
+        if self._embed_library() is None:
+            raise ForgeError(
+                "NATIVE_EMBED_UNAVAILABLE",
+                "native resource admission requires a retained mncs-embed session",
+            )
+        abi = self.language_owned_abi()
+        function_contract = abi.functions.get("resource_admission")
+        if function_contract is None:
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "resource admission function is absent")
+        inputs = function_contract.get("inputs")
+        outputs = function_contract.get("outputs")
+        if (
+            not isinstance(inputs, list)
+            or len(inputs) != 2
+            or not isinstance(outputs, list)
+            or len(outputs) != 1
+        ):
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "resource admission ABI has invalid arity")
+
+        def boolean_value(source: Mapping[str, object], key: str) -> bool:
+            value = source.get(key)
+            if not isinstance(value, bool):
+                raise ForgeError("NATIVE_RESOURCE_INPUT", f"{key} must be a boolean")
+            return value
+
+        def integer_value(source: Mapping[str, object], key: str, *, optional: bool = False) -> tuple[bool, int]:
+            value = source.get(key)
+            if optional and value is None:
+                return False, 0
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ForgeError("NATIVE_RESOURCE_INPUT", f"{key} must be an integer")
+            if not -(1 << 63) <= value < (1 << 63):
+                raise ForgeError("NATIVE_RESOURCE_INPUT", f"{key} is outside the i64 ABI")
+            return True, value
+
+        def float_value(source: Mapping[str, object], key: str) -> float:
+            raw = source.get(key)
+            if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+                raise ForgeError("NATIVE_RESOURCE_INPUT", f"{key} must be numeric")
+            value = float(raw)
+            if not math.isfinite(value):
+                raise ForgeError("NATIVE_RESOURCE_INPUT", f"{key} must be finite")
+            return value
+
+        has_available, available = integer_value(
+            observation, "available_memory_bytes", optional=True
+        )
+        has_host_available, host_available = integer_value(
+            observation, "host_available_memory_bytes", optional=True
+        )
+        has_cgroup_available, cgroup_available = integer_value(
+            observation, "cgroup_available_memory_bytes", optional=True
+        )
+        active_tasks_known, active_tasks = integer_value(
+            observation, "active_tasks", optional=True
+        )
+        observation_type = self._abi_record_type(
+            abi, "ResourceAdmissionObservation", context="ResourceAdmissionObservation"
+        )
+        policy_type = self._abi_record_type(
+            abi, "ResourceAdmissionPolicy", context="ResourceAdmissionPolicy"
+        )
+        observation_value = self._record_value(
+            observation_type,
+            "ResourceAdmissionObservation",
+            {
+                "containment_available": self._mncs_boolean(
+                    boolean_value(observation, "containment_available")
+                ),
+                "has_budget": self._mncs_boolean(boolean_value(observation, "has_budget")),
+                "has_available_memory": self._mncs_boolean(has_available),
+                "available_memory_bytes": self._mncs_integer(available),
+                "has_host_available_memory": self._mncs_boolean(has_host_available),
+                "host_available_memory_bytes": self._mncs_integer(host_available),
+                "has_cgroup_available_memory": self._mncs_boolean(has_cgroup_available),
+                "cgroup_available_memory_bytes": self._mncs_integer(cgroup_available),
+                "active_tasks_known": self._mncs_boolean(active_tasks_known),
+                "active_tasks": self._mncs_integer(active_tasks),
+                "execution_slot_available": self._mncs_boolean(
+                    boolean_value(observation, "execution_slot_available")
+                ),
+                "requested_runtime_seconds": self._mncs_float(
+                    float_value(observation, "requested_runtime_seconds")
+                ),
+            },
+        )
+        policy_value = self._record_value(
+            policy_type,
+            "ResourceAdmissionPolicy",
+            {
+                "containment_required": self._mncs_boolean(
+                    boolean_value(policy, "containment_required")
+                ),
+                "memory_max_bytes": self._mncs_integer(
+                    integer_value(policy, "memory_max_bytes")[1]
+                ),
+                "concurrency_max": self._mncs_integer(
+                    integer_value(policy, "concurrency_max")[1]
+                ),
+                "runtime_max_seconds": self._mncs_float(
+                    float_value(policy, "runtime_max_seconds")
+                ),
+            },
+        )
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "resource_admission"},
+            "arguments": [observation_value, policy_value],
+            "step_budget": 20_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="resource-admission.json")
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource admission call failed")
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource admission did not return")
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "resource admission result arity is invalid")
+        output_type = self._abi_record_type(
+            abi, "ResourceAdmissionDecision", context="ResourceAdmissionDecision"
+        )
+        fields = self._record_value_fields(returned[0], output_type, context="resource admission")
+        status = self._abi_finite_variant(
+            fields.get("status"), abi, "ResourceAdmissionStatus", context="resource admission status"
+        )
+        reason = self._abi_finite_variant(
+            fields.get("reason"), abi, "ResourceAdmissionReason", context="resource admission reason"
+        )
+        if status not in {"Admit", "Uncontained", "Defer", "Unavailable", "InvalidInput"}:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "resource admission status is unknown")
+        return NativeResourceAdmissionDecision(
+            status=status,
+            reason=str(reason),
+            deferred=self._boolean(fields.get("deferred"), context="resource admission deferred"),
+            required_headroom_bytes=self._integer(
+                fields.get("required_headroom_bytes"), context="resource admission headroom"
+            ),
+            runtime_seconds=self._native_float(
+                fields.get("runtime_seconds"), context="resource admission runtime"
+            ),
+            duration_seconds=invocation.duration_seconds,
+        )
+
+    def resource_outcome(
+        self, observation: Mapping[str, object]
+    ) -> NativeResourceOutcomeDecision:
+        """Classify an execution from bounded raw facts using Forge MNCS semantics."""
+
+        self.ensure_available()
+        if self._embed_library() is None:
+            raise ForgeError(
+                "NATIVE_EMBED_UNAVAILABLE",
+                "native resource classification requires a retained mncs-embed session",
+            )
+        abi = self.language_owned_abi()
+        exit_status = observation.get("exit_status")
+        has_exit_status = isinstance(exit_status, int) and not isinstance(exit_status, bool)
+        wrapper_exit_status = observation.get("wrapper_returncode")
+        has_wrapper_exit_status = isinstance(wrapper_exit_status, int) and not isinstance(
+            wrapper_exit_status, bool
+        )
+        if has_exit_status and not -(1 << 63) <= int(exit_status) < (1 << 63):
+            raise ForgeError("NATIVE_RESOURCE_INPUT", "process exit status is outside the i64 ABI")
+        if has_wrapper_exit_status and not -(1 << 63) <= int(wrapper_exit_status) < (1 << 63):
+            raise ForgeError(
+                "NATIVE_RESOURCE_INPUT", "wrapper exit status is outside the i64 ABI"
+            )
+        systemd_result_names = {
+            "success": "Success",
+            "exit-code": "ExitCode",
+            "oom-kill": "OomKill",
+            "out-of-memory": "OutOfMemory",
+            "timeout": "Timeout",
+            "failed": "Failed",
+        }
+        result_name = observation.get("systemd_result", "unknown")
+        if not isinstance(result_name, str):
+            raise ForgeError("NATIVE_RESOURCE_INPUT", "systemd result is not a string")
+        systemd_result = systemd_result_names.get(result_name, "Unknown")
+        systemd_result_value = self._abi_finite_value(
+            abi,
+            "ResourceSystemdResult",
+            systemd_result,
+            context="raw systemd result",
+        )
+
+        def boolean_value(key: str, *, default: bool = False) -> bool:
+            value = observation.get(key, default)
+            if not isinstance(value, bool):
+                raise ForgeError("NATIVE_RESOURCE_INPUT", f"{key} must be a boolean")
+            return value
+
+        def counter_value(key: str) -> int:
+            value = observation.get(key, 0)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value >= (1 << 63):
+                raise ForgeError("NATIVE_RESOURCE_INPUT", f"{key} must be a nonnegative i64")
+            return value
+
+        record_type = self._abi_record_type(
+            abi, "ResourceOutcomeObservation", context="ResourceOutcomeObservation"
+        )
+        record_value = self._record_value(
+            record_type,
+            "ResourceOutcomeObservation",
+            {
+                "has_exit_status": self._mncs_boolean(has_exit_status),
+                "exit_status": self._mncs_integer(int(exit_status) if has_exit_status else 0),
+                "has_wrapper_exit_status": self._mncs_boolean(has_wrapper_exit_status),
+                "wrapper_exit_status": self._mncs_integer(
+                    int(wrapper_exit_status) if has_wrapper_exit_status else 0
+                ),
+                "systemd_result": systemd_result_value,
+                "timed_out": self._mncs_boolean(boolean_value("timed_out")),
+                "output_limited": self._mncs_boolean(boolean_value("output_limited")),
+                "memory_high_events": self._mncs_integer(counter_value("memory_high_events")),
+                "memory_max_events": self._mncs_integer(counter_value("memory_max_events")),
+                "memory_oom_events": self._mncs_integer(counter_value("memory_oom_events")),
+                "memory_oom_kill_events": self._mncs_integer(
+                    counter_value("memory_oom_kill_events")
+                ),
+                "memory_oom_group_kill_events": self._mncs_integer(
+                    counter_value("memory_oom_group_kill_events")
+                ),
+                "process_limit_events": self._mncs_integer(
+                    counter_value("process_limit_events")
+                ),
+                "cleanup_known": self._mncs_boolean(boolean_value("cleanup_known", default=True)),
+                "cleanup_succeeded": self._mncs_boolean(
+                    boolean_value("cleanup_succeeded", default=True)
+                ),
+                "cancellation_requested": self._mncs_boolean(
+                    boolean_value("cancellation_requested")
+                ),
+                "superseded": self._mncs_boolean(boolean_value("superseded")),
+            },
+        )
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "resource_outcome"},
+            "arguments": [record_value],
+            "step_budget": 20_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="resource-outcome.json")
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource classification failed")
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource classification did not return")
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "resource outcome result arity is invalid")
+        result_type = self._abi_record_type(
+            abi, "ResourceOutcomeResult", context="ResourceOutcomeResult"
+        )
+        fields = self._record_value_fields(returned[0], result_type, context="resource outcome")
+        status = str(
+            self._abi_finite_variant(
+                fields.get("status"), abi, "ResourceOutcomeStatus", context="resource outcome status"
+            )
+        )
+        metric = str(
+            self._abi_finite_variant(
+                fields.get("metric"), abi, "ResourceOutcomeMetric", context="resource outcome metric"
+            )
+        )
+        return NativeResourceOutcomeDecision(
+            status=status,
+            metric=metric,
+            resource_exhausted=self._boolean(
+                fields.get("resource_exhausted"), context="resource outcome exhausted flag"
+            ),
+            deferred=self._boolean(fields.get("deferred"), context="resource outcome deferred flag"),
+            cancellation_requested=self._boolean(
+                fields.get("cancellation_requested"), context="resource outcome cancellation flag"
+            ),
+            superseded=self._boolean(fields.get("superseded"), context="resource outcome stale flag"),
+            has_execution_exit_status=self._boolean(
+                fields.get("has_execution_exit_status"), context="native execution status availability"
+            ),
+            execution_exit_status=self._integer(
+                fields.get("execution_exit_status"), context="native execution exit status"
+            ),
+            duration_seconds=invocation.duration_seconds,
+        )
+
+    def verification_resource_transition(
+        self, state: Mapping[str, object]
+    ) -> NativeVerificationTransition:
+        """Resolve pending/defer/stale work from explicit continuous state."""
+
+        self.ensure_available()
+        if self._embed_library() is None:
+            raise ForgeError(
+                "NATIVE_EMBED_UNAVAILABLE",
+                "continuous resource transitions require retained mncs-embed execution",
+            )
+        abi = self.language_owned_abi()
+        record_type = self._abi_record_type(
+            abi, "ContinuousResourceState", context="ContinuousResourceState"
+        )
+
+        def integer_value(key: str) -> int:
+            value = state.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or not -(1 << 63) <= value < (1 << 63):
+                raise ForgeError("NATIVE_CONTINUOUS_INPUT", f"{key} must be an i64")
+            return value
+
+        def boolean_value(key: str) -> bool:
+            value = state.get(key)
+            if not isinstance(value, bool):
+                raise ForgeError("NATIVE_CONTINUOUS_INPUT", f"{key} must be a boolean")
+            return value
+
+        def finite_value(type_name: str, key: str) -> dict[str, object]:
+            value = state.get(key)
+            if not isinstance(value, str):
+                raise ForgeError("NATIVE_CONTINUOUS_INPUT", f"{key} must be a finite variant")
+            return self._abi_finite_value(abi, type_name, value, context=key)
+
+        record = self._record_value(
+            record_type,
+            "ContinuousResourceState",
+            {
+                "current_generation": self._mncs_integer(integer_value("current_generation")),
+                "work_generation": self._mncs_integer(integer_value("work_generation")),
+                "source_identity_matches": self._mncs_boolean(
+                    boolean_value("source_identity_matches")
+                ),
+                "verification_required": self._mncs_boolean(
+                    boolean_value("verification_required")
+                ),
+                "in_flight": self._mncs_boolean(boolean_value("in_flight")),
+                "has_outcome": self._mncs_boolean(boolean_value("has_outcome")),
+                "outcome": finite_value("ResourceOutcomeStatus", "outcome"),
+                "evidence_status": finite_value(
+                    "VerificationEvidenceStatus", "evidence_status"
+                ),
+                "pending_exists": self._mncs_boolean(boolean_value("pending_exists")),
+                "pending_count": self._mncs_integer(integer_value("pending_count")),
+                "pending_capacity": self._mncs_integer(integer_value("pending_capacity")),
+                "queue_remaining": self._mncs_integer(integer_value("queue_remaining")),
+                "resource_gate_closed": self._mncs_boolean(
+                    boolean_value("resource_gate_closed")
+                ),
+            },
+        )
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {
+                "module": _CORE_MODULE,
+                "function": "verification_resource_transition",
+            },
+            "arguments": [record],
+            "step_budget": 20_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="continuous-resource-state.json")
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native continuous transition failed")
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native continuous transition did not return")
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "continuous transition result arity is invalid")
+        result_type = self._abi_record_type(
+            abi, "VerificationResourceTransition", context="VerificationResourceTransition"
+        )
+        fields = self._record_value_fields(returned[0], result_type, context="continuous transition")
+        return NativeVerificationTransition(
+            disposition=str(
+                self._abi_finite_variant(
+                    fields.get("disposition"),
+                    abi,
+                    "VerificationDisposition",
+                    context="verification disposition",
+                )
+            ),
+            evidence_status=str(
+                self._abi_finite_variant(
+                    fields.get("evidence_status"),
+                    abi,
+                    "VerificationEvidenceStatus",
+                    context="verification evidence status",
+                )
+            ),
+            retain_current_pending=self._boolean(
+                fields.get("retain_current_pending"), context="retain pending flag"
+            ),
+            defer_remaining=self._boolean(fields.get("defer_remaining"), context="defer remaining flag"),
+            cancel_owned_work=self._boolean(
+                fields.get("cancel_owned_work"), context="cancel owned work flag"
+            ),
+            cleanup_required=self._boolean(
+                fields.get("cleanup_required"), context="cleanup required flag"
+            ),
+            duration_seconds=invocation.duration_seconds,
+        )
+
+    def verification_queue_admit(self, total_count: int) -> tuple[int, int]:
+        """Return the native bounded per-event verifier selection counts."""
+
+        if not isinstance(total_count, int) or isinstance(total_count, bool):
+            raise ForgeError("NATIVE_CONTINUOUS_INPUT", "verifier count must be an integer")
+        if not -(1 << 63) <= total_count < (1 << 63):
+            raise ForgeError("NATIVE_CONTINUOUS_INPUT", "verifier count is outside the i64 ABI")
+        abi = self.language_owned_abi()
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "verification_queue_admit"},
+            "arguments": [self._mncs_integer(total_count)],
+            "step_budget": 20_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="continuous-queue-admit.json")
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native queue admission failed")
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native queue admission did not return")
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "queue admission result arity is invalid")
+        result_type = self._abi_record_type(
+            abi, "VerificationQueueDecision", context="VerificationQueueDecision"
+        )
+        fields = self._record_value_fields(returned[0], result_type, context="queue admission")
+        if not self._boolean(fields.get("valid"), context="queue admission validity"):
+            raise ForgeError("NATIVE_CONTINUOUS_INPUT", "native queue admission rejected the count")
+        selected = self._integer(fields.get("selected_count"), context="selected verifier count")
+        deferred = self._integer(fields.get("deferred_count"), context="deferred verifier count")
+        if selected < 0 or deferred < 0 or selected + deferred != total_count:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "native queue admission counts do not balance")
+        return selected, deferred
+
+    def verification_status_decide(
+        self, statuses: Sequence[str], *, verification_required: bool = True
+    ) -> NativeVerificationStatusDecision:
+        """Decide a bounded verification status set through the MNCS status lattice."""
+
+        if isinstance(statuses, (str, bytes)) or len(statuses) > 16:
+            raise ForgeError("NATIVE_CONTINUOUS_INPUT", "status set exceeds the 16-result bound")
+        stale_observed = False
+        normalized: list[str] = []
+        for status in statuses:
+            if status == "STALE":
+                stale_observed = True
+                normalized.append("UNKNOWN")
+            elif isinstance(status, str) and status in _STATUS_VARIANTS:
+                normalized.append(status)
+            else:
+                raise ForgeError("NATIVE_CONTINUOUS_INPUT", "status set contains an invalid status")
+        self.ensure_available()
+        if self._embed_library() is None:
+            raise ForgeError(
+                "NATIVE_EMBED_UNAVAILABLE",
+                "continuous status aggregation requires retained mncs-embed execution",
+            )
+        abi = self.language_owned_abi()
+        record_type = self._abi_record_type(
+            abi, "VerificationStatusSet", context="VerificationStatusSet"
+        )
+        status_values = [
+            self._abi_finite_value(abi, "Status", status, context="verifier result status")
+            for status in normalized
+        ]
+        status_values.extend(
+            self._abi_finite_value(abi, "Status", "PASS", context="unused verifier status slot")
+            for _ in range(16 - len(status_values))
+        )
+        record = self._record_value(
+            record_type,
+            "VerificationStatusSet",
+            {
+                "statuses": self._sequence_value(status_values),
+                "status_count": {"byte": {"value": len(normalized)}},
+            },
+        )
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "verification_status_decide"},
+            "arguments": [
+                record,
+                self._mncs_boolean(stale_observed),
+                self._mncs_boolean(verification_required),
+            ],
+            "step_budget": 20_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="continuous-status-decision.json")
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native status decision failed")
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native status decision did not return")
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "status decision result arity is invalid")
+        result_type = self._abi_record_type(
+            abi, "VerificationStatusDecision", context="VerificationStatusDecision"
+        )
+        fields = self._record_value_fields(
+            returned[0], result_type, context="verification status decision"
+        )
+        return NativeVerificationStatusDecision(
+            status=self._abi_finite_variant(
+                fields.get("status"), abi, "Status", context="aggregate verification status"
+            ),
+            stale_observed=self._boolean(fields.get("stale_observed"), context="stale status flag"),
+            escalation_required=self._boolean(
+                fields.get("escalation_required"), context="status escalation flag"
+            ),
+            duration_seconds=invocation.duration_seconds,
+        )
+
     @staticmethod
     def _abi_shape(abi: NativeAbi, kind: str, name: str, *, context: str) -> Mapping[str, object]:
         for key, contract in abi.composites.items():
@@ -1611,7 +2441,9 @@ class NativeForgeAdapter:
         cached = self._native_caches["abi"].get(cache_key)
         if cached is not None:
             return cached
-        invocation = self.invoke(["abi", str(self.native_source.resolve())])
+        invocation = self.invoke(
+            ["abi", str(self.native_source.resolve())], output_cap=NATIVE_ABI_OUTPUT_BYTES
+        )
         if not invocation.ok or invocation.payload is None:
             raise ForgeError(
                 "NATIVE_ABI_UNKNOWN",
@@ -1740,6 +2572,19 @@ class NativeForgeAdapter:
                 "fields": [[field_name, fields[field_name]] for field_name in sorted(fields)],
             }
         }
+
+    @staticmethod
+    def _mncs_integer(value: int) -> dict[str, object]:
+        return {"integer": {"value": value, "type": {"bits": 64, "signed": True}}}
+
+    @staticmethod
+    def _mncs_float(value: float) -> dict[str, object]:
+        bits = struct.unpack(">Q", struct.pack(">d", value))[0]
+        return {"float": {"bits": bits, "type": {"bits": 64}}}
+
+    @staticmethod
+    def _mncs_boolean(value: bool) -> dict[str, object]:
+        return {"boolean": {"value": value}}
 
     @staticmethod
     def _sequence_value(values: Sequence[object]) -> dict[str, object]:
@@ -2066,6 +2911,26 @@ class NativeForgeAdapter:
         result = value["integer"].get("value")
         if not isinstance(result, int) or isinstance(result, bool):
             raise ForgeError("NATIVE_LIFECYCLE_UNKNOWN", f"{context} has an invalid value")
+        return result
+
+    @staticmethod
+    def _native_float(value: object, *, context: str) -> float:
+        if not isinstance(value, Mapping) or not isinstance(value.get("float"), Mapping):
+            raise ForgeError("NATIVE_ABI_MISMATCH", f"{context} is not a binary64 value")
+        floating = value["float"]
+        bits = floating.get("bits")
+        type_shape = floating.get("type")
+        if (
+            not isinstance(bits, int)
+            or isinstance(bits, bool)
+            or not 0 <= bits < (1 << 64)
+            or not isinstance(type_shape, Mapping)
+            or type_shape.get("bits") != 64
+        ):
+            raise ForgeError("NATIVE_ABI_MISMATCH", f"{context} has an invalid binary64 shape")
+        result = struct.unpack(">d", struct.pack(">Q", bits))[0]
+        if not math.isfinite(result):
+            raise ForgeError("NATIVE_ABI_MISMATCH", f"{context} is not finite")
         return result
 
     @classmethod

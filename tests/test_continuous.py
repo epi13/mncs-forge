@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
 from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
@@ -9,15 +15,18 @@ from types import SimpleNamespace
 from conftest import with_native_latency_allowance
 
 from mncs_forge.adapters import LocalProcessRunner
-from mncs_forge.continuous import ContinuousSupervisor
+from mncs_forge.continuous import ContinuousSupervisor, LanguageServiceSocket
+from mncs_forge.errors import ForgeError
 from mncs_forge.engine import Forge
 from mncs_forge.execution_observations import ExecutionObservationBuilder
+from mncs_forge.mncs_native import NativeForgeAdapter
 from mncs_forge.ports import ExecutionResult
 from mncs_forge.record_store import LocalRecordStore
 
 
 def _supervisor() -> ContinuousSupervisor:
     supervisor = object.__new__(ContinuousSupervisor)
+    supervisor._resource_semantics = NativeForgeAdapter(Path(__file__).parents[1])
     supervisor.pending = OrderedDict()
     supervisor.pending_overflow_count = 0
     supervisor.pending_overflow_identity = None
@@ -166,6 +175,168 @@ def test_unknown_action_keeps_reconciled_event_unknown() -> None:
     event = {**_event(), "reconciled": True, "impact_complete": False, "impact": None}
     result = supervisor._process_event(SimpleNamespace(request=lambda *_args: {"generation": 7}), event)
     assert result["status"] == "UNKNOWN"
+
+
+class _GenerationStatusServer:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.generation = 7
+        self.published_monotonic: float | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._socket.bind(str(path))
+        self._socket.listen(4)
+        self._socket.settimeout(0.05)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                client, _address = self._socket.accept()
+            except TimeoutError:
+                continue
+            with client:
+                while b"\n" not in (data := client.recv(4096)):
+                    if not data:
+                        break
+                with self._lock:
+                    generation = self.generation
+                client.sendall(
+                    (
+                        json.dumps(
+                            {"id": 1, "ok": True, "result": {"generation": generation}}
+                        )
+                        + "\n"
+                    ).encode()
+                )
+
+    def publish(self, generation: int) -> None:
+        with self._lock:
+            self.generation = generation
+            self.published_monotonic = time.monotonic()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=0.5)
+        self._socket.close()
+        self.path.unlink(missing_ok=True)
+
+
+def _linux_process_state(pid: int) -> str | None:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except OSError:
+        return None
+    return stat[stat.rfind(")") + 2 : stat.rfind(")") + 3]
+
+
+def test_superseding_generation_cancels_owned_process_group(tmp_path: Path) -> None:
+    supervisor = _supervisor()
+    supervisor.current_generation = 7
+    supervisor.settings = {"candidate_identity": "candidate:test"}
+    supervisor.config = SimpleNamespace(state_dir=None)
+    supervisor._native_resource_transition(
+        event=_event(),
+        candidate="candidate:test",
+        verifier_id="warm-session",
+        outcome="Unknown",
+        evidence_status="NotRun",
+        has_outcome=False,
+        queue_remaining=0,
+    )
+    server = _GenerationStatusServer(tmp_path / "generation.sock")
+    pid_path = tmp_path / "tree-pids"
+    work = _event()
+    trigger = {"id": "cancel-on-edit", "verifier_ids": ["verifier:test"]}
+    published = threading.Thread(
+        target=lambda: (
+            time.sleep(0.15),
+            server.publish(8),
+        ),
+        daemon=True,
+    )
+    program = (
+        "import os, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        f"open({str(pid_path)!r}, 'w').write(f'{{os.getpid()}} {{child.pid}}')\n"
+        "time.sleep(30)\n"
+    )
+    runner = LocalProcessRunner()
+    failure: ForgeError | None = None
+    try:
+        with supervisor._job_scope(
+            work,
+            trigger,
+            "micro_verifier",
+            client=LanguageServiceSocket(server.path, timeout=0.5),
+        ):
+            published.start()
+            try:
+                runner.execute(
+                    [sys.executable, "-c", program],
+                    cwd=tmp_path,
+                    timeout=15,
+                    output_cap=1024,
+                    environment=dict(os.environ),
+                )
+            except ForgeError as error:
+                failure = error
+    finally:
+        published.join(timeout=1)
+        server.close()
+
+    assert failure is not None and failure.code == "EXECUTION_CANCELLED"
+    cancellation = failure.details["execution_cancellation"]
+    assert cancellation["cancellation_requested"] is True
+    assert cancellation["superseded"] is True
+    assert isinstance(cancellation["request_to_termination_request_seconds"], float)
+    assert server.published_monotonic is not None
+    assert time.monotonic() - server.published_monotonic < 1.5
+    assert supervisor.current_generation == 8
+    pids = [int(value) for value in pid_path.read_text(encoding="ascii").split()]
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        states = [_linux_process_state(pid) for pid in pids]
+        if all(state in {None, "Z"} for state in states):
+            break
+        time.sleep(0.01)
+    assert all(state in {None, "Z"} for state in states)
+
+    native = supervisor._resource_semantics
+    outcome = native.resource_outcome(
+        {
+            "systemd_result": "unknown",
+            "cleanup_known": True,
+            "cleanup_succeeded": True,
+            "cancellation_requested": cancellation["cancellation_requested"],
+            "superseded": cancellation["superseded"],
+        }
+    )
+    assert outcome.status == "Stale"
+    transition = supervisor._native_resource_transition(
+        event={**work, "current_generation": 8},
+        candidate="candidate:test",
+        verifier_id="verifier:test",
+        outcome=outcome.status,
+        evidence_status="Unknown",
+        has_outcome=True,
+        queue_remaining=0,
+        work_generation=7,
+        current_generation=8,
+    )
+    assert transition.disposition == "DiscardStale"
+    assert transition.evidence_status == "Unknown"
+
+    supervisor.settings = {"candidate_identity": "candidate:test", "triggers": []}
+    supervisor.current_source_identity = None
+    supervisor.current_cursor = 0
+    next_generation = supervisor._process_event(
+        SimpleNamespace(request=lambda *_args: {"generation": 8}),
+        {**work, "current_generation": 8},
+    )
+    assert next_generation["status"] == "PASS"
 
 
 def test_reconciled_security_trigger_runs_bounded_verifier_and_reuses_evidence(

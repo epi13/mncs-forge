@@ -27,12 +27,10 @@ from mncs_forge.errors import ForgeError
 from mncs_forge.execution import run_bounded
 from mncs_forge.mncs_native import BoundedNativeCache, NativeForgeAdapter
 from mncs_forge.ports import ExecutionResult
-from mncs_forge.resource_envelope import (
-    MIB,
-    SystemdCgroupEnvelope,
-    select_resource_budget,
-)
+from mncs_forge.resource_envelope import SystemdCgroupEnvelope
 from mncs_forge.resource_process import bind_current_cgroup_parent
+
+MIB = 1024 * 1024
 
 
 def test_native_projection_cache_churn_is_bounded_and_exact_keyed() -> None:
@@ -455,6 +453,7 @@ def _fake_systemd_manager(
     result: str = "success",
     main_code: int = 1,
     main_status: int = 0,
+    settings: dict[str, object] | None = None,
 ) -> tuple[SystemdCgroupEnvelope, list[list[str]], Path]:
     runtime = tmp_path / "runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -494,7 +493,8 @@ def _fake_systemd_manager(
         return subprocess.CompletedProcess(argv, 0, stdout=output, stderr=b"")
 
     manager = SystemdCgroupEnvelope(
-        {"memory_max_bytes": 128 * MIB, "memory_cap_bytes": 128 * MIB, "pids_limit": 8},
+        settings
+        or {"memory_max_bytes": 128 * MIB, "memory_cap_bytes": 128 * MIB, "pids_limit": 8},
         required=True,
         control_runner=control,
         host_memory_reader=lambda: (2 * 1024 * MIB, 1536 * MIB),
@@ -502,6 +502,7 @@ def _fake_systemd_manager(
         systemd_run="systemd-run",
         systemctl="systemctl",
         runtime_dir=runtime,
+        resource_semantics=NativeForgeAdapter(Path(__file__).resolve().parents[1]),
     )
     manager._lock_path = runtime / "test.lock"
     assert manager.available
@@ -511,15 +512,17 @@ def _fake_systemd_manager(
 def test_small_cgroup_budget_and_memory_pid_timeout_evidence_use_fake_kernel_state(
     tmp_path: Path,
 ) -> None:
-    tiny = select_resource_budget(
-        {
+    manager, commands, _group = _fake_systemd_manager(
+        tmp_path,
+        memory_events="high 0\nmax 1\noom 0\noom_kill 0\n",
+        settings={
             "memory_max_bytes": 128 * MIB,
             "memory_cap_bytes": 128 * MIB,
             "pids_limit": 8,
             "runtime_max_seconds": 4,
         },
-        host_memory_total_bytes=2 * 1024 * MIB,
     )
+    tiny = manager.budget
     assert tiny is not None
     assert tiny.memory_max_bytes == 128 * MIB
     assert tiny.memory_high_bytes < tiny.memory_max_bytes
@@ -527,9 +530,6 @@ def test_small_cgroup_budget_and_memory_pid_timeout_evidence_use_fake_kernel_sta
     assert tiny.tasks_max == 8
     assert tiny.runtime_max_seconds == 4
 
-    manager, commands, _group = _fake_systemd_manager(
-        tmp_path, memory_events="high 0\nmax 1\noom 0\noom_kill 0\n"
-    )
     prepared = manager.prepare_execution(
         ["/usr/bin/true"],
         cwd=tmp_path,
@@ -709,7 +709,7 @@ def test_runner_defers_when_a_previous_owned_tree_is_still_active(tmp_path: Path
     assert issue.value.details["resource_evidence"]["deferred"] is True
 
 
-def test_runner_uses_verified_unit_exit_status_when_systemd_run_wrapper_differs(
+def test_runner_uses_native_accepted_exit_status_when_systemd_reaps_unit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     prepared = SimpleNamespace(
@@ -742,16 +742,18 @@ def test_runner_uses_verified_unit_exit_status_when_systemd_run_wrapper_differs(
             return {
                 "resource_exhausted": False,
                 "cleanup_succeeded": True,
-                "command_returncode": 0,
-                "systemd_wrapper_returncode": 1,
-                "wrapper_returncode_mismatch": True,
+                "resource_outcome": "Pass",
+                "command_returncode": None,
+                "systemd_wrapper_returncode": 0,
+                "native_execution_returncode_available": True,
+                "native_execution_returncode": 0,
             }
 
     monkeypatch.setattr(
         "mncs_forge.execution._run_bounded_process",
         lambda *_args, **_kwargs: ExecutionResult(
             argv=["systemd-run"],
-            returncode=1,
+            returncode=0,
             stdout=b"",
             stderr=b"",
             duration_seconds=0.001,
@@ -766,7 +768,7 @@ def test_runner_uses_verified_unit_exit_status_when_systemd_run_wrapper_differs(
         resource_envelope=Envelope(),
     )
     assert result.returncode == 0
-    assert result.resource_observations["wrapper_returncode_mismatch"] is True
+    assert result.resource_observations["native_execution_returncode"] == 0
 
 
 def test_runner_cleans_owned_unit_when_python_cancellation_escapes(
@@ -827,6 +829,7 @@ def test_unavailable_tree_envelope_fails_closed_before_spawning(tmp_path: Path) 
         cgroup_root=tmp_path,
         systemd_run="systemd-run",
         systemctl="systemctl",
+        resource_semantics=NativeForgeAdapter(Path(__file__).resolve().parents[1]),
     )
     assert manager.available is False
     runner = __import__("mncs_forge.adapters", fromlist=["LocalProcessRunner"]).LocalProcessRunner(

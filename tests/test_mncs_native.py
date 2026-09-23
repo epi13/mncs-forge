@@ -524,7 +524,7 @@ def test_native_readiness_rejects_duplicate_active_requirement_identity(
         return invocation
 
     monkeypatch.setattr(adapter, "execute", duplicate_execute)
-    mncs_native._READINESS_CACHE.clear()
+    adapter._native_caches["readiness"].clear()
 
     with pytest.raises(ForgeError, match="duplicate requirement identity"):
         adapter.readiness_projection(
@@ -665,7 +665,7 @@ def test_native_readiness_projection_rejects_malformed_structured_result(
             payload={"status": "returned", "returned": [{"record": {"fields": []}}]},
         ),
     )
-    mncs_native._READINESS_CACHE.clear()
+    adapter._native_caches["readiness"].clear()
 
     with pytest.raises(ForgeError, match="readiness result type disagrees with language ABI"):
         adapter.readiness_projection(

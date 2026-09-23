@@ -41,6 +41,110 @@ language compares requested/current candidate identities and evaluates the
 development/evaluator freeze and selection envelope, while Forge retains
 workflow execution, custody, and file writes.
 
+Resource and continuous-verification authority is recorded here by stable
+capability identity. This table is consumed by `tests/test_architecture.py`;
+it documents the native contract, the host mechanism, and the exact remaining
+language pressure. Host code may collect raw observations, execute the typed
+decision, realize process/cgroup operations, and return raw outcomes. It may
+not make a parallel policy decision.
+
+```toml
+schema = "mncs-forge.semantic-authority/1"
+
+[[capability]]
+identity = "forge.resource-budget.v1"
+semantic_owner = "mncs.forge.core.v1::resource_budget_select"
+native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+host_realization = "src/mncs_forge/resource_envelope.py::SystemdCgroupEnvelope"
+host_may = ["observe_host_and_cgroup_capacity", "materialize_selected_limits", "return_raw_counters"]
+host_must_not = ["select_memory_fraction", "select_memory_cap", "select_memory_high", "select_tasks_or_concurrency", "select_runtime_ceiling", "create_policy_identity"]
+status = "NATIVE_AUTHORITY"
+bootstrap_provisional = false
+
+[[capability]]
+identity = "forge.resource-policy-identity.v1"
+semantic_owner = "mncs.forge.core.v1::resource_budget_identity"
+native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+host_realization = "src/mncs_forge/mncs_native.py::NativeForgeAdapter"
+host_may = ["serialize_typed_budget_decision", "transport_structured_digest"]
+host_must_not = ["create_or_compare_policy_identity"]
+status = "NATIVE_AUTHORITY"
+bootstrap_provisional = false
+
+[[capability]]
+identity = "forge.resource-admission.v1"
+semantic_owner = "mncs.forge.core.v1::resource_admission"
+native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+host_realization = "src/mncs_forge/resource_envelope.py::SystemdCgroupEnvelope"
+host_may = ["observe_raw_memory_and_process_count", "observe_lock_availability", "apply_admission_decision"]
+host_must_not = ["combine_headroom_policy", "choose_concurrency", "choose_deadline", "classify_defer_or_unavailable"]
+status = "NATIVE_AUTHORITY"
+bootstrap_provisional = false
+
+[[capability]]
+identity = "forge.resource-outcome.v1"
+semantic_owner = "mncs.forge.core.v1::resource_outcome"
+native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+host_realization = "src/mncs_forge/resource_envelope.py::SystemdCgroupEnvelope"
+host_may = ["read_raw_cgroup_and_systemd_facts", "terminate_and_reap_owned_unit", "return_cleanup_observation"]
+host_must_not = ["classify_pass_fail_or_unknown", "classify_resource_limit_or_pressure", "classify_timeout_or_cancellation"]
+status = "NATIVE_AUTHORITY"
+bootstrap_provisional = false
+
+[[capability]]
+identity = "forge.continuous-verification-transition.v1"
+semantic_owner = "mncs.forge.core.v1::verification_resource_transition"
+native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+host_realization = "src/mncs_forge/continuous.py::ContinuousSupervisor"
+host_may = ["maintain_bounded_pending_projection", "observe_workspace_generation", "execute_native_transition"]
+host_must_not = ["choose_run_defer_or_pending", "choose_stale_cancel_or_discard", "choose_remaining_verifier_deferral", "aggregate_verifier_status"]
+status = "NATIVE_AUTHORITY"
+bootstrap_provisional = false
+
+[[capability]]
+identity = "forge.verification-queue-admission.v1"
+semantic_owner = "mncs.forge.core.v1::verification_queue_admit"
+native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+host_realization = "src/mncs_forge/continuous.py::ContinuousSupervisor._micro"
+host_may = ["supply_bounded_queue_length", "retain_deferred_obligations"]
+host_must_not = ["select_queue_capacity", "select_work_or_defer_remainder"]
+status = "NATIVE_AUTHORITY"
+bootstrap_provisional = false
+
+[[capability]]
+identity = "forge.verification-status-decision.v1"
+semantic_owner = "mncs.forge.core.v1::verification_status_decide"
+native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+host_realization = "src/mncs_forge/continuous.py::ContinuousSupervisor"
+host_may = ["serialize_bounded_result_statuses", "apply_escalation_decision"]
+host_must_not = ["aggregate_pass_fail_unknown", "decide_escalation_from_aggregate"]
+status = "NATIVE_AUTHORITY"
+bootstrap_provisional = false
+
+[[capability]]
+identity = "forge.inflight-process-cancellation.v1"
+semantic_owner = "mncs.forge.core.v1::verification_resource_transition"
+native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+host_realization = "src/mncs_forge/execution.py::ExecutionCancellation"
+host_may = ["carry_native_cancel_request", "signal_owned_process_group_or_cgroup", "wait_and_report_cleanup"]
+host_must_not = ["decide_that_work_is_stale", "publish_superseded_work_as_pass"]
+status = "NATIVE_AUTHORITY_WITH_HOST_REALIZATION"
+bootstrap_provisional = false
+pressure_ids = ["MNCS-LANG-64AD712CD2DE"]
+
+[[capability]]
+identity = "mncs.process-resource-envelope.v1"
+semantic_owner = "mncs.std.process.v1::process_run"
+native_source = ""
+host_realization = "src/mncs_forge/resource_envelope.py::SystemdCgroupEnvelope"
+host_may = ["invoke_current_process_run_contract", "perform_linux_systemd_cgroup_realization", "return_raw_process_and_cgroup_observation"]
+host_must_not = ["claim_process_run_has_resource_envelope", "claim_process_run_has_interruptible_handle"]
+status = "LANGUAGE_PRESSURE"
+bootstrap_provisional = true
+pressure_ids = ["MNCS-LANG-64AD712CD2DE", "MNCS-TOOLING-B665F138D324"]
+reproducer = "src/mncs_forge/resources/pressure-reproducers/process-resource-handle.mncs"
+```
+
 ## Control-plane composition
 
 `Forge` is the stable compatibility and composition facade used by both existing interfaces. It

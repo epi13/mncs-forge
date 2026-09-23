@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import re
+import tomllib
 from pathlib import Path
 
 PACKAGE = Path(__file__).parents[1] / "src" / "mncs_forge"
@@ -107,10 +109,9 @@ def test_application_services_use_runner_port_without_subprocess_bypass() -> Non
 
 
 def test_subprocess_implementation_is_confined_to_execution_modules() -> None:
-    # The bounded continuous lifecycle coordinator is the one additional
-    # process-owning boundary: it launches and terminates the detached
-    # canonical Language Service and Forge hosts.  Semantic execution remains
-    # confined to the execution modules below.
+    # The continuous coordinator owns detached Language Service and Forge
+    # lifetimes; the resource envelope owns systemd/cgroup realization. These
+    # are the bounded host boundaries around process execution.
     direct_subprocess = sorted(
         path.relative_to(PACKAGE).as_posix()
         for path in PACKAGE.rglob("*.py")
@@ -130,6 +131,7 @@ def test_subprocess_implementation_is_confined_to_execution_modules() -> None:
         "continuous.py",
         "execution.py",
         "execution_windows.py",
+        "resource_envelope.py",
     ]
 
 
@@ -317,3 +319,58 @@ def test_cli_and_mcp_have_no_independent_forge_business_dispatch() -> None:
         isinstance(node.func, ast.Attribute) and node.func.attr in business_methods
         for node in calls
     )
+
+
+def test_resource_semantics_have_identity_bound_native_authority() -> None:
+    workspace = PACKAGE.parents[1]
+    architecture = (workspace / "docs" / "architecture.md").read_text(encoding="utf-8")
+    block = re.search(r"```toml\n(.*?)\n```", architecture, re.DOTALL)
+    assert block is not None, "architecture ownership table is missing"
+    contract = tomllib.loads(block.group(1))
+    assert contract.get("schema") == "mncs-forge.semantic-authority/1"
+    entries = contract.get("capability")
+    assert isinstance(entries, list)
+    by_identity = {entry["identity"]: entry for entry in entries}
+    assert len(by_identity) == len(entries)
+
+    required = {
+        "forge.resource-budget.v1": "resource_budget_select",
+        "forge.resource-policy-identity.v1": "resource_budget_identity",
+        "forge.resource-admission.v1": "resource_admission",
+        "forge.resource-outcome.v1": "resource_outcome",
+        "forge.continuous-verification-transition.v1": "verification_resource_transition",
+        "forge.verification-queue-admission.v1": "verification_queue_admit",
+        "forge.verification-status-decision.v1": "verification_status_decide",
+        "forge.inflight-process-cancellation.v1": "verification_resource_transition",
+    }
+    assert required.keys() <= by_identity.keys()
+    for identity, function in required.items():
+        entry = by_identity[identity]
+        source_path = workspace / entry["native_source"]
+        host_path = workspace / entry["host_realization"].split("::", 1)[0]
+        assert source_path.is_file(), identity
+        assert f"fn {function}(" in source_path.read_text(encoding="utf-8"), identity
+        assert host_path.is_file(), identity
+        assert entry["status"].startswith("NATIVE_AUTHORITY"), identity
+        assert entry["bootstrap_provisional"] is False, identity
+        assert entry["host_must_not"], identity
+
+    pressure = by_identity["mncs.process-resource-envelope.v1"]
+    assert pressure["status"] == "LANGUAGE_PRESSURE"
+    assert pressure["bootstrap_provisional"] is True
+    assert pressure["pressure_ids"] == [
+        "MNCS-LANG-64AD712CD2DE",
+        "MNCS-TOOLING-B665F138D324",
+    ]
+    assert (workspace / pressure["reproducer"]).is_file()
+
+    resource_source = (PACKAGE / "resource_envelope.py").read_text(encoding="utf-8")
+    continuous_source = (PACKAGE / "continuous.py").read_text(encoding="utf-8")
+    assert "resource_semantics.resource_budget_select(" in resource_source
+    assert "resource_semantics.resource_budget_identity(" in resource_source
+    assert "self._resource_semantics.resource_admission(" in resource_source
+    assert "self._resource_semantics.resource_outcome(" in resource_source
+    assert "verification_resource_transition" in continuous_source
+    assert "verification_queue_admit" in continuous_source
+    assert "verification_status_decide" in continuous_source
+    assert "def select_resource_budget(" not in resource_source

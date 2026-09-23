@@ -1,4 +1,4 @@
-mncs 0.10;
+mncs 0.18;
 
 // Public MNCS-native Forge core entrypoints. Host adapters can compile and
 // execute this module independently while the Python CLI/MCP remains the
@@ -117,4 +117,1038 @@ fn canonical_probe() -> (result: serlib.CanonicalMaterial) {
         [1, 2, 3, 4]
     );
     return serlib.encode_candidate_material(candidate);
+}
+
+// Resource policy belongs to the canonical Forge decision module. The host
+// supplies observed capacities and the explicitly configured values; defaults,
+// bounds, derived budgets, and admission eligibility are decided here.
+enum ResourceBudgetStatus { Selected, Unavailable, InvalidPolicy }
+
+record ResourceObservation {
+    has_host_memory_total: bool,
+    host_memory_total_bytes: i64,
+    has_cgroup_memory_max: bool,
+    cgroup_memory_max_bytes: i64
+}
+
+record ResourcePolicy {
+    fields_valid: bool,
+    has_memory_fraction: bool,
+    memory_fraction: f64,
+    has_memory_cap: bool,
+    memory_cap_bytes: i64,
+    has_memory_max: bool,
+    memory_max_bytes: i64,
+    has_tasks_max: bool,
+    tasks_max: i64,
+    has_concurrency_max: bool,
+    concurrency_max: i64,
+    has_runtime_max: bool,
+    runtime_max_seconds: f64
+}
+
+record ResourceBudgetDecision {
+    status: ResourceBudgetStatus,
+    memory_high_bytes: i64,
+    memory_max_bytes: i64,
+    memory_swap_max_bytes: i64,
+    tasks_max: i64,
+    concurrency_max: i64,
+    runtime_max_seconds: f64,
+    effective_host_memory_bytes: i64
+}
+
+fn resource_min_i64(first: i64, second: i64) -> (result: i64) {
+    if first < second { return first; }
+    return second;
+}
+
+fn resource_max_i64(first: i64, second: i64) -> (result: i64) {
+    if first > second { return first; }
+    return second;
+}
+
+fn resource_capacity_select(
+    has_host_memory: bool,
+    host_memory: i64,
+    has_cgroup_memory: bool,
+    cgroup_memory: i64
+) -> (result: i64) {
+    if has_host_memory && has_cgroup_memory {
+        return resource_min_i64(host_memory, cgroup_memory);
+    }
+    if has_host_memory { return host_memory; }
+    return cgroup_memory;
+}
+
+fn resource_budget_empty(status: ResourceBudgetStatus) -> (result: ResourceBudgetDecision) {
+    return ResourceBudgetDecision {
+        status: status,
+        memory_high_bytes: 0,
+        memory_max_bytes: 0,
+        memory_swap_max_bytes: 0,
+        tasks_max: 0,
+        concurrency_max: 0,
+        runtime_max_seconds: 0.0,
+        effective_host_memory_bytes: 0
+    };
+}
+
+fn resource_budget_select(
+    observation: ResourceObservation,
+    policy: ResourcePolicy
+) -> (result: ResourceBudgetDecision) {
+    let default_memory_fraction: f64 = 0.15;
+    let default_memory_cap: i64 = 4294967296;
+    let default_tasks_max: i64 = 64;
+    let default_concurrency_max: i64 = 1;
+    let default_runtime_max: f64 = 600.0;
+    let memory_fraction: f64 = select(policy.has_memory_fraction, policy.memory_fraction, default_memory_fraction);
+    let memory_cap_bytes: i64 = select(policy.has_memory_cap, policy.memory_cap_bytes, default_memory_cap);
+    let tasks_max: i64 = select(policy.has_tasks_max, policy.tasks_max, default_tasks_max);
+    let concurrency_max: i64 = select(policy.has_concurrency_max, policy.concurrency_max, default_concurrency_max);
+    let runtime_max_seconds: f64 = select(policy.has_runtime_max, policy.runtime_max_seconds, default_runtime_max);
+
+    if !policy.fields_valid { return resource_budget_empty(ResourceBudgetStatus.InvalidPolicy); }
+    if memory_fraction < 0.05 || memory_fraction > 0.25 {
+        return resource_budget_empty(ResourceBudgetStatus.InvalidPolicy);
+    }
+    if memory_cap_bytes < 134217728 {
+        return resource_budget_empty(ResourceBudgetStatus.InvalidPolicy);
+    }
+    if tasks_max < 1 || tasks_max > 4096 || concurrency_max != 1 {
+        return resource_budget_empty(ResourceBudgetStatus.InvalidPolicy);
+    }
+    if runtime_max_seconds < 1.0 || runtime_max_seconds > 600.0 {
+        return resource_budget_empty(ResourceBudgetStatus.InvalidPolicy);
+    }
+
+    let host_memory: i64 = select(observation.has_host_memory_total, observation.host_memory_total_bytes, 0);
+    if !observation.has_host_memory_total && !observation.has_cgroup_memory_max {
+        return resource_budget_empty(ResourceBudgetStatus.Unavailable);
+    }
+    let cgroup_memory: i64 = select(
+        observation.has_cgroup_memory_max,
+        observation.cgroup_memory_max_bytes,
+        0
+    );
+    let capacity: i64 = resource_capacity_select(
+        observation.has_host_memory_total,
+        host_memory,
+        observation.has_cgroup_memory_max,
+        cgroup_memory
+    );
+    if capacity < 268435456 { return resource_budget_empty(ResourceBudgetStatus.Unavailable); }
+
+    let derived_memory_max: i64 = resource_min_i64(
+        ((capacity as f64) * memory_fraction) as i64,
+        memory_cap_bytes
+    );
+    let requested_memory_max: i64 = select(policy.has_memory_max, policy.memory_max_bytes, derived_memory_max);
+    let memory_max_bytes: i64 = resource_min_i64(requested_memory_max, derived_memory_max);
+    if memory_max_bytes < 134217728 { return resource_budget_empty(ResourceBudgetStatus.Unavailable); }
+
+    let memory_high_bytes: i64 = resource_min_i64(
+        resource_max_i64(67108864, memory_max_bytes / 2),
+        memory_max_bytes - 1
+    );
+    return ResourceBudgetDecision {
+        status: ResourceBudgetStatus.Selected,
+        memory_high_bytes: memory_high_bytes,
+        memory_max_bytes: memory_max_bytes,
+        memory_swap_max_bytes: 0,
+        tasks_max: tasks_max,
+        concurrency_max: concurrency_max,
+        runtime_max_seconds: runtime_max_seconds,
+        effective_host_memory_bytes: capacity
+    };
+}
+
+// The runtime's generic structured identity is the canonical identity for a
+// typed decision. The caller supplies this named capability grant; Forge
+// Python only encodes the returned digest bytes for transport.
+fn resource_budget_identity(decision: ResourceBudgetDecision) -> (result: [byte; up_to 64])
+    capability resource_budget_identity
+    effect structured_digest authorized_by resource_budget_identity
+{
+    return structured_digest(decision);
+}
+
+// Admission is a separate typed decision over live observations. The host
+// reads the cgroup and lock state; this function owns headroom, one-slot
+// scheduling, and the effective wall deadline.
+enum ResourceAdmissionStatus { Admit, Uncontained, Defer, Unavailable, InvalidInput }
+enum ResourceAdmissionReason {
+    None,
+    ContainmentUnavailable,
+    BudgetUnavailable,
+    ProcessCountUnknown,
+    ActiveProcessTree,
+    ExecutionSlotOccupied,
+    LowHostHeadroom,
+    InvalidRuntime
+}
+
+record ResourceAdmissionObservation {
+    containment_available: bool,
+    has_budget: bool,
+    has_available_memory: bool,
+    available_memory_bytes: i64,
+    has_host_available_memory: bool,
+    host_available_memory_bytes: i64,
+    has_cgroup_available_memory: bool,
+    cgroup_available_memory_bytes: i64,
+    active_tasks_known: bool,
+    active_tasks: i64,
+    execution_slot_available: bool,
+    requested_runtime_seconds: f64
+}
+
+record ResourceAdmissionPolicy {
+    containment_required: bool,
+    memory_max_bytes: i64,
+    concurrency_max: i64,
+    runtime_max_seconds: f64
+}
+
+record ResourceAdmissionDecision {
+    status: ResourceAdmissionStatus,
+    reason: ResourceAdmissionReason,
+    deferred: bool,
+    required_headroom_bytes: i64,
+    runtime_seconds: f64
+}
+
+fn resource_admission_min_f64(first: f64, second: f64) -> (result: f64) {
+    if first < second { return first; }
+    return second;
+}
+
+fn resource_admission_runtime_ceiling(runtime: f64) -> (result: f64) {
+    return select(runtime > 0.0, runtime, 600.0);
+}
+
+fn resource_admission_effective_memory(observation: ResourceAdmissionObservation) -> (result: i64) {
+    let fallback: i64 = select(
+        observation.has_host_available_memory,
+        observation.host_available_memory_bytes,
+        select(
+            observation.has_cgroup_available_memory,
+            observation.cgroup_available_memory_bytes,
+            observation.available_memory_bytes
+        )
+    );
+    return select(
+        observation.has_host_available_memory && observation.has_cgroup_available_memory,
+        resource_min_i64(
+            observation.host_available_memory_bytes,
+            observation.cgroup_available_memory_bytes
+        ),
+        fallback
+    );
+}
+
+fn resource_admission_decision(
+    status: ResourceAdmissionStatus,
+    reason: ResourceAdmissionReason,
+    headroom: i64,
+    runtime: f64
+) -> (result: ResourceAdmissionDecision) {
+    return ResourceAdmissionDecision {
+        status: status,
+        reason: reason,
+        deferred: match status {
+            Defer => true,
+            Unavailable => true,
+            Admit => false,
+            Uncontained => false,
+            InvalidInput => false
+        },
+        required_headroom_bytes: headroom,
+        runtime_seconds: runtime
+    };
+}
+
+fn resource_admission(
+    observation: ResourceAdmissionObservation,
+    policy: ResourceAdmissionPolicy
+) -> (result: ResourceAdmissionDecision) {
+    if observation.requested_runtime_seconds <= 0.0 {
+        return resource_admission_decision(
+            ResourceAdmissionStatus.InvalidInput,
+            ResourceAdmissionReason.InvalidRuntime,
+            0,
+            0.0
+        );
+    }
+    if !observation.containment_available {
+        if policy.containment_required {
+            return resource_admission_decision(
+                ResourceAdmissionStatus.Unavailable,
+                ResourceAdmissionReason.ContainmentUnavailable,
+                0,
+                0.0
+            );
+        }
+        return resource_admission_decision(
+            ResourceAdmissionStatus.Uncontained,
+            ResourceAdmissionReason.None,
+            0,
+            resource_admission_min_f64(
+                observation.requested_runtime_seconds,
+                resource_admission_runtime_ceiling(policy.runtime_max_seconds)
+            )
+        );
+    }
+    if !observation.has_budget {
+        if !policy.containment_required {
+            return resource_admission_decision(
+                ResourceAdmissionStatus.Uncontained,
+                ResourceAdmissionReason.None,
+                0,
+                resource_admission_min_f64(
+                    observation.requested_runtime_seconds,
+                    resource_admission_runtime_ceiling(policy.runtime_max_seconds)
+                )
+            );
+        }
+        return resource_admission_decision(
+            ResourceAdmissionStatus.Unavailable,
+            ResourceAdmissionReason.BudgetUnavailable,
+            0,
+            0.0
+        );
+    }
+    if policy.runtime_max_seconds <= 0.0 {
+        return resource_admission_decision(
+            ResourceAdmissionStatus.InvalidInput,
+            ResourceAdmissionReason.InvalidRuntime,
+            0,
+            0.0
+        );
+    }
+    if policy.memory_max_bytes <= 0 || policy.concurrency_max < 1 {
+        return resource_admission_decision(
+            ResourceAdmissionStatus.InvalidInput,
+            ResourceAdmissionReason.None,
+            0,
+            0.0
+        );
+    }
+    if !observation.execution_slot_available {
+        return resource_admission_decision(
+            ResourceAdmissionStatus.Defer,
+            ResourceAdmissionReason.ExecutionSlotOccupied,
+            0,
+            0.0
+        );
+    }
+    if !observation.active_tasks_known {
+        return resource_admission_decision(
+            ResourceAdmissionStatus.Unavailable,
+            ResourceAdmissionReason.ProcessCountUnknown,
+            0,
+            0.0
+        );
+    }
+    if observation.active_tasks < 0 {
+        return resource_admission_decision(
+            ResourceAdmissionStatus.InvalidInput,
+            ResourceAdmissionReason.None,
+            0,
+            0.0
+        );
+    }
+    if observation.active_tasks >= policy.concurrency_max {
+        return resource_admission_decision(
+            ResourceAdmissionStatus.Defer,
+            ResourceAdmissionReason.ActiveProcessTree,
+            0,
+            0.0
+        );
+    }
+    let doubled_memory: i64 = policy.memory_max_bytes * 2;
+    let required_headroom: i64 = resource_max_i64(536870912, doubled_memory);
+    let has_available_memory: bool = observation.has_available_memory
+        || observation.has_host_available_memory
+        || observation.has_cgroup_available_memory;
+    let available_memory_bytes: i64 = resource_admission_effective_memory(observation);
+    if has_available_memory && available_memory_bytes < required_headroom {
+        return resource_admission_decision(
+            ResourceAdmissionStatus.Defer,
+            ResourceAdmissionReason.LowHostHeadroom,
+            required_headroom,
+            0.0
+        );
+    }
+    return resource_admission_decision(
+        ResourceAdmissionStatus.Admit,
+        ResourceAdmissionReason.None,
+        required_headroom,
+        resource_admission_min_f64(
+            observation.requested_runtime_seconds,
+            policy.runtime_max_seconds
+        )
+    );
+}
+
+enum ResourceSystemdResult { Success, ExitCode, OomKill, OutOfMemory, Timeout, Failed, Unknown }
+enum ResourceOutcomeStatus {
+    Pass,
+    Fail,
+    ResourceLimit,
+    ResourcePressure,
+    Timeout,
+    OutputLimit,
+    Unknown,
+    CleanupFailure,
+    Cancelled,
+    Stale
+}
+enum ResourceOutcomeMetric { None, Memory, ProcessCount, WallTime, Output }
+
+record ResourceOutcomeObservation {
+    has_exit_status: bool,
+    exit_status: i64,
+    has_wrapper_exit_status: bool,
+    wrapper_exit_status: i64,
+    systemd_result: ResourceSystemdResult,
+    timed_out: bool,
+    output_limited: bool,
+    memory_high_events: i64,
+    memory_max_events: i64,
+    memory_oom_events: i64,
+    memory_oom_kill_events: i64,
+    memory_oom_group_kill_events: i64,
+    process_limit_events: i64,
+    cleanup_known: bool,
+    cleanup_succeeded: bool,
+    cancellation_requested: bool,
+    superseded: bool
+}
+
+record ResourceOutcomeDecision {
+    status: ResourceOutcomeStatus,
+    metric: ResourceOutcomeMetric,
+    resource_exhausted: bool,
+    deferred: bool,
+    cancellation_requested: bool,
+    superseded: bool
+}
+
+record ResourceOutcomeResult {
+    status: ResourceOutcomeStatus,
+    metric: ResourceOutcomeMetric,
+    resource_exhausted: bool,
+    deferred: bool,
+    cancellation_requested: bool,
+    superseded: bool,
+    has_execution_exit_status: bool,
+    execution_exit_status: i64
+}
+
+fn resource_outcome_status_has_execution_exit(status: ResourceOutcomeStatus) -> (result: bool) {
+    return match status {
+        Pass => true,
+        Fail => true,
+        ResourceLimit => false,
+        ResourcePressure => false,
+        Timeout => false,
+        OutputLimit => false,
+        Unknown => false,
+        CleanupFailure => false,
+        Cancelled => false,
+        Stale => false
+    };
+}
+
+fn resource_outcome_status_is_pass(status: ResourceOutcomeStatus) -> (result: bool) {
+    return match status {
+        Pass => true,
+        Fail => false,
+        ResourceLimit => false,
+        ResourcePressure => false,
+        Timeout => false,
+        OutputLimit => false,
+        Unknown => false,
+        CleanupFailure => false,
+        Cancelled => false,
+        Stale => false
+    };
+}
+
+fn resource_outcome_result(
+    decision: ResourceOutcomeDecision,
+    has_execution_exit_status: bool,
+    execution_exit_status: i64
+) -> (result: ResourceOutcomeResult) {
+    return ResourceOutcomeResult {
+        status: decision.status,
+        metric: decision.metric,
+        resource_exhausted: decision.resource_exhausted,
+        deferred: decision.deferred,
+        cancellation_requested: decision.cancellation_requested,
+        superseded: decision.superseded,
+        has_execution_exit_status: has_execution_exit_status,
+        execution_exit_status: execution_exit_status
+    };
+}
+
+fn resource_systemd_timed_out(result: ResourceSystemdResult) -> (result: bool) {
+    return match result {
+        Success => false,
+        ExitCode => false,
+        OomKill => false,
+        OutOfMemory => false,
+        Timeout => true,
+        Failed => false,
+        Unknown => false
+    };
+}
+
+fn resource_systemd_memory_limited(result: ResourceSystemdResult) -> (result: bool) {
+    return match result {
+        Success => false,
+        ExitCode => false,
+        OomKill => true,
+        OutOfMemory => true,
+        Timeout => false,
+        Failed => false,
+        Unknown => false
+    };
+}
+
+fn resource_systemd_unknown(result: ResourceSystemdResult) -> (result: bool) {
+    return match result {
+        Success => false,
+        ExitCode => false,
+        OomKill => false,
+        OutOfMemory => false,
+        Timeout => false,
+        Failed => true,
+        Unknown => false
+    };
+}
+
+fn resource_outcome_classify(
+    observation: ResourceOutcomeObservation
+) -> (result: ResourceOutcomeDecision) {
+    if observation.cleanup_known && !observation.cleanup_succeeded {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.CleanupFailure,
+            metric: ResourceOutcomeMetric.None,
+            resource_exhausted: false,
+            deferred: true,
+            cancellation_requested: observation.cancellation_requested,
+            superseded: observation.superseded
+        };
+    }
+    if observation.superseded {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.Stale,
+            metric: ResourceOutcomeMetric.None,
+            resource_exhausted: false,
+            deferred: false,
+            cancellation_requested: observation.cancellation_requested,
+            superseded: true
+        };
+    }
+    if observation.cancellation_requested {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.Cancelled,
+            metric: ResourceOutcomeMetric.None,
+            resource_exhausted: false,
+            deferred: false,
+            cancellation_requested: true,
+            superseded: false
+        };
+    }
+    if observation.timed_out || resource_systemd_timed_out(observation.systemd_result) {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.Timeout,
+            metric: ResourceOutcomeMetric.WallTime,
+            resource_exhausted: true,
+            deferred: true,
+            cancellation_requested: false,
+            superseded: false
+        };
+    }
+    if observation.memory_max_events > 0
+        || observation.memory_oom_events > 0
+        || observation.memory_oom_kill_events > 0
+        || observation.memory_oom_group_kill_events > 0
+        || resource_systemd_memory_limited(observation.systemd_result)
+    {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.ResourceLimit,
+            metric: ResourceOutcomeMetric.Memory,
+            resource_exhausted: true,
+            deferred: true,
+            cancellation_requested: false,
+            superseded: false
+        };
+    }
+    if observation.process_limit_events > 0 {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.ResourceLimit,
+            metric: ResourceOutcomeMetric.ProcessCount,
+            resource_exhausted: true,
+            deferred: true,
+            cancellation_requested: false,
+            superseded: false
+        };
+    }
+    if observation.output_limited {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.OutputLimit,
+            metric: ResourceOutcomeMetric.Output,
+            resource_exhausted: true,
+            deferred: true,
+            cancellation_requested: false,
+            superseded: false
+        };
+    }
+    if observation.memory_high_events > 0 {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.ResourcePressure,
+            metric: ResourceOutcomeMetric.Memory,
+            resource_exhausted: false,
+            deferred: true,
+            cancellation_requested: false,
+            superseded: false
+        };
+    }
+    if observation.has_exit_status
+        && observation.has_wrapper_exit_status
+        && observation.exit_status != observation.wrapper_exit_status
+    {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.Unknown,
+            metric: ResourceOutcomeMetric.None,
+            resource_exhausted: false,
+            deferred: true,
+            cancellation_requested: false,
+            superseded: false
+        };
+    }
+    if resource_systemd_unknown(observation.systemd_result) {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.Unknown,
+            metric: ResourceOutcomeMetric.None,
+            resource_exhausted: false,
+            deferred: true,
+            cancellation_requested: false,
+            superseded: false
+        };
+    }
+    if !observation.has_exit_status && !observation.has_wrapper_exit_status {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.Unknown,
+            metric: ResourceOutcomeMetric.None,
+            resource_exhausted: false,
+            deferred: true,
+            cancellation_requested: false,
+            superseded: false
+        };
+    }
+    if !observation.has_exit_status {
+        if observation.wrapper_exit_status == 0 {
+            return ResourceOutcomeDecision {
+                status: ResourceOutcomeStatus.Pass,
+                metric: ResourceOutcomeMetric.None,
+                resource_exhausted: false,
+                deferred: false,
+                cancellation_requested: false,
+                superseded: false
+            };
+        }
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.Unknown,
+            metric: ResourceOutcomeMetric.None,
+            resource_exhausted: false,
+            deferred: true,
+            cancellation_requested: false,
+            superseded: false
+        };
+    }
+    if observation.exit_status == 0 {
+        return ResourceOutcomeDecision {
+            status: ResourceOutcomeStatus.Pass,
+            metric: ResourceOutcomeMetric.None,
+            resource_exhausted: false,
+            deferred: false,
+            cancellation_requested: false,
+            superseded: false
+        };
+    }
+    return ResourceOutcomeDecision {
+        status: ResourceOutcomeStatus.Fail,
+        metric: ResourceOutcomeMetric.None,
+        resource_exhausted: false,
+        deferred: false,
+        cancellation_requested: false,
+        superseded: false
+    };
+}
+
+fn resource_outcome(
+    observation: ResourceOutcomeObservation
+) -> (result: ResourceOutcomeResult) {
+    let decision: ResourceOutcomeDecision = resource_outcome_classify(observation);
+    if resource_outcome_status_has_execution_exit(decision.status) {
+        if observation.has_exit_status {
+            return resource_outcome_result(decision, true, observation.exit_status);
+        }
+        if resource_outcome_status_is_pass(decision.status)
+            && observation.has_wrapper_exit_status
+            && observation.wrapper_exit_status == 0
+        {
+            return resource_outcome_result(decision, true, 0);
+        }
+    }
+    return resource_outcome_result(decision, false, 0);
+}
+
+enum VerificationEvidenceStatus { NotRun, Pass, Fail, Unknown }
+enum VerificationDisposition {
+    Run,
+    Defer,
+    RemainPending,
+    DeferRemaining,
+    RemainPendingAndDeferRemaining,
+    Resolve,
+    CancelStale,
+    DiscardStale,
+    EscalateUnknown
+}
+
+record VerificationQueueDecision {
+    selected_count: i64,
+    deferred_count: i64,
+    valid: bool
+}
+
+fn verification_queue_admit(total_count: i64) -> (result: VerificationQueueDecision) {
+    if total_count < 0 {
+        return VerificationQueueDecision { selected_count: 0, deferred_count: 0, valid: false };
+    }
+    let selected: i64 = resource_min_i64(total_count, 16);
+    return VerificationQueueDecision {
+        selected_count: selected,
+        deferred_count: total_count - selected,
+        valid: true
+    };
+}
+
+record VerificationStatusSet {
+    statuses: [statlib.Status; 16],
+    status_count: byte
+}
+
+record VerificationStatusFold {
+    status: statlib.Status,
+    count: u64
+}
+
+fn verification_status_step(
+    current: VerificationStatusFold,
+    observed: statlib.Status,
+    include: bool
+) -> (result: VerificationStatusFold) {
+    if !include { return current; }
+    if current.count == 0 {
+        return VerificationStatusFold { status: observed, count: 1 };
+    }
+    return VerificationStatusFold {
+        status: statlib.dominate(current.status, observed),
+        count: current.count +% 1
+    };
+}
+
+fn verification_status_aggregate(input: VerificationStatusSet) -> (result: statlib.Status) {
+    if (input.status_count as i64) > 16 { return statlib.Status.UNKNOWN; }
+    let initial: VerificationStatusFold = VerificationStatusFold {
+        status: statlib.Status.UNKNOWN,
+        count: 0
+    };
+    iterate i over input.statuses carrying current: VerificationStatusFold = initial {
+        let include: bool = (i as i64) < (input.status_count as i64);
+        next current = verification_status_step(current, input.statuses[i], include);
+    }
+    if current.count == 0 { return statlib.Status.UNKNOWN; }
+    return current.status;
+}
+
+record VerificationStatusDecision {
+    status: statlib.Status,
+    stale_observed: bool,
+    escalation_required: bool
+}
+
+fn verification_status_is_pass(status: statlib.Status) -> (result: bool) {
+    return match status {
+        UNKNOWN => false,
+        PASS => true,
+        FAIL => false
+    };
+}
+
+fn verification_status_decide(
+    input: VerificationStatusSet,
+    stale_observed: bool,
+    verification_required: bool
+) -> (result: VerificationStatusDecision) {
+    let aggregate: statlib.Status = verification_status_aggregate(input);
+    let nonempty: bool = input.status_count > 0;
+    if verification_required && !nonempty {
+        return VerificationStatusDecision {
+            status: statlib.Status.UNKNOWN,
+            stale_observed: stale_observed,
+            escalation_required: true
+        };
+    }
+    if stale_observed && verification_status_is_pass(aggregate) {
+        return VerificationStatusDecision {
+            status: statlib.Status.UNKNOWN,
+            stale_observed: true,
+            escalation_required: true
+        };
+    }
+    if !verification_required && !nonempty {
+        return VerificationStatusDecision {
+            status: statlib.Status.PASS,
+            stale_observed: false,
+            escalation_required: false
+        };
+    }
+    return VerificationStatusDecision {
+        status: aggregate,
+        stale_observed: stale_observed,
+        escalation_required: !verification_status_is_pass(aggregate)
+    };
+}
+
+record ContinuousResourceState {
+    current_generation: i64,
+    work_generation: i64,
+    source_identity_matches: bool,
+    verification_required: bool,
+    in_flight: bool,
+    has_outcome: bool,
+    outcome: ResourceOutcomeStatus,
+    evidence_status: VerificationEvidenceStatus,
+    pending_exists: bool,
+    pending_count: i64,
+    pending_capacity: i64,
+    queue_remaining: i64,
+    resource_gate_closed: bool
+}
+
+record VerificationResourceTransition {
+    disposition: VerificationDisposition,
+    evidence_status: VerificationEvidenceStatus,
+    retain_current_pending: bool,
+    defer_remaining: bool,
+    cancel_owned_work: bool,
+    cleanup_required: bool
+}
+
+fn verification_transition(
+    disposition: VerificationDisposition,
+    status: VerificationEvidenceStatus,
+    retain_pending: bool,
+    defer_remaining: bool,
+    cancel_owned_work: bool
+) -> (result: VerificationResourceTransition) {
+    return VerificationResourceTransition {
+        disposition: disposition,
+        evidence_status: status,
+        retain_current_pending: retain_pending,
+        defer_remaining: defer_remaining,
+        cancel_owned_work: cancel_owned_work,
+        cleanup_required: cancel_owned_work
+    };
+}
+
+fn verification_status_resolved(status: VerificationEvidenceStatus) -> (result: bool) {
+    return match status {
+        NotRun => false,
+        Pass => true,
+        Fail => true,
+        Unknown => false
+    };
+}
+
+fn verification_status_unknown(status: VerificationEvidenceStatus) -> (result: bool) {
+    return match status {
+        NotRun => false,
+        Pass => false,
+        Fail => false,
+        Unknown => true
+    };
+}
+
+fn verification_resource_outcome_resolved(outcome: ResourceOutcomeStatus) -> (result: bool) {
+    return match outcome {
+        Pass => true,
+        Fail => true,
+        ResourceLimit => false,
+        ResourcePressure => false,
+        Timeout => false,
+        OutputLimit => false,
+        Unknown => false,
+        CleanupFailure => false,
+        Cancelled => false,
+        Stale => false
+    };
+}
+
+fn verification_resource_outcome_requires_pending(outcome: ResourceOutcomeStatus) -> (result: bool) {
+    return match outcome {
+        Pass => false,
+        Fail => false,
+        ResourceLimit => true,
+        ResourcePressure => true,
+        Timeout => true,
+        OutputLimit => true,
+        Unknown => true,
+        CleanupFailure => true,
+        Cancelled => false,
+        Stale => false
+    };
+}
+
+fn verification_resource_transition(
+    state: ContinuousResourceState
+) -> (result: VerificationResourceTransition) {
+    if state.work_generation < state.current_generation || !state.source_identity_matches {
+        if state.in_flight {
+            return verification_transition(
+                VerificationDisposition.CancelStale,
+                VerificationEvidenceStatus.Unknown,
+                false,
+                false,
+                true
+            );
+        }
+        return verification_transition(
+            VerificationDisposition.DiscardStale,
+            VerificationEvidenceStatus.Unknown,
+            false,
+            false,
+            false
+        );
+    }
+    if state.work_generation > state.current_generation {
+        return verification_transition(
+            VerificationDisposition.EscalateUnknown,
+            VerificationEvidenceStatus.Unknown,
+            false,
+            false,
+            false
+        );
+    }
+    if !state.verification_required {
+        return verification_transition(
+            VerificationDisposition.Resolve,
+            state.evidence_status,
+            false,
+            false,
+            false
+        );
+    }
+    if state.resource_gate_closed && !state.has_outcome {
+        let can_retain: bool = state.pending_exists || state.pending_count < state.pending_capacity;
+        if !can_retain {
+            return verification_transition(
+                VerificationDisposition.EscalateUnknown,
+                VerificationEvidenceStatus.Unknown,
+                false,
+                state.queue_remaining > 0,
+                false
+            );
+        }
+        if state.queue_remaining > 0 {
+            return verification_transition(
+                VerificationDisposition.RemainPendingAndDeferRemaining,
+                VerificationEvidenceStatus.Unknown,
+                true,
+                true,
+                false
+            );
+        }
+        return verification_transition(
+            VerificationDisposition.RemainPending,
+            VerificationEvidenceStatus.Unknown,
+            true,
+            false,
+            false
+        );
+    }
+    if !state.has_outcome {
+        return verification_transition(
+            VerificationDisposition.Run,
+            VerificationEvidenceStatus.NotRun,
+            false,
+            false,
+            false
+        );
+    }
+    if verification_status_resolved(state.evidence_status) {
+        if verification_resource_outcome_resolved(state.outcome) {
+            return verification_transition(
+                VerificationDisposition.Resolve,
+                state.evidence_status,
+                false,
+                false,
+                false
+            );
+        }
+    }
+    if state.pending_count < 0 || state.pending_capacity < 0 || state.queue_remaining < 0 {
+        return verification_transition(
+            VerificationDisposition.EscalateUnknown,
+            VerificationEvidenceStatus.Unknown,
+            false,
+            false,
+            false
+        );
+    }
+    let can_retain: bool = state.pending_exists || state.pending_count < state.pending_capacity;
+    if !can_retain {
+        return verification_transition(
+            VerificationDisposition.EscalateUnknown,
+            VerificationEvidenceStatus.Unknown,
+            false,
+            state.queue_remaining > 0,
+            false
+        );
+    }
+    let should_retain: bool = verification_resource_outcome_requires_pending(state.outcome)
+        || verification_status_unknown(state.evidence_status);
+    if should_retain && state.queue_remaining > 0 {
+        return verification_transition(
+            VerificationDisposition.RemainPendingAndDeferRemaining,
+            VerificationEvidenceStatus.Unknown,
+            true,
+            true,
+            false
+        );
+    }
+    if should_retain {
+        return verification_transition(
+            VerificationDisposition.RemainPending,
+            VerificationEvidenceStatus.Unknown,
+            true,
+            false,
+            false
+        );
+    }
+    return verification_transition(
+        VerificationDisposition.Resolve,
+        state.evidence_status,
+        false,
+        false,
+        false
+    );
 }

@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter, OrderedDict, deque
 from contextlib import contextmanager
@@ -28,6 +29,8 @@ from filelock import FileLock, Timeout
 
 from .application.support import now
 from .errors import ForgeError
+from .execution import ExecutionCancellation, bind_execution_cancellation
+from .mncs_native import NativeForgeAdapter
 from .records import RecordType, new_record
 from .serialization import local_json_identity
 
@@ -70,8 +73,17 @@ def _compact_resource_evidence(value: object) -> dict[str, object]:
             "resource_bound",
             "resource_observed",
             "cleanup_succeeded",
-            "termination_reason",
             "systemd_result",
+            "command_returncode",
+            "systemd_wrapper_returncode",
+            "resource_outcome",
+            "native_execution_returncode_available",
+            "native_execution_returncode",
+            "cancellation_requested",
+            "superseded",
+            "verification_deferred",
+            "native_admission_reason",
+            "resource_admission_status",
             "deferred",
             "limitation",
         )
@@ -81,7 +93,6 @@ def _compact_resource_evidence(value: object) -> dict[str, object]:
         ("resource_envelope_identity", 128),
         ("unit_identity", 128),
         ("resource_metric", 64),
-        ("termination_reason", 128),
         ("systemd_result", 64),
         ("limitation", 512),
     ):
@@ -109,6 +120,18 @@ def _compact_resource_evidence(value: object) -> dict[str, object]:
         if isinstance(verifier_ids, list):
             bounded_context["verifier_ids"] = [str(item)[:128] for item in verifier_ids[:32]]
         compact["job_context"] = bounded_context
+    cancellation = _mapping(evidence.get("execution_cancellation"))
+    if cancellation:
+        compact["execution_cancellation"] = {
+            key: cancellation[key]
+            for key in (
+                "cancellation_requested",
+                "superseded",
+                "termination_request_succeeded",
+                "request_to_termination_request_seconds",
+            )
+            if key in cancellation
+        }
     resource_observations = _mapping(evidence.get("resource_observations"))
     if resource_observations:
         compact["resource_observations"] = {
@@ -146,6 +169,8 @@ def _compact_verification_result(value: object) -> dict[str, object]:
         "resource_bound",
         "resource_observed",
         "cleanup_succeeded",
+        "cancellation_requested",
+        "superseded",
         "generation",
         "source_identity",
         "source_uri",
@@ -913,6 +938,11 @@ class ContinuousSupervisor:
         self.forge = forge
         self.config = forge.config
         self.settings = self.config.continuous_settings
+        self._resource_semantics = (
+            getattr(forge, "_resource_semantics", None)
+            or getattr(forge, "_native", None)
+            or NativeForgeAdapter(self.config.root)
+        )
         self.status_counts: Counter[str] = Counter()
         self.pending: OrderedDict[str, dict[str, object]] = OrderedDict()
         self.attention: list[dict[str, object]] = []
@@ -993,7 +1023,14 @@ class ContinuousSupervisor:
         path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     @contextmanager
-    def _job_scope(self, event: dict[str, object], trigger: dict[str, object], action: str) -> Any:
+    def _job_scope(
+        self,
+        event: dict[str, object],
+        trigger: dict[str, object],
+        action: str,
+        *,
+        client: Any | None = None,
+    ) -> Any:
         current = _mapping(event.get("current"))
         verifier_ids = _list(trigger.get("verifier_ids"))
         job: dict[str, object] = {
@@ -1023,12 +1060,62 @@ class ContinuousSupervisor:
             set_context(job)
         if getattr(getattr(self, "config", None), "state_dir", None) is not None:
             self._write_status(self.status())
+        cancellation = ExecutionCancellation()
+        stop_monitor = threading.Event()
+        monitor: threading.Thread | None = None
+        socket_path = getattr(client, "path", None)
+        if action in {"verification_plan", "micro_verifier", "security_micro_verifier"} and isinstance(
+            socket_path, Path
+        ):
+            work_generation = int(event.get("current_generation", 0))
+
+            def observe_supersession() -> None:
+                observer = LanguageServiceSocket(socket_path, timeout=0.5)
+                while not stop_monitor.wait(0.05):
+                    try:
+                        observed = _mapping(observer.request("workspace_status", {}))
+                        observed_generation = int(observed.get("generation", work_generation))
+                    except (ForgeError, TypeError, ValueError):
+                        continue
+                    if observed_generation <= work_generation:
+                        continue
+                    transition = self._native_resource_transition(
+                        event={**event, "current_generation": observed_generation},
+                        candidate=str(job.get("candidate_identity") or "event"),
+                        verifier_id="in-flight-generation",
+                        outcome="Unknown",
+                        evidence_status="NotRun",
+                        has_outcome=False,
+                        queue_remaining=0,
+                        in_flight=True,
+                        work_generation=work_generation,
+                        current_generation=observed_generation,
+                    )
+                    if transition.cancel_owned_work:
+                        self.current_generation = max(
+                            self.current_generation, observed_generation
+                        )
+                        cancellation.request(superseded=True)
+                        job["cancellation_requested"] = True
+                        job["cancellation_generation"] = observed_generation
+                        return
+
+            monitor = threading.Thread(
+                target=observe_supersession,
+                name="mncs-forge-generation-observer",
+                daemon=True,
+            )
+            monitor.start()
         try:
-            yield
+            with bind_execution_cancellation(cancellation):
+                yield cancellation
         finally:
-            self.active_job = None
+            stop_monitor.set()
+            if monitor is not None:
+                monitor.join(timeout=0.75)
             if callable(set_context):
                 set_context(None)
+            self.active_job = None
             if getattr(getattr(self, "config", None), "state_dir", None) is not None:
                 self._write_status(self.status())
 
@@ -1068,6 +1155,85 @@ class ContinuousSupervisor:
             if not hasattr(self, "status_counts"):
                 self.status_counts = Counter()
             self.status_counts[status] = min(_COUNTER_MAX, self.status_counts[status] + 1)
+
+    def _native_resource_transition(
+        self,
+        *,
+        event: Mapping[str, object],
+        candidate: str,
+        verifier_id: str,
+        outcome: str,
+        evidence_status: str,
+        has_outcome: bool,
+        queue_remaining: int,
+        resource_gate_closed: bool = False,
+        in_flight: bool = False,
+        source_identity_matches: bool = True,
+        work_generation: int | None = None,
+        current_generation: int | None = None,
+    ) -> Any:
+        semantics = self._resource_semantics
+        transition = getattr(semantics, "verification_resource_transition", None)
+        if not callable(transition):
+            raise ForgeError(
+                "NATIVE_CONTINUOUS_UNAVAILABLE",
+                "continuous resource transitions require the canonical MNCS Forge core",
+        )
+        generation = int(event.get("current_generation", 0))
+        selected_work_generation = generation if work_generation is None else work_generation
+        identity = self._pending_identity(selected_work_generation, candidate, verifier_id)
+        return transition(
+            {
+                "current_generation": (
+                    self.current_generation
+                    if current_generation is None
+                    else current_generation
+                ),
+                "work_generation": selected_work_generation,
+                "source_identity_matches": source_identity_matches,
+                "verification_required": True,
+                "in_flight": in_flight,
+                "has_outcome": has_outcome,
+                "outcome": outcome,
+                "evidence_status": evidence_status,
+                "pending_exists": identity in self.pending,
+                "pending_count": len(self.pending),
+                "pending_capacity": CONTINUOUS_PENDING_CAPACITY,
+                "queue_remaining": queue_remaining,
+                "resource_gate_closed": resource_gate_closed,
+            }
+        )
+
+    def _native_queue_admission(self, total_count: int) -> tuple[int, int]:
+        semantics = self._resource_semantics
+        admission = getattr(semantics, "verification_queue_admit", None)
+        if not callable(admission):
+            raise ForgeError(
+                "NATIVE_CONTINUOUS_UNAVAILABLE",
+                "continuous queue admission requires the canonical MNCS Forge core",
+            )
+        return admission(total_count)
+
+    def _native_completed_freshness(
+        self,
+        event: Mapping[str, object],
+        *,
+        candidate: str,
+        verifier_id: str,
+        observed_generation: int,
+    ) -> Any:
+        return self._native_resource_transition(
+            event={**event, "current_generation": observed_generation},
+            candidate=candidate,
+            verifier_id=verifier_id,
+            outcome="Unknown",
+            evidence_status="NotRun",
+            has_outcome=False,
+            queue_remaining=0,
+            in_flight=False,
+            work_generation=int(event.get("current_generation", 0)),
+            current_generation=observed_generation,
+        )
 
     def _remember_pending(self, identity: str, value: dict[str, object]) -> None:
         """Retain only the newest bounded pending obligations by exact identity."""
@@ -1160,13 +1326,26 @@ class ContinuousSupervisor:
         identity = str(current.get("identity") or "")[:256]
         if not uri or not identity:
             return
-        stale = [
-            key
-            for key, item in self.pending.items()
-            if item.get("source_uri") == uri
-            and isinstance(item.get("source_identity"), str)
-            and item.get("source_identity") != identity
-        ]
+        stale: list[str] = []
+        for key, item in self.pending.items():
+            if item.get("source_uri") != uri:
+                continue
+            work_generation = item.get("generation")
+            if not isinstance(work_generation, int) or isinstance(work_generation, bool):
+                work_generation = 0
+            transition = self._native_resource_transition(
+                event=event,
+                candidate=str(item.get("candidate_identity") or "pending"),
+                verifier_id=str(item.get("verifier_id") or "pending"),
+                outcome="Unknown",
+                evidence_status="Unknown",
+                has_outcome=True,
+                queue_remaining=0,
+                work_generation=work_generation,
+                source_identity_matches=item.get("source_identity") == identity,
+            )
+            if transition.disposition == "DiscardStale":
+                stale.append(key)
         for key in stale:
             self.pending.pop(key, None)
         self.cancelled_jobs = min(_COUNTER_MAX, self.cancelled_jobs + len(stale))
@@ -1730,6 +1909,28 @@ class ContinuousSupervisor:
                 output_file=str((run_dir / "failure-loop.json").relative_to(self.config.root)),
             )
         except ForgeError as error:
+            try:
+                current = _mapping(client.request("workspace_status", {}))
+            except ForgeError:
+                current = {}
+            if current:
+                freshness = self._native_completed_freshness(
+                    event,
+                    candidate=str(self.settings.get("candidate_identity") or "event"),
+                    verifier_id="selected-verification",
+                    observed_generation=int(
+                        current.get("generation", event.get("current_generation", 0))
+                    ),
+                )
+                if freshness.disposition == "DiscardStale":
+                    self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
+                    return {
+                        "status": "STALE",
+                        "reason": "superseded while verification was interrupted",
+                        "error_code": error.code,
+                        "selected_test_identities": list(self.selected_test_ids),
+                        "selected_test_count": self.selected_test_count,
+                    }
             self._escalate(event, trigger, str(error))
             self._record_status("UNKNOWN")
             result: dict[str, object] = {
@@ -1747,7 +1948,13 @@ class ContinuousSupervisor:
                 )
             return result
         current = _mapping(client.request("workspace_status", {}))
-        if int(current.get("generation", 0)) > int(event.get("current_generation", 0)):
+        freshness = self._native_completed_freshness(
+            event,
+            candidate=str(self.settings.get("candidate_identity") or "event"),
+            verifier_id="selected-verification",
+            observed_generation=int(current.get("generation", 0)),
+        )
+        if freshness.disposition == "DiscardStale":
             self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
             self._record_status("UNKNOWN")
             return {
@@ -1853,6 +2060,8 @@ class ContinuousSupervisor:
         return _mapping(mncs.get("resource_evidence") or result.get("resource_evidence"))
 
     def _micro(self, event: dict[str, object], trigger: dict[str, object]) -> dict[str, object]:
+        work_generation = int(event.get("current_generation", 0))
+        self.current_generation = max(self.current_generation, work_generation)
         verifier_ids = _list(trigger.get("verifier_ids"))
         if not verifier_ids:
             self._escalate(event, trigger, f"trigger {trigger.get('id')} has no verifier_ids")
@@ -1865,8 +2074,9 @@ class ContinuousSupervisor:
             self._record_status("UNKNOWN")
             return {"status": "UNKNOWN", "reason": "candidate identity unavailable"}
         results = []
-        selected_ids = verifier_ids[:CONTINUOUS_EVENT_VERIFIER_CAPACITY]
-        capacity_deferred = verifier_ids[CONTINUOUS_EVENT_VERIFIER_CAPACITY:]
+        selected_count, deferred_count = self._native_queue_admission(len(verifier_ids))
+        selected_ids = verifier_ids[:selected_count]
+        capacity_deferred = verifier_ids[selected_count : selected_count + deferred_count]
         for index, verifier_id in enumerate(selected_ids):
             if not self._trigger_cost_allowed(trigger, verifier_id):
                 self._escalate(
@@ -1890,8 +2100,51 @@ class ContinuousSupervisor:
                 results.append({"verifier_id": verifier_id, **reused})
                 reused_status = str(reused["status"])
                 self._record_status(reused_status)
-                if reused_status in {"PASS", "FAIL"}:
+                outcome = (
+                    "Pass"
+                    if reused_status == "PASS"
+                    else "Fail"
+                    if reused_status == "FAIL"
+                    else "Unknown"
+                )
+                evidence_status = outcome
+                transition = self._native_resource_transition(
+                    event=event,
+                    candidate=candidate,
+                    verifier_id=verifier_id,
+                    outcome=outcome,
+                    evidence_status=evidence_status,
+                    has_outcome=True,
+                    queue_remaining=(
+                        len(selected_ids) - index - 1 + len(capacity_deferred)
+                    ),
+                )
+                if transition.disposition == "Resolve":
                     self._resolve_micro_pending(event, candidate, verifier_id)
+                elif transition.retain_current_pending:
+                    self._remember_micro_pending(
+                        event,
+                        trigger,
+                        candidate,
+                        verifier_id,
+                        "reused verification remains unresolved",
+                        reused,
+                    )
+                    self.deferred_jobs = min(_COUNTER_MAX, self.deferred_jobs + 1)
+                if transition.defer_remaining:
+                    capacity_deferred = [*selected_ids[index + 1 :], *capacity_deferred]
+                    self._defer_micro_verifiers(
+                        event,
+                        trigger,
+                        candidate,
+                        capacity_deferred,
+                        "remaining micro-verifiers deferred by native resource policy",
+                    )
+                    capacity_deferred = []
+                    break
+                if transition.disposition in {"CancelStale", "DiscardStale"}:
+                    self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
+                    break
                 continue
             self.recomputed_evidence = min(_COUNTER_MAX, self.recomputed_evidence + 1)
             try:
@@ -1913,32 +2166,93 @@ class ContinuousSupervisor:
                         "status": "UNKNOWN",
                         "reuse_blocked": "verifier did not declare a complete dependency envelope",
                     }
-                results.append({"verifier_id": verifier_id, **result, "reused": False})
                 result_status = str(result.get("status", "UNKNOWN"))
-                self._record_status(result_status)
                 resource_evidence = self._resource_evidence_in_result(result)
-                if resource_evidence.get("resource_exhausted") or resource_evidence.get("deferred"):
+                outcome = resource_evidence.get("resource_outcome")
+                if outcome not in {
+                    "Pass",
+                    "Fail",
+                    "ResourceLimit",
+                    "ResourcePressure",
+                    "Timeout",
+                    "OutputLimit",
+                    "Unknown",
+                    "CleanupFailure",
+                    "Cancelled",
+                    "Stale",
+                }:
+                    outcome = (
+                        "Pass"
+                        if result_status == "PASS"
+                        else "Fail"
+                        if result_status == "FAIL"
+                        else "Unknown"
+                    )
+                evidence_status = (
+                    "Pass"
+                    if result_status == "PASS"
+                    else "Fail"
+                    if result_status == "FAIL"
+                    else "Unknown"
+                )
+                transition = self._native_resource_transition(
+                    event=event,
+                    candidate=candidate,
+                    verifier_id=verifier_id,
+                    outcome=str(outcome),
+                    evidence_status=evidence_status,
+                    has_outcome=True,
+                    queue_remaining=(
+                        len(selected_ids) - index - 1 + len(capacity_deferred)
+                    ),
+                )
+                if transition.disposition in {"CancelStale", "DiscardStale"}:
+                    result = {
+                        **result,
+                        "status": "UNKNOWN",
+                        "freshness": "STALE",
+                        "resource_evidence": {
+                            **resource_evidence,
+                            "resource_outcome": "Stale",
+                        },
+                    }
+                    result_status = "UNKNOWN"
+                results.append({"verifier_id": verifier_id, **result, "reused": False})
+                self._record_status(result_status)
+                if transition.retain_current_pending:
                     self.deferred_jobs = min(_COUNTER_MAX, self.deferred_jobs + 1)
                     self._remember_micro_pending(
                         event,
                         trigger,
                         candidate,
                         verifier_id,
-                        "current micro-verifier result was resource-limited",
+                        "current micro-verifier remains pending under native resource policy",
                         result,
                     )
+                if transition.disposition == "Resolve":
+                    self._resolve_micro_pending(event, candidate, verifier_id)
+                if transition.disposition == "EscalateUnknown":
+                    self._escalate(
+                        event,
+                        trigger,
+                        "native continuous policy could not retain this verification obligation",
+                        status="UNKNOWN",
+                        tier="micro",
+                    )
+                if transition.defer_remaining:
                     capacity_deferred = [*selected_ids[index + 1 :], *capacity_deferred]
                     self._defer_micro_verifiers(
                         event,
                         trigger,
                         candidate,
                         capacity_deferred,
-                        "later micro-verifiers deferred after resource pressure",
+                        "later micro-verifiers deferred by native resource policy",
                     )
                     capacity_deferred = []
                     break
-                if result_status in {"PASS", "FAIL"}:
-                    self._resolve_micro_pending(event, candidate, verifier_id)
+                if transition.disposition in {"CancelStale", "DiscardStale"}:
+                    self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
+                    break
             except ForgeError as error:
                 self._escalate(event, trigger, f"micro-verifier {verifier_id}: {error}")
                 self._record_status("UNKNOWN")
@@ -1955,38 +2269,68 @@ class ContinuousSupervisor:
                     )
                 results.append(failure)
                 resource_evidence = _mapping(error.details.get("resource_evidence"))
-                resource_limited = bool(
-                    resource_evidence.get("resource_exhausted")
+                outcome = resource_evidence.get("resource_outcome")
+                valid_outcomes = {
+                    "Pass",
+                    "Fail",
+                    "ResourceLimit",
+                    "ResourcePressure",
+                    "Timeout",
+                    "OutputLimit",
+                    "Unknown",
+                    "CleanupFailure",
+                    "Cancelled",
+                    "Stale",
+                }
+                if outcome not in valid_outcomes:
+                    outcome = "Unknown"
+                gate_closed = bool(
+                    resource_evidence.get("verification_deferred")
                     or resource_evidence.get("deferred")
-                    or error.code
-                    in {
-                        "RESOURCE_ENVELOPE_UNAVAILABLE",
-                        "RESOURCE_PRESSURE",
-                        "RESOURCE_CONCURRENCY_LIMIT",
-                        "RESOURCE_LIMIT",
-                        "TIMEOUT",
-                        "OUTPUT_LIMIT",
-                    }
                 )
-                if resource_limited:
+                transition = self._native_resource_transition(
+                    event=event,
+                    candidate=candidate,
+                    verifier_id=verifier_id,
+                    outcome=str(outcome),
+                    evidence_status="Unknown",
+                    has_outcome=not gate_closed or outcome != "Unknown",
+                    queue_remaining=(
+                        len(selected_ids) - index - 1 + len(capacity_deferred)
+                    ),
+                    resource_gate_closed=gate_closed,
+                )
+                if transition.retain_current_pending:
                     self.deferred_jobs = min(_COUNTER_MAX, self.deferred_jobs + 1)
                     self._remember_micro_pending(
                         event,
                         trigger,
                         candidate,
                         verifier_id,
-                        "current micro-verifier was resource-limited",
+                        "current micro-verifier remains pending under native resource policy",
                         failure,
                     )
+                if transition.disposition == "EscalateUnknown":
+                    self._escalate(
+                        event,
+                        trigger,
+                        "native continuous policy could not retain this verification obligation",
+                        status="UNKNOWN",
+                        tier="micro",
+                    )
+                if transition.defer_remaining:
                     capacity_deferred = [*selected_ids[index + 1 :], *capacity_deferred]
                     self._defer_micro_verifiers(
                         event,
                         trigger,
                         candidate,
                         capacity_deferred,
-                        "later micro-verifiers deferred after resource pressure",
+                        "later micro-verifiers deferred by native resource policy",
                     )
                     capacity_deferred = []
+                    break
+                if transition.disposition in {"CancelStale", "DiscardStale"}:
+                    self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
                     break
         if capacity_deferred:
             self._defer_micro_verifiers(
@@ -2003,9 +2347,18 @@ class ContinuousSupervisor:
                     "deferred_verifier_count": len(capacity_deferred),
                 }
             )
-        statuses = [str(result.get("status", "UNKNOWN")) for result in results]
-        status = "FAIL" if "FAIL" in statuses else "UNKNOWN" if "UNKNOWN" in statuses else "PASS"
-        if status in {"FAIL", "UNKNOWN"}:
+        decide_status = getattr(self._resource_semantics, "verification_status_decide", None)
+        if not callable(decide_status):
+            raise ForgeError(
+                "NATIVE_CONTINUOUS_UNAVAILABLE",
+                "micro-verifier status aggregation requires the canonical MNCS status lattice",
+            )
+        status_decision = decide_status(
+            [str(result.get("status", "UNKNOWN")) for result in results],
+            verification_required=True,
+        )
+        status = status_decision.status
+        if status_decision.escalation_required:
             self._escalate(
                 event,
                 trigger,
@@ -2019,11 +2372,21 @@ class ContinuousSupervisor:
         self, client: LanguageServiceSocket, event: dict[str, object]
     ) -> dict[str, object]:
         generation = int(event.get("current_generation", 0))
-        if generation < self.current_generation:
+        self.current_generation = max(self.current_generation, generation)
+        configured_candidate = self.settings.get("candidate_identity")
+        transition = self._native_resource_transition(
+            event=event,
+            candidate=configured_candidate if isinstance(configured_candidate, str) else "event",
+            verifier_id="event-generation",
+            outcome="Unknown",
+            evidence_status="NotRun",
+            has_outcome=False,
+            queue_remaining=0,
+        )
+        if transition.disposition == "DiscardStale":
             self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
             return {"status": "STALE", "reason": "event generation is older than current"}
         self._cancel_superseded_pending(event)
-        self.current_generation = generation
         self.current_source_identity = _mapping(event.get("current")).get("identity") or None
         self.current_cursor = max(self.current_cursor, int(event.get("cursor", 0)))
         triggers = self.settings.get("triggers", [])
@@ -2056,7 +2419,7 @@ class ContinuousSupervisor:
             action = str(trigger.get("action"))
             if action == "verification_plan":
                 self.active_tier = "incremental"
-                with self._job_scope(event, trigger, action):
+                with self._job_scope(event, trigger, action, client=client):
                     result = self._selected_verification(client, event, trigger)
                 action_results.append(
                     {
@@ -2067,7 +2430,7 @@ class ContinuousSupervisor:
                 )
             elif action in {"micro_verifier", "security_micro_verifier"}:
                 self.active_tier = "micro"
-                with self._job_scope(event, trigger, action):
+                with self._job_scope(event, trigger, action, client=client):
                     result = self._micro(event, trigger)
                 action_results.append(
                     {
@@ -2093,16 +2456,25 @@ class ContinuousSupervisor:
                 ):
                     repair["focused_verification_result"] = rebound_verification
                     break
-        action_statuses = [
-            str(_mapping(action.get("result")).get("status", "PASS"))
-            for action in action_results
-            if isinstance(action, dict)
-        ]
-        if "FAIL" in action_statuses or "UNKNOWN" in action_statuses or "STALE" in action_statuses:
+        decide_status = getattr(self._resource_semantics, "verification_status_decide", None)
+        if not callable(decide_status):
+            raise ForgeError(
+                "NATIVE_CONTINUOUS_UNAVAILABLE",
+                "continuous result aggregation requires the canonical MNCS status lattice",
+            )
+        status_decision = decide_status(
+            [
+                str(_mapping(action.get("result")).get("status", "PASS"))
+                for action in action_results
+                if isinstance(action, dict)
+            ],
+            verification_required=False,
+        )
+        if status_decision.escalation_required:
             return {
                 "generation": generation,
                 "cursor": event.get("cursor"),
-                "status": "FAIL" if "FAIL" in action_statuses else "UNKNOWN",
+                "status": status_decision.status,
                 "actions": action_results,
             }
         try:
@@ -2116,7 +2488,17 @@ class ContinuousSupervisor:
                 "status": "UNKNOWN",
                 "actions": action_results,
             }
-        if int(current.get("generation", 0)) > generation:
+        freshness = self._native_completed_freshness(
+            event,
+            candidate=(
+                configured_candidate
+                if isinstance(configured_candidate, str)
+                else "event"
+            ),
+            verifier_id="continuous-event-result",
+            observed_generation=int(current.get("generation", generation)),
+        )
+        if freshness.disposition == "DiscardStale":
             self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
             self._record_status("UNKNOWN")
             return {
@@ -2303,15 +2685,11 @@ class ContinuousSupervisor:
                     f"debounce poll failed: {error}",
                 )
                 self._record_status("UNKNOWN")
-        # Coalesce successive edits of one source to the newest identity.  All
-        # omitted generations are stale by construction and cannot publish PASS.
-        latest: dict[str, dict[str, object]] = {}
-        for event in events:
-            uri = str(_mapping(event.get("current")).get("uri", event.get("cursor")))
-            previous = latest.get(uri)
-            if previous is not None:
-                self.cancelled_jobs = min(_COUNTER_MAX, self.cancelled_jobs + 1)
-            latest[uri] = event
+        if events:
+            observed_generation = max(
+                int(event.get("current_generation", 0)) for event in events
+            )
+            self.current_generation = max(self.current_generation, observed_generation)
         result_history: deque[dict[str, object]] = deque(maxlen=CONTINUOUS_RECENT_RESULTS)
         events_processed = 0
 
@@ -2320,7 +2698,7 @@ class ContinuousSupervisor:
             events_processed = min(_COUNTER_MAX, events_processed + 1)
             result_history.append(_compact_event_result(value))
 
-        for event in latest.values():
+        for event in events:
             record_result(self._process_event(client, event))
         self.current_cursor = max(
             self.current_cursor, int(poll.get("current_cursor", self.current_cursor))

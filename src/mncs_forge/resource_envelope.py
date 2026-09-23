@@ -7,7 +7,6 @@ systemd service whose cgroup covers the complete process tree.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import platform
@@ -21,15 +20,38 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 from filelock import FileLock, Timeout
 
 from .errors import ForgeError
 
-MIB = 1024 * 1024
-GIB = 1024 * MIB
+if TYPE_CHECKING:
+    from .mncs_native import (
+        NativeResourceAdmissionDecision,
+        NativeResourceBudgetDecision,
+        NativeResourceOutcomeDecision,
+    )
+
+
+class ResourceSemantics(Protocol):
+    """Native Forge decision port used by this Linux realization adapter."""
+
+    def resource_budget_select(
+        self, observation: Mapping[str, object], settings: Mapping[str, object]
+    ) -> NativeResourceBudgetDecision: ...
+
+    def resource_budget_identity(self, decision: NativeResourceBudgetDecision) -> str: ...
+
+    def resource_admission(
+        self, observation: Mapping[str, object], policy: Mapping[str, object]
+    ) -> NativeResourceAdmissionDecision: ...
+
+    def resource_outcome(
+        self, observation: Mapping[str, object]
+    ) -> NativeResourceOutcomeDecision: ...
+
 SLICE_NAME = "mncs-forge-verification.slice"
-MAX_AUTOMATIC_RUNTIME_SECONDS = 600.0
 MAX_VERIFIER_ENVIRONMENT_BYTES = 1024 * 1024
 _COUNTER_MAX = (1 << 63) - 1
 
@@ -85,8 +107,8 @@ def _effective_memory_ceiling(total: int | None) -> int | None:
     return ceiling
 
 
-def _effective_memory_available(available: int | None) -> int | None:
-    """Use the tightest visible cgroup headroom as well as host MemAvailable."""
+def _cgroup_memory_headroom() -> int | None:
+    """Read the minimum visible ancestor cgroup memory headroom."""
 
     try:
         membership = Path("/proc/self/cgroup").read_text(encoding="ascii")
@@ -96,18 +118,20 @@ def _effective_memory_available(available: int | None) -> int | None:
             if line.startswith("0::")
         )
     except (OSError, StopIteration, IndexError):
-        return available
+        return None
     current = Path("/sys/fs/cgroup") / relative
-    headroom = available
+    headroom: int | None = None
     while True:
         try:
             raw = (current / "memory.max").read_text(encoding="ascii").strip()
             limit = None if raw == "max" else int(raw)
-            used = int((current / "memory.current").read_text(encoding="ascii").strip())
         except (OSError, ValueError):
             limit = None
-            used = 0
         if limit is not None and limit > 0:
+            try:
+                used = int((current / "memory.current").read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                return None
             value = max(0, limit - used)
             headroom = value if headroom is None else min(headroom, value)
         if current == Path("/sys/fs/cgroup") or current.parent == current:
@@ -141,92 +165,6 @@ class ResourceBudget:
         }
 
 
-def select_resource_budget(
-    settings: Mapping[str, object],
-    *,
-    host_memory_total_bytes: int | None = None,
-    cgroup_memory_max_bytes: int | None = None,
-) -> ResourceBudget | None:
-    """Choose a configurable minority-host budget without guessing on unknown RAM."""
-
-    if host_memory_total_bytes is None:
-        host_memory_total_bytes, _ = _host_memory()
-    capacity = host_memory_total_bytes
-    if cgroup_memory_max_bytes is not None:
-        capacity = (
-            cgroup_memory_max_bytes if capacity is None else min(capacity, cgroup_memory_max_bytes)
-        )
-    if not isinstance(capacity, int) or capacity < 256 * MIB:
-        return None
-    fraction = settings.get("memory_fraction", 0.15)
-    if (
-        not isinstance(fraction, (int, float))
-        or isinstance(fraction, bool)
-        or not 0.05 <= fraction <= 0.25
-    ):
-        raise ForgeError("RESOURCE_POLICY_INVALID", "memory_fraction must be from 0.05 to 0.25")
-    memory_cap = settings.get("memory_cap_bytes", 4 * GIB)
-    if not isinstance(memory_cap, int) or isinstance(memory_cap, bool) or memory_cap < 128 * MIB:
-        raise ForgeError("RESOURCE_POLICY_INVALID", "memory_cap_bytes must be at least 128 MiB")
-    explicit = settings.get("memory_max_bytes")
-    derived = min(int(capacity * float(fraction)), memory_cap)
-    memory_max = (
-        min(int(explicit), derived)
-        if isinstance(explicit, int) and not isinstance(explicit, bool)
-        else derived
-    )
-    if memory_max < 128 * MIB:
-        return None
-    memory_high = max(64 * MIB, memory_max // 2)
-    memory_high = min(memory_high, memory_max - 1)
-    tasks_value = settings.get("pids_limit", 64)
-    concurrency_value = settings.get("concurrency_limit", 1)
-    runtime_value = settings.get("runtime_max_seconds", MAX_AUTOMATIC_RUNTIME_SECONDS)
-    if (
-        not isinstance(tasks_value, int)
-        or isinstance(tasks_value, bool)
-        or not isinstance(concurrency_value, int)
-        or isinstance(concurrency_value, bool)
-        or not isinstance(runtime_value, (int, float))
-        or isinstance(runtime_value, bool)
-    ):
-        raise ForgeError(
-            "RESOURCE_POLICY_INVALID", "task, concurrency, or runtime limit is invalid"
-        )
-    tasks_max = tasks_value
-    concurrency_max = concurrency_value
-    runtime_max = float(runtime_value)
-    if not 1 <= tasks_max <= 4096 or concurrency_max != 1:
-        raise ForgeError(
-            "RESOURCE_POLICY_INVALID", "task or concurrency limit is outside its bound"
-        )
-    if not 1 <= runtime_max <= MAX_AUTOMATIC_RUNTIME_SECONDS:
-        raise ForgeError("RESOURCE_POLICY_INVALID", "runtime_max_seconds must be at most 600")
-    envelope_material = {
-        "memory_high_bytes": memory_high,
-        "memory_max_bytes": memory_max,
-        "memory_swap_max_bytes": 0,
-        "tasks_max": tasks_max,
-        "concurrency_max": concurrency_max,
-        "runtime_max_seconds": runtime_max,
-        "host_capacity_bytes": capacity,
-        "mechanism": "systemd-user-service+cgroup-v2",
-    }
-    identity = hashlib.sha256(
-        json.dumps(envelope_material, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    return ResourceBudget(
-        memory_high_bytes=memory_high,
-        memory_max_bytes=memory_max,
-        memory_swap_max_bytes=0,
-        tasks_max=tasks_max,
-        concurrency_max=concurrency_max,
-        runtime_max_seconds=runtime_max,
-        host_memory_total_bytes=capacity,
-        envelope_identity=identity,
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class PreparedExecution:
     argv: tuple[str, ...]
@@ -250,15 +188,63 @@ class SystemdCgroupEnvelope:
         systemd_run: str | None = None,
         systemctl: str | None = None,
         runtime_dir: Path | None = None,
+        resource_semantics: ResourceSemantics | None = None,
+        cgroup_memory_reader: Callable[[], int | None] | None = None,
+        cgroup_memory_available_reader: Callable[[], int | None] | None = None,
     ) -> None:
         self._host_memory_reader = host_memory_reader or self._read_host_memory
+        self._cgroup_memory_available_reader = (
+            cgroup_memory_available_reader
+            if cgroup_memory_available_reader is not None
+            else _cgroup_memory_headroom
+            if host_memory_reader is None
+            else lambda: None
+        )
         self._control = control_runner or subprocess.run
         self._cgroup_root = cgroup_root
         self.systemd_run = systemd_run if systemd_run is not None else shutil.which("systemd-run")
         self.systemctl = systemctl if systemctl is not None else shutil.which("systemctl")
-        total, _available = self._host_memory_reader()
-        total = _effective_memory_ceiling(total) if host_memory_reader is None else total
-        self.budget = select_resource_budget(settings, host_memory_total_bytes=total)
+        total, _host_available = self._host_memory_reader()
+        cgroup_memory = (
+            cgroup_memory_reader()
+            if cgroup_memory_reader is not None
+            else _effective_memory_ceiling(None)
+            if host_memory_reader is None
+            else None
+        )
+        if resource_semantics is None:
+            raise ForgeError(
+                "NATIVE_RESOURCE_POLICY_UNAVAILABLE",
+                "MNCS resource policy is required to construct a cgroup envelope",
+        )
+        self._resource_semantics = resource_semantics
+        self._budget_decision = resource_semantics.resource_budget_select(
+            {
+                "host_memory_total_bytes": total,
+                "cgroup_memory_max_bytes": cgroup_memory,
+            },
+            settings,
+        )
+        if self._budget_decision.status == "InvalidPolicy":
+            raise ForgeError(
+                "RESOURCE_POLICY_INVALID",
+                "the MNCS resource policy rejected the configured limits",
+            )
+        if self._budget_decision.status == "Selected":
+            self.budget = ResourceBudget(
+                memory_high_bytes=self._budget_decision.memory_high_bytes,
+                memory_max_bytes=self._budget_decision.memory_max_bytes,
+                memory_swap_max_bytes=self._budget_decision.memory_swap_max_bytes,
+                tasks_max=self._budget_decision.tasks_max,
+                concurrency_max=self._budget_decision.concurrency_max,
+                runtime_max_seconds=self._budget_decision.runtime_max_seconds,
+                host_memory_total_bytes=self._budget_decision.effective_host_memory_bytes,
+                envelope_identity=resource_semantics.resource_budget_identity(
+                    self._budget_decision
+                ),
+            )
+        else:
+            self.budget = None
         self.required = required
         self._runtime_directory = runtime_dir or self._runtime_dir()
         self._available = False
@@ -271,13 +257,11 @@ class SystemdCgroupEnvelope:
         self._deferred = 0
         self._last_resource_event: dict[str, object] | None = None
         self._lock_path = self._runtime_directory / "mncs-forge-verification.lock"
-        self._headroom_floor_bytes = 512 * MIB
         self._prepare()
 
     @staticmethod
     def _read_host_memory() -> tuple[int | None, int | None]:
-        total, available = _host_memory()
-        return _effective_memory_ceiling(total), _effective_memory_available(available)
+        return _host_memory()
 
     @staticmethod
     def _runtime_dir() -> Path:
@@ -429,90 +413,166 @@ class SystemdCgroupEnvelope:
                 result[key] = value
         return result
 
+    def _admission(
+        self,
+        *,
+        host_available_memory: int | None,
+        cgroup_available_memory: int | None,
+        active_tasks: int | None,
+        execution_slot_available: bool,
+        requested_runtime: float,
+    ) -> NativeResourceAdmissionDecision:
+        budget = self.budget
+        return self._resource_semantics.resource_admission(
+            {
+                "containment_available": self._available,
+                "has_budget": budget is not None,
+                "host_available_memory_bytes": host_available_memory,
+                "cgroup_available_memory_bytes": cgroup_available_memory,
+                "active_tasks": active_tasks,
+                "execution_slot_available": execution_slot_available,
+                "requested_runtime_seconds": requested_runtime,
+            },
+            {
+                "containment_required": self.required,
+                "memory_max_bytes": budget.memory_max_bytes if budget else 0,
+                "concurrency_max": budget.concurrency_max if budget else 1,
+                "runtime_max_seconds": budget.runtime_max_seconds if budget else 0.0,
+            },
+        )
+
+    def _raise_admission(
+        self,
+        decision: NativeResourceAdmissionDecision,
+        *,
+        host_available_memory: int | None,
+        cgroup_available_memory: int | None,
+        active_tasks: int | None,
+    ) -> None:
+        if decision.status in {"Admit", "Uncontained"}:
+            return
+        deferred = decision.deferred
+        if deferred:
+            self._deferred = min(_COUNTER_MAX, self._deferred + 1)
+        codes = {
+            "LowHostHeadroom": "RESOURCE_PRESSURE",
+            "ActiveProcessTree": "RESOURCE_CONCURRENCY_LIMIT",
+            "ExecutionSlotOccupied": "RESOURCE_CONCURRENCY_LIMIT",
+            "ProcessCountUnknown": "RESOURCE_ENVELOPE_UNAVAILABLE",
+            "ContainmentUnavailable": "RESOURCE_ENVELOPE_UNAVAILABLE",
+            "BudgetUnavailable": "RESOURCE_ENVELOPE_UNAVAILABLE",
+            "InvalidRuntime": "RESOURCE_ADMISSION_INVALID",
+            "Defer": "RESOURCE_PRESSURE",
+            "Unavailable": "RESOURCE_ENVELOPE_UNAVAILABLE",
+            "InvalidInput": "RESOURCE_ADMISSION_INVALID",
+        }
+        code = codes.get(
+            decision.reason,
+            codes.get(decision.status, "RESOURCE_ENVELOPE_UNAVAILABLE"),
+        )
+        if decision.reason == "LowHostHeadroom":
+            metric = "host-memory-available"
+            bound = decision.required_headroom_bytes
+            observed = {
+                "host_available_memory_bytes": host_available_memory,
+                "cgroup_available_memory_bytes": cgroup_available_memory,
+            }
+            message = (
+                "host/cgroup available memory observations are below the "
+                f"{decision.required_headroom_bytes}-byte admission headroom"
+            )
+        elif decision.reason == "ActiveProcessTree":
+            metric, bound, observed = "concurrency", self.budget.concurrency_max if self.budget else 1, active_tasks
+            message = "an earlier verification process tree is still active in the protected slice"
+        elif decision.reason == "ExecutionSlotOccupied":
+            metric, bound, observed = "concurrency", 1, 1
+            message = "another Forge verification already occupies the single execution slot"
+        elif decision.reason == "ProcessCountUnknown":
+            metric, bound, observed = "process-count", self.budget.tasks_max if self.budget else None, None
+            message = "the verification cgroup process count cannot be observed"
+        elif decision.reason == "InvalidRuntime":
+            metric, bound, observed = "wall-duration", None, None
+            message = "the requested runtime is outside the native admission contract"
+        else:
+            metric, bound, observed = None, None, None
+            message = self._limitation or "tree-wide cgroup resource enforcement is unavailable"
+        raise ForgeError(
+            code,
+            message,
+            details={
+                "resource_evidence": {
+                    "resource_envelope_identity": self.budget.envelope_identity if self.budget else None,
+                    "resource_metric": metric,
+                    "resource_bound": bound,
+                    "resource_observed": observed,
+                    "host_available_memory_bytes": host_available_memory,
+                    "cgroup_available_memory_bytes": cgroup_available_memory,
+                    "resource_exhausted": False,
+                    "deferred": deferred,
+                    "limitation": self._limitation if code == "RESOURCE_ENVELOPE_UNAVAILABLE" else None,
+                    "native_admission_reason": decision.reason,
+                    "cleanup_succeeded": True,
+                }
+            },
+        )
+
     @contextmanager
     def execution_lock(self) -> Iterator[None]:
+        _total, host_available = self._host_memory_reader()
+        cgroup_available = self._cgroup_memory_available_reader()
+        runtime = self.budget.runtime_max_seconds if self.budget else 1.0
         if not self._available:
-            if self.required:
-                self._deferred = min((1 << 63) - 1, self._deferred + 1)
-                raise ForgeError(
-                    "RESOURCE_ENVELOPE_UNAVAILABLE",
-                    self._limitation or "tree-wide cgroup resource enforcement is unavailable",
-                    details={
-                        "resource_evidence": {
-                            "resource_envelope_identity": self.budget.envelope_identity
-                            if self.budget
-                            else None,
-                            "resource_exhausted": False,
-                            "deferred": True,
-                            "limitation": self._limitation,
-                            "cleanup_succeeded": True,
-                        }
-                    },
-                )
+            decision = self._admission(
+                host_available_memory=host_available,
+                cgroup_available_memory=cgroup_available,
+                active_tasks=None,
+                execution_slot_available=True,
+                requested_runtime=runtime,
+            )
+            self._raise_admission(
+                decision,
+                host_available_memory=host_available,
+                cgroup_available_memory=cgroup_available,
+                active_tasks=None,
+            )
             yield
             return
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with FileLock(str(self._lock_path), timeout=0):
                 active_tasks = self._slice_value("pids.current")
-                if active_tasks is None:
-                    raise ForgeError(
-                        "RESOURCE_ENVELOPE_UNAVAILABLE",
-                        "the verification cgroup process count cannot be observed",
-                        details={
-                            "resource_evidence": {
-                                "resource_envelope_identity": (
-                                    self.budget.envelope_identity if self.budget else None
-                                ),
-                                "resource_exhausted": False,
-                                "deferred": True,
-                                "limitation": (
-                                    "the verification slice pids.current file is unreadable"
-                                ),
-                                "cleanup_succeeded": True,
-                            }
-                        },
-                    )
-                if active_tasks > 0:
-                    self._deferred = min(_COUNTER_MAX, self._deferred + 1)
-                    raise ForgeError(
-                        "RESOURCE_CONCURRENCY_LIMIT",
-                        "an earlier verification process tree is still active "
-                        "in the protected slice",
-                        details={
-                            "resource_evidence": {
-                                "resource_envelope_identity": (
-                                    self.budget.envelope_identity if self.budget else None
-                                ),
-                                "resource_metric": "concurrency",
-                                "resource_bound": 1,
-                                "resource_observed": active_tasks,
-                                "resource_exhausted": False,
-                                "deferred": True,
-                                "cleanup_succeeded": True,
-                            }
-                        },
-                    )
+                decision = self._admission(
+                    host_available_memory=host_available,
+                    cgroup_available_memory=cgroup_available,
+                    active_tasks=active_tasks,
+                    execution_slot_available=True,
+                    requested_runtime=runtime,
+                )
+                self._raise_admission(
+                    decision,
+                    host_available_memory=host_available,
+                    cgroup_available_memory=cgroup_available,
+                    active_tasks=active_tasks,
+                )
                 yield
         except Timeout as error:
-            self._deferred = min((1 << 63) - 1, self._deferred + 1)
-            raise ForgeError(
-                "RESOURCE_CONCURRENCY_LIMIT",
-                "another Forge verification already occupies the single execution slot",
-                details={
-                    "resource_evidence": {
-                        "resource_envelope_identity": self.budget.envelope_identity
-                        if self.budget
-                        else None,
-                        "resource_metric": "concurrency",
-                        "resource_bound": 1,
-                        "resource_observed": 1,
-                        "resource_exhausted": False,
-                        "deferred": True,
-                        "cleanup_succeeded": True,
-                    }
-                },
-            ) from error
+            decision = self._admission(
+                host_available_memory=host_available,
+                cgroup_available_memory=cgroup_available,
+                active_tasks=None,
+                execution_slot_available=False,
+                requested_runtime=runtime,
+            )
+            try:
+                self._raise_admission(
+                    decision,
+                    host_available_memory=host_available,
+                    cgroup_available_memory=cgroup_available,
+                    active_tasks=None,
+                )
+            except ForgeError as admission_error:
+                raise admission_error from error
+            raise ForgeError("RESOURCE_ADMISSION_UNKNOWN", "native admission allowed a locked slot") from error
 
     def prepare_execution(
         self,
@@ -523,48 +583,40 @@ class SystemdCgroupEnvelope:
         timeout: float,
     ) -> PreparedExecution | None:
         if not self._available or self.budget is None or self.systemd_run is None:
-            if not self.required:
-                return None
-            raise ForgeError(
-                "RESOURCE_ENVELOPE_UNAVAILABLE",
-                self._limitation or "tree-wide cgroup resource enforcement is unavailable",
-                details={
-                    "resource_evidence": {
-                        "resource_envelope_identity": self.budget.envelope_identity
-                        if self.budget
-                        else None,
-                        "resource_exhausted": False,
-                        "deferred": True,
-                        "limitation": self._limitation,
-                        "cleanup_succeeded": True,
-                    }
-                },
+            _total, host_available = self._host_memory_reader()
+            cgroup_available = self._cgroup_memory_available_reader()
+            decision = self._admission(
+                host_available_memory=host_available,
+                cgroup_available_memory=cgroup_available,
+                active_tasks=None,
+                execution_slot_available=True,
+                requested_runtime=float(timeout),
             )
-        _total, available = self._host_memory_reader()
-        required_headroom = max(self._headroom_floor_bytes, self.budget.memory_max_bytes * 2)
-        if available is not None and available < required_headroom:
-            self._deferred = min((1 << 63) - 1, self._deferred + 1)
-            raise ForgeError(
-                "RESOURCE_PRESSURE",
-                f"host MemAvailable {available} bytes is below the "
-                f"{required_headroom}-byte admission headroom",
-                details={
-                    "resource_evidence": {
-                        "resource_envelope_identity": self.budget.envelope_identity,
-                        "resource_metric": "host-memory-available",
-                        "resource_bound": required_headroom,
-                        "resource_observed": available,
-                        "resource_exhausted": False,
-                        "deferred": True,
-                        "cleanup_succeeded": True,
-                    }
-                },
+            self._raise_admission(
+                decision,
+                host_available_memory=host_available,
+                cgroup_available_memory=cgroup_available,
+                active_tasks=None,
             )
+            return None
+        _total, host_available = self._host_memory_reader()
+        cgroup_available = self._cgroup_memory_available_reader()
+        decision = self._admission(
+            host_available_memory=host_available,
+            cgroup_available_memory=cgroup_available,
+            active_tasks=0,
+            execution_slot_available=True,
+            requested_runtime=float(timeout),
+        )
+        self._raise_admission(
+            decision,
+            host_available_memory=host_available,
+            cgroup_available_memory=cgroup_available,
+            active_tasks=0,
+        )
         unit = f"mncs-forge-job-{uuid.uuid4().hex[:16]}.service"
         started = time.monotonic()
-        runtime = min(
-            float(timeout), self.budget.runtime_max_seconds, MAX_AUTOMATIC_RUNTIME_SECONDS
-        )
+        runtime = decision.runtime_seconds
         budget = self.budget
         environment_path = self._runtime_directory / f"mncs-forge-env-{uuid.uuid4().hex}.json"
         self._write_environment_file(environment_path, environment)
@@ -742,6 +794,35 @@ class SystemdCgroupEnvelope:
                 active.get("resource_observations", {}), observed
             )
 
+    def cancel_execution(self, prepared: PreparedExecution) -> bool:
+        """Realize an already-authorized cancellation request for the owned unit."""
+
+        if not self.systemctl:
+            return False
+        with self._active_lock:
+            if prepared.unit_name not in self._active:
+                return False
+        signalled = False
+        for signal_name in ("SIGTERM", "SIGKILL"):
+            try:
+                result = self._control(
+                    [
+                        self.systemctl,
+                        "--user",
+                        "kill",
+                        "--kill-whom=all",
+                        f"--signal={signal_name}",
+                        prepared.unit_name,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    timeout=0.5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            signalled = result.returncode == 0 or signalled
+        return signalled
+
     @staticmethod
     def _systemd_observations(properties: Mapping[str, str]) -> dict[str, int]:
         values: dict[str, int] = {}
@@ -898,29 +979,22 @@ class SystemdCgroupEnvelope:
                 command_returncode = -main_status
         except (KeyError, ValueError):
             pass
-        memory_events = (
-            values.get("memory_max_events", 0)
-            + values.get("memory_oom_events", 0)
-            + values.get("memory_oom_kill_events", 0)
-            + values.get("memory_oom_group_kill_events", 0)
-        )
-        process_events = values.get("process_limit_events", 0)
-        timed_out = timed_out or result == "timeout"
         output_evidence: Mapping[str, object] = {}
         if failure is not None:
             candidate_evidence = failure.details.get("resource_evidence")
             if isinstance(candidate_evidence, Mapping):
                 output_evidence = candidate_evidence
         output_limited = failure is not None and failure.code == "OUTPUT_LIMIT"
-        exhausted = (
-            memory_events > 0
-            or process_events > 0
-            or timed_out
-            or output_limited
-            or result in {"oom-kill", "out-of-memory"}
+        cancellation_observation = (
+            failure.details.get("execution_cancellation")
+            if failure is not None
+            else None
         )
-        if exhausted:
-            self._resource_events = min((1 << 63) - 1, self._resource_events + 1)
+        cancellation_facts = (
+            cancellation_observation
+            if isinstance(cancellation_observation, Mapping)
+            else {}
+        )
         with self._active_lock:
             active = self._active.pop(prepared.unit_name, {})
         tree_cleanup_succeeded = self._cleanup_unit(prepared.unit_name, group)
@@ -932,22 +1006,50 @@ class SystemdCgroupEnvelope:
         cleanup_succeeded = tree_cleanup_succeeded and environment_file_cleanup_succeeded
         observed_memory = values.get("cgroup_memory_peak_bytes")
         observed_tasks = values.get("process_count_peak")
-        memory_exhaustion = memory_events > 0 or result in {"oom-kill", "out-of-memory"}
+        outcome = self._resource_semantics.resource_outcome(
+            {
+                "exit_status": command_returncode,
+                "wrapper_returncode": wrapper_returncode,
+                "systemd_result": result,
+                "timed_out": timed_out,
+                "output_limited": output_limited,
+                "memory_high_events": values.get("memory_high_events", 0),
+                "memory_max_events": values.get("memory_max_events", 0),
+                "memory_oom_events": values.get("memory_oom_events", 0),
+                "memory_oom_kill_events": values.get("memory_oom_kill_events", 0),
+                "memory_oom_group_kill_events": values.get("memory_oom_group_kill_events", 0),
+                "process_limit_events": values.get("process_limit_events", 0),
+                "cleanup_known": True,
+                "cleanup_succeeded": cleanup_succeeded,
+                "cancellation_requested": cancellation_facts.get(
+                    "cancellation_requested", False
+                )
+                is True,
+                "superseded": cancellation_facts.get("superseded", False) is True,
+            }
+        )
+        exhausted = outcome.resource_exhausted
+        if exhausted:
+            self._resource_events = min((1 << 63) - 1, self._resource_events + 1)
         observed: object
         bound: object
-        if memory_exhaustion:
+        if outcome.metric == "Memory" and exhausted:
             metric = "host-memory-peak"
             observed = observed_memory
             bound = self.budget.memory_max_bytes if self.budget else None
-        elif process_events > 0:
+        elif outcome.metric == "Memory":
+            metric = "host-memory-high-events"
+            observed = values.get("memory_high_events")
+            bound = self.budget.memory_high_bytes if self.budget else None
+        elif outcome.metric == "ProcessCount":
             metric = "process-count"
             observed = observed_tasks
             bound = self.budget.tasks_max if self.budget else None
-        elif timed_out:
+        elif outcome.metric == "WallTime":
             metric = "wall-duration"
             observed = round(time.monotonic() - prepared.started_monotonic, 6)
             bound = prepared.timeout_seconds
-        elif output_limited:
+        elif outcome.metric == "Output":
             metric = "output-bytes"
             observed = output_evidence.get("resource_observed")
             bound = output_evidence.get("resource_bound")
@@ -957,17 +1059,19 @@ class SystemdCgroupEnvelope:
             "resource_envelope_identity": self.budget.envelope_identity if self.budget else None,
             "unit_identity": prepared.unit_name,
             "resource_exhausted": exhausted,
-            "resource_metric": metric if exhausted else None,
-            "resource_bound": bound if exhausted else None,
-            "resource_observed": observed if exhausted else None,
+            "resource_outcome": outcome.status,
+            "native_execution_returncode_available": outcome.has_execution_exit_status,
+            "native_execution_returncode": outcome.execution_exit_status,
+            "cancellation_requested": outcome.cancellation_requested,
+            "superseded": outcome.superseded,
+            "execution_cancellation": dict(cancellation_facts),
+            "verification_deferred": outcome.deferred,
+            "resource_metric": metric,
+            "resource_bound": bound,
+            "resource_observed": observed,
             "cleanup_succeeded": cleanup_succeeded,
             "tree_cleanup_succeeded": tree_cleanup_succeeded,
             "environment_file_cleanup_succeeded": environment_file_cleanup_succeeded,
-            "termination_reason": "timeout"
-            if timed_out
-            else "resource-limit"
-            if exhausted
-            else None,
             "systemd_result": result,
             "systemd_unit_load_state": properties.get("LoadState"),
             "systemd_wrapper_returncode": wrapper_returncode,
@@ -994,22 +1098,21 @@ class SystemdCgroupEnvelope:
                 }
             },
         }
-        if exhausted:
-            self._last_resource_event = {
-                key: evidence.get(key)
-                for key in (
-                    "resource_envelope_identity",
-                    "unit_identity",
-                    "resource_exhausted",
-                    "resource_metric",
-                    "resource_bound",
-                    "resource_observed",
-                    "cleanup_succeeded",
-                    "termination_reason",
-                    "systemd_result",
-                    "job_context",
-                )
-            }
+        self._last_resource_event = {
+            key: evidence.get(key)
+            for key in (
+                "resource_envelope_identity",
+                "unit_identity",
+                "resource_exhausted",
+                "resource_outcome",
+                "resource_metric",
+                "resource_bound",
+                "resource_observed",
+                "cleanup_succeeded",
+                "systemd_result",
+                "job_context",
+            )
+        }
         return evidence
 
     def _cleanup_unit(self, unit: str, group: str) -> bool:
@@ -1051,7 +1154,8 @@ class SystemdCgroupEnvelope:
         return result.returncode == 0
 
     def status(self) -> dict[str, object]:
-        total, available = self._host_memory_reader()
+        total, host_available = self._host_memory_reader()
+        cgroup_available = self._cgroup_memory_available_reader()
         process = _process_memory()
         budget = self.budget
         with self._active_lock:
@@ -1076,7 +1180,8 @@ class SystemdCgroupEnvelope:
             "mechanism": "systemd-user-service+cgroup-v2" if self._available else None,
             "supervisor_process_rss_bytes": process.get("rss_bytes"),
             "supervisor_process_rss_peak_bytes": process.get("rss_peak_bytes"),
-            "host_memory_available_bytes": available,
+            "host_memory_available_bytes": host_available,
+            "cgroup_memory_available_bytes": cgroup_available,
             "host_memory_total_bytes": total,
             "aggregate_memory_current_bytes": self._slice_value("memory.current", slice_group),
             "aggregate_memory_peak_bytes": self._slice_value("memory.peak", slice_group),

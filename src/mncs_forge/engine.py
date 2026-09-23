@@ -70,9 +70,17 @@ class Forge:
         self.mode = mode
         self._closed = False
         self._owns_record_store = record_store is None
-        self._executor = runner if runner is not None else build_runner(config)
+        native = NativeForgeAdapter(config.root, runner=runner)
+        # Resource and continuous state decisions always use the retained
+        # native Forge core, even when native public-mode selection is optional.
+        self._resource_semantics = native
+        self._executor = (
+            runner
+            if runner is not None
+            else build_runner(config, resource_semantics=native)
+        )
+        native.runner = self._executor
         self._observer = LocalProjectObserver(config)
-        native = NativeForgeAdapter(config.root, runner=self._executor)
         native_mode = config.native_execution_mode
         if native_mode == "required":
             native.ensure_available()

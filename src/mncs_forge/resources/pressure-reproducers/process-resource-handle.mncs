@@ -1,0 +1,24 @@
+mncs 0.18;
+
+module mncs.forge.pressure.process_resource_handle.v1;
+
+use mncs.std.process.v1 as process;
+
+record ProcessResourceEnvelope {
+    memory_high_bytes: i64,
+    memory_max_bytes: i64,
+    swap_max_bytes: i64,
+    process_max: i64
+}
+
+// This request cannot be expressed by the current process_run contract: it
+// takes only ProcessRequest and returns only after the external process ends.
+fn process_with_resource_envelope(
+    request: process.ProcessRequest,
+    envelope: ProcessResourceEnvelope
+) -> (result: process.ProcessResult)
+    capability process_capability
+    effect process_run authorized_by process_capability
+{
+    return process_run(request, envelope);
+}

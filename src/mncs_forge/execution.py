@@ -7,15 +7,91 @@ import os
 import selectors
 import signal
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .errors import ForgeError
 from .execution_windows import collect_windows_pipes
 from .ports import ExecutionObservationSink, ExecutionResult
 
 STATUSES = {"PASS", "FAIL", "UNKNOWN"}
+
+
+class ExecutionCancellation:
+    """Generic handle carrying a cancellation request from the semantic owner."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._requested_monotonic: float | None = None
+        self._superseded = False
+        self._signal_sent_monotonic: float | None = None
+        self._signal_succeeded: bool | None = None
+
+    def request(self, *, superseded: bool = False) -> None:
+        with self._lock:
+            if self._requested_monotonic is None:
+                self._requested_monotonic = time.monotonic()
+            self._superseded = self._superseded or superseded
+            self._event.set()
+
+    @property
+    def requested(self) -> bool:
+        return self._event.is_set()
+
+    def mark_termination_requested(self, succeeded: bool) -> None:
+        with self._lock:
+            if self._signal_sent_monotonic is None:
+                self._signal_sent_monotonic = time.monotonic()
+            self._signal_succeeded = succeeded
+
+    def observation(self) -> dict[str, object]:
+        with self._lock:
+            requested = self._requested_monotonic
+            signalled = self._signal_sent_monotonic
+            return {
+                "cancellation_requested": requested is not None,
+                "superseded": self._superseded,
+                "request_monotonic": requested,
+                "termination_request_monotonic": signalled,
+                "termination_request_succeeded": self._signal_succeeded,
+                "request_to_termination_request_seconds": (
+                    round(signalled - requested, 6)
+                    if requested is not None and signalled is not None
+                    else None
+                ),
+            }
+
+    def raise_if_requested(self) -> None:
+        if self.requested:
+            facts = self.observation()
+            raise ForgeError(
+                "EXECUTION_CANCELLED",
+                "execution was cancelled by its semantic owner",
+                details={"execution_cancellation": facts},
+            )
+
+
+_EXECUTION_CANCELLATION: ContextVar[ExecutionCancellation | None] = ContextVar(
+    "mncs_forge_execution_cancellation", default=None
+)
+
+
+@contextmanager
+def bind_execution_cancellation(
+    cancellation: ExecutionCancellation,
+) -> Iterator[ExecutionCancellation]:
+    """Bind an owned cancellation handle to work executed by the current Runner call."""
+
+    token: Token[ExecutionCancellation | None] = _EXECUTION_CANCELLATION.set(cancellation)
+    try:
+        yield cancellation
+    finally:
+        _EXECUTION_CANCELLATION.reset(token)
 
 
 def validate_argv(command: object) -> list[str]:
@@ -79,6 +155,12 @@ def run_bounded(
 
     argv = validate_argv(command)
     validate_limits(timeout, output_cap, stderr_cap)
+    cancellation = _EXECUTION_CANCELLATION.get()
+
+    def check_cancellation() -> None:
+        if cancellation is not None:
+            cancellation.raise_if_requested()
+
     if resource_envelope is None:
         return _run_bounded_process(
             argv,
@@ -89,6 +171,7 @@ def run_bounded(
             environment=environment,
             stdin=stdin,
             _observation=_observation,
+            _poll_callback=check_cancellation if cancellation is not None else None,
         )
     with resource_envelope.execution_lock():
         prepared = resource_envelope.prepare_execution(
@@ -104,6 +187,7 @@ def run_bounded(
                 environment=environment,
                 stdin=stdin,
                 _observation=_observation,
+                _poll_callback=check_cancellation if cancellation is not None else None,
             )
         budget = resource_envelope.budget.to_dict()
         launcher_environment = resource_envelope.launcher_environment(environment)
@@ -111,6 +195,20 @@ def run_bounded(
             _observation.resource_started(budget)  # type: ignore[attr-defined]
         result: ExecutionResult | None = None
         failure: ForgeError | None = None
+
+        def observe_and_check_cancellation() -> None:
+            resource_envelope.observe_execution(prepared)
+            if cancellation is not None and cancellation.requested:
+                cancel_execution = getattr(resource_envelope, "cancel_execution", None)
+                succeeded = False
+                if callable(cancel_execution):
+                    try:
+                        succeeded = bool(cancel_execution(prepared))
+                    except Exception:
+                        succeeded = False
+                cancellation.mark_termination_requested(succeeded)
+                cancellation.raise_if_requested()
+
         try:
             result = _run_bounded_process(
                 list(prepared.argv),
@@ -121,7 +219,7 @@ def run_bounded(
                 environment=launcher_environment,
                 stdin=stdin,
                 _observation=_observation,
-                _poll_callback=lambda: resource_envelope.observe_execution(prepared),
+                _poll_callback=observe_and_check_cancellation,
             )
         except ForgeError as error:
             failure = error
@@ -168,11 +266,14 @@ def run_bounded(
                 },
             ) from failure
         assert result is not None
-        command_returncode = facts.get("command_returncode")
-        if not isinstance(command_returncode, int):
+        command_returncode = facts.get("native_execution_returncode")
+        if (
+            facts.get("native_execution_returncode_available") is not True
+            or not isinstance(command_returncode, int)
+        ):
             raise ForgeError(
                 "RESOURCE_EXECUTION_UNKNOWN",
-                "systemd completed the unit but did not preserve its command exit status",
+                "MNCS resource outcome did not establish an execution exit status",
                 details={
                     "resource_evidence": {
                         **evidence,
@@ -226,8 +327,6 @@ def _run_bounded_process(
         raise ForgeError("COMMAND_START", f"cannot start declared command: {exc}") from exc
     if _observation is not None:
         _observation.process_started()
-    if _poll_callback is not None:
-        _poll_callback()
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
@@ -257,6 +356,8 @@ def _run_bounded_process(
     chunks: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     deadline = started + timeout
     try:
+        if _poll_callback is not None:
+            _poll_callback()
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -305,6 +406,14 @@ def _run_bounded_process(
                         },
                     )
         returncode = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except ForgeError as exc:
+        if exc.code == "EXECUTION_CANCELLED":
+            _terminate(process)
+            cancellation = _EXECUTION_CANCELLATION.get()
+            if cancellation is not None:
+                cancellation.mark_termination_requested(process.poll() is not None)
+                exc.details["execution_cancellation"] = cancellation.observation()
+        raise
     except subprocess.TimeoutExpired as exc:
         _terminate(process)
         raise ForgeError(
