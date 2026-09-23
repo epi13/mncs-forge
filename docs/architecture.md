@@ -123,6 +123,16 @@ status = "NATIVE_AUTHORITY"
 bootstrap_provisional = false
 
 [[capability]]
+identity = "forge.verification-cost-admission.v1"
+semantic_owner = "mncs.forge.core.v1::verification_cost_admit"
+native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+host_realization = "src/mncs_forge/continuous.py::ContinuousSupervisor._trigger_cost_allowed"
+host_may = ["encode_declared_cost_tier_names"]
+host_must_not = ["compare_verifier_cost_with_trigger_maximum"]
+status = "NATIVE_AUTHORITY"
+bootstrap_provisional = false
+
+[[capability]]
 identity = "forge.verification-status-decision.v1"
 semantic_owner = "mncs.forge.core.v1::verification_status_decide"
 native_source = "src/mncs_forge/resources/native/forge/core.mncs"

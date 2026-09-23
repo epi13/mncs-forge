@@ -840,6 +840,18 @@ fn verification_queue_admit(total_count: i64) -> (result: VerificationQueueDecis
     };
 }
 
+// Cost tiers cross the host ABI as low=0, medium=1, high=2. Invalid or
+// unavailable tiers are rejected here; the host only encodes the names.
+fn verification_cost_admit(verifier_tier: i64, maximum_tier: i64) -> (result: bool) {
+    if verifier_tier < 0 || verifier_tier > 2 {
+        return false;
+    }
+    if maximum_tier < 0 || maximum_tier > 2 {
+        return false;
+    }
+    return verifier_tier <= maximum_tier;
+}
+
 record VerificationStatusSet {
     statuses: [statlib.Status; 16],
     status_count: byte,

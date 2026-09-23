@@ -340,6 +340,7 @@ def test_resource_semantics_have_identity_bound_native_authority() -> None:
         "forge.resource-outcome.v1": "resource_outcome",
         "forge.continuous-verification-transition.v1": "verification_resource_transition",
         "forge.verification-queue-admission.v1": "verification_queue_admit",
+        "forge.verification-cost-admission.v1": "verification_cost_admit",
         "forge.verification-status-decision.v1": "verification_status_decide",
         "forge.inflight-process-cancellation.v1": "verification_resource_transition",
     }
@@ -373,6 +374,8 @@ def test_resource_semantics_have_identity_bound_native_authority() -> None:
     assert "verification_resource_transition" in continuous_source
     assert "resource_outcome_observed=resource_outcome_observed" in continuous_source
     assert "verification_queue_admit" in continuous_source
+    assert "self._resource_semantics.verification_cost_admit(" in continuous_source
+    assert "COST_ORDER" not in continuous_source
     assert "verification_status_decide" in continuous_source
     assert "unresolved_count=unresolved_count" in continuous_source
     assert "unresolved_count: i64" in (

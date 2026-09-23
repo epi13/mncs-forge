@@ -44,6 +44,7 @@ NATIVE_SOURCE_PROFILE = "0.10"
 _MNCS_TYPE_PREFIX = "mncs:0.2:finite-type:"
 _MNCS_VARIANT_PREFIX = "mncs:0.2:finite-variant:"
 _STATUS_VARIANTS = {"PASS": 0, "FAIL": 1, "UNKNOWN": 2}
+_VERIFICATION_COST_TIERS = {"low": 0, "medium": 1, "high": 2}
 _LIFECYCLE_STAGES = {
     "NoEpoch": 0,
     "EpochActive": 1,
@@ -2232,6 +2233,34 @@ class NativeForgeAdapter:
         if selected < 0 or deferred < 0 or selected + deferred != total_count:
             raise ForgeError("NATIVE_ABI_MISMATCH", "native queue admission counts do not balance")
         return selected, deferred
+
+    def verification_cost_admit(
+        self, verifier_cost: str | None, maximum_cost: str
+    ) -> bool:
+        """Compare serialized cost-tier ordinals through the MNCS policy."""
+
+        verifier_tier = _VERIFICATION_COST_TIERS.get(verifier_cost, -1)
+        maximum_tier = _VERIFICATION_COST_TIERS.get(maximum_cost, -1)
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "verification_cost_admit"},
+            "arguments": [
+                self._mncs_integer(verifier_tier),
+                self._mncs_integer(maximum_tier),
+            ],
+            "step_budget": 20_000,
+        }
+        invocation = self._semantic_invocation(
+            request, request_name="continuous-cost-admission.json"
+        )
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native cost admission failed")
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native cost admission did not return")
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "cost admission result arity is invalid")
+        return self._boolean(returned[0], context="verification cost admission")
 
     def verification_status_decide(
         self,

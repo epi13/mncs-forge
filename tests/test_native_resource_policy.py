@@ -701,3 +701,25 @@ def test_native_verifier_queue_admission(
     native: NativeForgeAdapter, count: int, expected: tuple[int, int]
 ) -> None:
     assert native.verification_queue_admit(count) == expected
+
+
+@pytest.mark.parametrize(
+    ("verifier_cost", "maximum_cost"),
+    [
+        ("low", "low"),
+        ("low", "high"),
+        ("medium", "low"),
+        ("medium", "medium"),
+        ("high", "medium"),
+        ("high", "high"),
+        ("unknown", "high"),
+        ("low", "unknown"),
+        (None, "high"),
+    ],
+)
+def test_native_verification_cost_admission_matches_previous_oracle(
+    native: NativeForgeAdapter, verifier_cost: str | None, maximum_cost: str
+) -> None:
+    oracle_order = {"low": 0, "medium": 1, "high": 2}
+    oracle = oracle_order.get(verifier_cost, 99) <= oracle_order.get(maximum_cost, -1)
+    assert native.verification_cost_admit(verifier_cost, maximum_cost) is oracle

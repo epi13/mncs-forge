@@ -37,7 +37,6 @@ from .serialization import local_json_identity
 if TYPE_CHECKING:
     from .engine import Forge
 
-COST_ORDER = {"low": 0, "medium": 1, "high": 2}
 CONTINUOUS_STATUS_SCHEMA = "mncs.continuous-status/1"
 REPAIR_RESULT_SCHEMA = "mncs.continuous-repair/1"
 CONTINUOUS_LIFECYCLE_SCHEMA = "mncs.continuous-lifecycle/1"
@@ -1532,8 +1531,9 @@ class ContinuousSupervisor:
     def _trigger_cost_allowed(self, trigger: dict[str, object], verifier_id: str) -> bool:
         verifier = self.config.verifiers.get(verifier_id)
         maximum = str(trigger.get("maximum_cost", "high"))
-        return verifier is not None and COST_ORDER.get(verifier.cost, 99) <= COST_ORDER.get(
-            maximum, -1
+        return self._resource_semantics.verification_cost_admit(
+            verifier.cost if verifier is not None else None,
+            maximum,
         )
 
     def _debounce_ms(self) -> int:
