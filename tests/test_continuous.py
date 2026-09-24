@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,8 +16,11 @@ from types import SimpleNamespace
 from conftest import with_native_latency_allowance
 
 from mncs_forge.adapters import LocalProcessRunner
-from mncs_forge.continuous import ContinuousSupervisor, LanguageServiceSocket
-from mncs_forge.errors import ForgeError
+from mncs_forge.continuous import (
+    ContinuousSupervisor,
+    LanguageServiceSocket,
+    _ContinuousEventIngress,
+)
 from mncs_forge.engine import Forge
 from mncs_forge.execution_observations import ExecutionObservationBuilder
 from mncs_forge.mncs_native import NativeForgeAdapter
@@ -27,6 +31,7 @@ from mncs_forge.record_store import LocalRecordStore
 def _supervisor() -> ContinuousSupervisor:
     supervisor = object.__new__(ContinuousSupervisor)
     supervisor._resource_semantics = NativeForgeAdapter(Path(__file__).parents[1])
+    supervisor._active_job_lock = threading.Lock()
     supervisor.pending = OrderedDict()
     supervisor.pending_overflow_count = 0
     supervisor.pending_overflow_identity = None
@@ -181,6 +186,7 @@ class _GenerationStatusServer:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.generation = 7
+        self.cursor = 7
         self.published_monotonic: float | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -201,26 +207,45 @@ class _GenerationStatusServer:
                 while b"\n" not in (data := client.recv(4096)):
                     if not data:
                         break
-                with self._lock:
-                    generation = self.generation
-                client.sendall(
-                    (
-                        json.dumps(
-                            {"id": 1, "ok": True, "result": {"generation": generation}}
-                        )
-                        + "\n"
-                    ).encode()
-                )
+                try:
+                    request = json.loads(data.splitlines()[0])
+                    with self._lock:
+                        generation = self.generation
+                        cursor = self.cursor
+                    params = request.get("params", {})
+                    after_cursor = int(params.get("after_cursor", 0))
+                    event = {
+                        **_event(),
+                        "cursor": cursor,
+                        "current_generation": generation,
+                        "current": {
+                            "uri": "file:///workspace/src/main.mncs",
+                            "identity": f"mncs:source:{generation}",
+                        },
+                    }
+                    result = {
+                        "events": [event] if generation > after_cursor else [],
+                        "stream_identity": "stream-test",
+                        "reset_required": False,
+                        "current_cursor": cursor,
+                    }
+                    client.sendall(
+                        (json.dumps({"id": request.get("id"), "ok": True, "result": result}) + "\n").encode()
+                    )
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    return
 
     def publish(self, generation: int) -> None:
         with self._lock:
             self.generation = generation
+            self.cursor = generation
             self.published_monotonic = time.monotonic()
 
     def close(self) -> None:
         self._stop.set()
         self._thread.join(timeout=0.5)
-        self._socket.close()
+        with suppress(OSError):
+            self._socket.close()
         self.path.unlink(missing_ok=True)
 
 
@@ -279,7 +304,7 @@ def test_resource_pressure_defers_next_micro_obligation_natively() -> None:
     assert decision.escalation_required is True
 
 
-def test_superseding_generation_cancels_owned_process_group(tmp_path: Path) -> None:
+def test_superseding_generation_cancels_generic_process_tree(tmp_path: Path) -> None:
     supervisor = _supervisor()
     supervisor.current_generation = 7
     supervisor.settings = {"candidate_identity": "candidate:test"}
@@ -297,22 +322,39 @@ def test_superseding_generation_cancels_owned_process_group(tmp_path: Path) -> N
     pid_path = tmp_path / "tree-pids"
     work = _event()
     trigger = {"id": "cancel-on-edit", "verifier_ids": ["verifier:test"]}
-    published = threading.Thread(
-        target=lambda: (
-            time.sleep(0.15),
-            server.publish(8),
-        ),
-        daemon=True,
-    )
     program = (
         "import os, subprocess, sys, time\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
         f"open({str(pid_path)!r}, 'w').write(f'{{os.getpid()}} {{child.pid}}')\n"
         "time.sleep(30)\n"
     )
-    runner = LocalProcessRunner()
-    failure: ForgeError | None = None
+    native = supervisor._resource_semantics
+    runner = LocalProcessRunner(process_capability=native)
+    supervisor.forge = SimpleNamespace(_executor=runner)
+    supervisor.config = SimpleNamespace(state_dir=None)
+    supervisor.current_generation = 7
+    supervisor.current_cursor = 7
+    supervisor.stream_identity = "stream-test"
+    supervisor.settings = {"candidate_identity": "candidate:test"}
+    execution: dict[str, object] = {}
+    ingress = _ContinuousEventIngress(
+        supervisor,
+        LanguageServiceSocket(server.path, timeout=0.5),
+        after_cursor=7,
+        max_events=16,
+        poll_interval=0.01,
+    )
+
+    def publish_after_launch() -> None:
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and not pid_path.is_file():
+            time.sleep(0.005)
+        if pid_path.is_file():
+            server.publish(8)
+
+    published = threading.Thread(target=publish_after_launch, daemon=True)
     try:
+        ingress.start()
         with supervisor._job_scope(
             work,
             trigger,
@@ -320,28 +362,37 @@ def test_superseding_generation_cancels_owned_process_group(tmp_path: Path) -> N
             client=LanguageServiceSocket(server.path, timeout=0.5),
         ):
             published.start()
-            try:
-                runner.execute(
-                    [sys.executable, "-c", program],
-                    cwd=tmp_path,
-                    timeout=15,
-                    output_cap=1024,
-                    environment=dict(os.environ),
-                )
-            except ForgeError as error:
-                failure = error
+            execution["session"] = runner.run(
+                [sys.executable, "-c", program],
+                cwd=tmp_path,
+                timeout=20,
+                output_cap=1024,
+                environment={"PATH": os.environ.get("PATH", "")},
+            )
     finally:
-        published.join(timeout=1)
+        ingress.stop()
+        published.join(timeout=90)
         server.close()
 
-    assert failure is not None and failure.code == "EXECUTION_CANCELLED"
-    cancellation = failure.details["execution_cancellation"]
-    assert cancellation["cancellation_requested"] is True
-    assert cancellation["superseded"] is True
-    assert isinstance(cancellation["request_to_termination_request_seconds"], float)
+    session = execution["session"]
+    assert session.error_code == "EXECUTION_CANCELLED", session.error_message
+    assert session.result is None
+    process_facts = session.observation.resource_observations
+    assert process_facts["process_status"] == "Cancelled"
+    assert process_facts["cancellation_requested"] is True
+    assert process_facts["cancellation_complete"] is True
+    assert process_facts["tree_empty"] is True
+    assert process_facts["launcher_reaped"] is True
+    assert process_facts["cleanup_complete"] is True
+    cancellation = supervisor.last_cancellation
+    assert cancellation["cancellation_generation"] == 8
+    assert cancellation["cancellation_event_to_decision_seconds"] < 0.5
+    assert cancellation["cancellation_request_to_reaped_seconds"] < 1.5
     assert server.published_monotonic is not None
     assert time.monotonic() - server.published_monotonic < 1.5
     assert supervisor.current_generation == 8
+    next_generation_event = ingress.events.get_nowait()
+    assert next_generation_event["current_generation"] == 8
     pids = [int(value) for value in pid_path.read_text(encoding="ascii").split()]
     deadline = time.monotonic() + 1
     while time.monotonic() < deadline:
@@ -351,26 +402,14 @@ def test_superseding_generation_cancels_owned_process_group(tmp_path: Path) -> N
         time.sleep(0.01)
     assert all(state in {None, "Z"} for state in states)
 
-    native = supervisor._resource_semantics
-    outcome = native.resource_outcome(
-        {
-            "systemd_result": "unknown",
-            "cleanup_known": True,
-            "cleanup_succeeded": True,
-            "cancellation_requested": cancellation["cancellation_requested"],
-            "superseded": cancellation["superseded"],
-        }
-    )
-    assert outcome.status == "Stale"
     transition = supervisor._native_resource_transition(
-        event={**work, "current_generation": 8},
+        event=work,
         candidate="candidate:test",
         verifier_id="verifier:test",
-        outcome=outcome.status,
+        outcome="Cancelled",
         evidence_status="Unknown",
         has_outcome=True,
         queue_remaining=0,
-        resource_outcome_observed=True,
         work_generation=7,
         current_generation=8,
     )
@@ -382,7 +421,7 @@ def test_superseding_generation_cancels_owned_process_group(tmp_path: Path) -> N
     supervisor.current_cursor = 0
     next_generation = supervisor._process_event(
         SimpleNamespace(request=lambda *_args: {"generation": 8}),
-        {**work, "current_generation": 8},
+        next_generation_event,
     )
     assert next_generation["status"] == "PASS"
 

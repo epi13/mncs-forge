@@ -794,35 +794,6 @@ class SystemdCgroupEnvelope:
                 active.get("resource_observations", {}), observed
             )
 
-    def cancel_execution(self, prepared: PreparedExecution) -> bool:
-        """Realize an already-authorized cancellation request for the owned unit."""
-
-        if not self.systemctl:
-            return False
-        with self._active_lock:
-            if prepared.unit_name not in self._active:
-                return False
-        signalled = False
-        for signal_name in ("SIGTERM", "SIGKILL"):
-            try:
-                result = self._control(
-                    [
-                        self.systemctl,
-                        "--user",
-                        "kill",
-                        "--kill-whom=all",
-                        f"--signal={signal_name}",
-                        prepared.unit_name,
-                    ],
-                    check=False,
-                    capture_output=True,
-                    timeout=0.5,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                continue
-            signalled = result.returncode == 0 or signalled
-        return signalled
-
     @staticmethod
     def _systemd_observations(properties: Mapping[str, str]) -> dict[str, int]:
         values: dict[str, int] = {}
@@ -985,16 +956,6 @@ class SystemdCgroupEnvelope:
             if isinstance(candidate_evidence, Mapping):
                 output_evidence = candidate_evidence
         output_limited = failure is not None and failure.code == "OUTPUT_LIMIT"
-        cancellation_observation = (
-            failure.details.get("execution_cancellation")
-            if failure is not None
-            else None
-        )
-        cancellation_facts = (
-            cancellation_observation
-            if isinstance(cancellation_observation, Mapping)
-            else {}
-        )
         with self._active_lock:
             active = self._active.pop(prepared.unit_name, {})
         tree_cleanup_succeeded = self._cleanup_unit(prepared.unit_name, group)
@@ -1021,11 +982,8 @@ class SystemdCgroupEnvelope:
                 "process_limit_events": values.get("process_limit_events", 0),
                 "cleanup_known": True,
                 "cleanup_succeeded": cleanup_succeeded,
-                "cancellation_requested": cancellation_facts.get(
-                    "cancellation_requested", False
-                )
-                is True,
-                "superseded": cancellation_facts.get("superseded", False) is True,
+                "cancellation_requested": False,
+                "superseded": False,
             }
         )
         exhausted = outcome.resource_exhausted
@@ -1064,7 +1022,6 @@ class SystemdCgroupEnvelope:
             "native_execution_returncode": outcome.execution_exit_status,
             "cancellation_requested": outcome.cancellation_requested,
             "superseded": outcome.superseded,
-            "execution_cancellation": dict(cancellation_facts),
             "verification_deferred": outcome.deferred,
             "resource_metric": metric,
             "resource_bound": bound,

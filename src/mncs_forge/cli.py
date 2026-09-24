@@ -18,6 +18,7 @@ from .operations import (
     CliDecoder,
     OperationInterface,
 )
+from .workspace_binding import resolve_continuous_config
 
 
 def _cli_command(operation_id: str, part: int = -1) -> str:
@@ -45,7 +46,7 @@ def _verifier_run_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _common_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mncs-forge")
-    parser.add_argument("--config", type=Path, default=Path("mncs-forge.toml"))
+    parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--mode", choices=("development", "evaluator"), default="development")
     parser.add_argument("--json", action="store_true", help="emit structured JSON (default)")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -174,9 +175,11 @@ def _common_parser() -> argparse.ArgumentParser:
         continuous_commands.add_parser(_cli_command("development.continuous.status")),
         "development.continuous.status",
     )
-    continuous_commands.add_parser("start")
-    continuous_commands.add_parser("enter")
-    continuous_commands.add_parser("stop")
+    for lifecycle_action in ("start", "enter", "status", "stop"):
+        lifecycle_parser = continuous_commands.choices.get(lifecycle_action)
+        if lifecycle_parser is None:
+            lifecycle_parser = continuous_commands.add_parser(lifecycle_action)
+        lifecycle_parser.add_argument("workspace", nargs="?", type=Path)
 
     mncs = commands.add_parser(_cli_command("development.mncs.failure-loop", 0))
     mncs_commands = mncs.add_subparsers(dest="mncs_command", required=True)
@@ -466,19 +469,24 @@ def _dispatch(forge: Forge, args: argparse.Namespace) -> object:
 def run(argv: list[str] | None = None) -> tuple[int, dict[str, Any]]:
     args = _common_parser().parse_args(argv)
     try:
-        config = load_config(args.config)
         if args.command == "continuous" and args.continuous_command in {
             "start",
             "status",
             "stop",
+            "enter",
         }:
+            config = resolve_continuous_config(
+                workspace=getattr(args, "workspace", None),
+                explicit_config=args.config,
+            )
+            if args.continuous_command == "enter":
+                return 0, environment_enter(config, mode=args.mode)
             return 0, continuous_lifecycle(
                 config,
                 str(args.continuous_command),
                 mode=args.mode,
             )
-        if args.command == "continuous" and args.continuous_command == "enter":
-            return 0, environment_enter(config, mode=args.mode)
+        config = load_config(args.config or Path("mncs-forge.toml"))
         value = _dispatch(Forge(config, mode=args.mode), args)
         if isinstance(value, dict):
             return 0, value

@@ -8,6 +8,8 @@ module mncs.forge.core.v1;
 use mncs.core.identity as idlib;
 use mncs.core.status as statlib;
 use mncs.core.version as verlib;
+use mncs.core.sequences.v1 as sequences;
+use mncs.std.process.v1 as process;
 use mncs.forge.lifecycle as lifelib;
 use mncs.forge.bundle as bundlelib;
 use mncs.forge.assurance as assurancelib;
@@ -1006,6 +1008,234 @@ fn verification_status_unknown(status: VerificationEvidenceStatus) -> (result: b
         Fail => false,
         Unknown => true
     };
+}
+
+// Continuous trigger routing accepts only bounded facts from the resident
+// Language Service and a bounded trigger declaration. This module derives
+// event kinds, matches exact category sets, and applies the documented
+// terminal-asterisk prefix form for identity/diagnostic patterns.
+record ContinuousTriggerInput {
+    event_kinds: [[byte; up_to 1024]; up_to 256],
+    change_kinds: [[byte; up_to 1024]; up_to 256],
+    guarantee_domains: [[byte; up_to 1024]; up_to 256],
+    risk_flags: [[byte; up_to 1024]; up_to 256],
+    subject_kinds: [[byte; up_to 1024]; up_to 256],
+    contract_patterns: [[byte; up_to 1024]; up_to 256],
+    obligation_patterns: [[byte; up_to 1024]; up_to 256],
+    diagnostic_patterns: [[byte; up_to 1024]; up_to 256],
+    diagnostic_added: [[byte; up_to 1024]; up_to 256],
+    diagnostic_resolved: [[byte; up_to 1024]; up_to 256],
+    semantic_subjects: [[byte; up_to 1024]; up_to 256],
+    obligation_added: [[byte; up_to 1024]; up_to 256],
+    obligation_resolved: [[byte; up_to 1024]; up_to 256],
+    obligation_status_changed: [[byte; up_to 1024]; up_to 256],
+    impact_change_kinds: [[byte; up_to 1024]; up_to 256],
+    impact_guarantee_domains: [[byte; up_to 1024]; up_to 256],
+    impact_risk_flags: [[byte; up_to 1024]; up_to 256],
+    impact_node_kinds: [[byte; up_to 1024]; up_to 256],
+    impact_node_identities: [[byte; up_to 1024]; up_to 256],
+    security: bool,
+    reconciled: bool
+}
+
+record ContinuousTriggerDecision {
+    valid: bool,
+    matched: bool
+}
+
+fn continuous_contains(
+    values: [[byte; up_to 1024]; up_to 256],
+    candidate: [byte; up_to 1024]
+) -> (result: bool) {
+    iterate i over values carrying found: bool = false {
+        next found = found || sequences.equals_byte_view<1024>(values[i], candidate);
+    }
+    return found;
+}
+
+fn continuous_intersects(
+    configured: [[byte; up_to 1024]; up_to 256],
+    observed: [[byte; up_to 1024]; up_to 256]
+) -> (result: bool) {
+    if configured.len == 0 { return true; }
+    iterate i over observed carrying found: bool = false {
+        next found = found || continuous_contains(configured, observed[i]);
+    }
+    return found;
+}
+
+fn continuous_pattern_valid(pattern: [byte; up_to 1024]) -> (result: bool) {
+    if pattern.len == 0 { return false; }
+    iterate i over pattern carrying valid: bool = true {
+        let value: byte = pattern[i];
+        let unsupported_wildcard: bool = value == 63 || value == 91 || value == 93;
+        let misplaced_star: bool = value == 42 && i +% 1 < pattern.len;
+        next valid = valid && !unsupported_wildcard && !misplaced_star;
+    }
+    return valid;
+}
+
+fn continuous_pattern_byte_matches(
+    pattern: [byte; up_to 1024],
+    candidate: [byte; up_to 1024],
+    index: u64,
+    required_length: u64
+) -> (result: bool) {
+    if index >= required_length { return true; }
+    if index >= candidate.len { return false; }
+    return pattern[index] == candidate[index];
+}
+
+fn continuous_pattern_matches(
+    pattern: [byte; up_to 1024],
+    candidate: [byte; up_to 1024]
+) -> (result: bool) {
+    if !continuous_pattern_valid(pattern) { return false; }
+    let has_prefix_star: bool = pattern[pattern.len - 1] == 42;
+    let required_length: u64 = select(has_prefix_star, pattern.len - 1, pattern.len);
+    if has_prefix_star && candidate.len < required_length { return false; }
+    if !has_prefix_star && candidate.len != required_length { return false; }
+    iterate i over pattern carrying same: bool = true {
+        next same = same && continuous_pattern_byte_matches(
+            pattern, candidate, i, required_length
+        );
+    }
+    return same;
+}
+
+fn continuous_patterns_valid(patterns: [[byte; up_to 1024]; up_to 256]) -> (result: bool) {
+    iterate i over patterns carrying valid: bool = true {
+        next valid = valid && continuous_pattern_valid(patterns[i]);
+    }
+    return valid;
+}
+
+fn continuous_pattern_hits(
+    patterns: [[byte; up_to 1024]; up_to 256],
+    candidates: [[byte; up_to 1024]; up_to 256]
+) -> (result: bool) {
+    if patterns.len == 0 { return true; }
+    iterate i over candidates carrying found: bool = false {
+        iterate j over patterns carrying matched: bool = false {
+            next matched = matched || continuous_pattern_matches(patterns[j], candidates[i]);
+        }
+        next found = found || matched;
+    }
+    return found;
+}
+
+fn continuous_contract_match(input: ContinuousTriggerInput) -> (result: bool) {
+    if input.contract_patterns.len == 0 { return true; }
+    if input.impact_node_kinds.len != input.impact_node_identities.len { return false; }
+    iterate i over input.impact_node_kinds carrying found: bool = false {
+        let is_contract: bool = sequences.equals_byte_view<1024>(
+            input.impact_node_kinds[i], [99, 111, 110, 116, 114, 97, 99, 116]
+        );
+        let matched: bool = continuous_pattern_hits(
+            input.contract_patterns,
+            [input.impact_node_identities[i]]
+        );
+        next found = found || (is_contract && matched);
+    }
+    return found;
+}
+
+fn continuous_security_boundary_changed(input: ContinuousTriggerInput) -> (result: bool) {
+    return continuous_contains(input.impact_change_kinds, [101, 102, 102, 101, 99, 116, 95, 99, 97, 112, 97, 98, 105, 108, 105, 116, 121])
+        || continuous_contains(input.impact_risk_flags, [101, 102, 102, 101, 99, 116, 95, 115, 101, 109, 97, 110, 116, 105, 99, 115]);
+}
+
+fn continuous_public_contract_changed(input: ContinuousTriggerInput) -> (result: bool) {
+    return continuous_contains(input.impact_change_kinds, [112, 117, 98, 108, 105, 99, 95, 99, 111, 110, 116, 114, 97, 99, 116]);
+}
+
+fn continuous_event_kind_active(
+    input: ContinuousTriggerInput,
+    kind: [byte; up_to 1024]
+) -> (result: bool) {
+    if sequences.equals_byte_view<1024>(kind, [115, 111, 117, 114, 99, 101, 95, 99, 104, 97, 110, 103, 101, 100]) {
+        return true;
+    }
+    if sequences.equals_byte_view<1024>(kind, [100, 105, 97, 103, 110, 111, 115, 116, 105, 99, 95, 97, 100, 100, 101, 100]) {
+        return input.diagnostic_added.len > 0;
+    }
+    if sequences.equals_byte_view<1024>(kind, [100, 105, 97, 103, 110, 111, 115, 116, 105, 99, 95, 114, 101, 115, 111, 108, 118, 101, 100]) {
+        return input.diagnostic_resolved.len > 0;
+    }
+    if sequences.equals_byte_view<1024>(kind, [115, 101, 109, 97, 110, 116, 105, 99, 95, 115, 117, 98, 106, 101, 99, 116, 95, 99, 104, 97, 110, 103, 101, 100]) {
+        return input.semantic_subjects.len > 0;
+    }
+    if sequences.equals_byte_view<1024>(kind, [111, 98, 108, 105, 103, 97, 116, 105, 111, 110, 95, 99, 104, 97, 110, 103, 101, 100]) {
+        return input.obligation_added.len > 0 || input.obligation_resolved.len > 0 || input.obligation_status_changed.len > 0;
+    }
+    if sequences.equals_byte_view<1024>(kind, [115, 101, 99, 117, 114, 105, 116, 121, 95, 98, 111, 117, 110, 100, 97, 114, 121, 95, 99, 104, 97, 110, 103, 101, 100]) {
+        return continuous_security_boundary_changed(input);
+    }
+    if sequences.equals_byte_view<1024>(kind, [112, 117, 98, 108, 105, 99, 95, 99, 111, 110, 116, 114, 97, 99, 116, 95, 99, 104, 97, 110, 103, 101, 100]) {
+        return continuous_public_contract_changed(input);
+    }
+    if sequences.equals_byte_view<1024>(kind, [119, 111, 114, 107, 115, 112, 97, 99, 101, 95, 114, 101, 99, 111, 110, 99, 105, 108, 101, 100]) {
+        return input.reconciled;
+    }
+    return false;
+}
+
+fn continuous_event_kind_match(input: ContinuousTriggerInput) -> (result: bool) {
+    if input.event_kinds.len == 0 { return true; }
+    iterate i over input.event_kinds carrying found: bool = false {
+        next found = found || continuous_event_kind_active(input, input.event_kinds[i]);
+    }
+    return found;
+}
+
+fn continuous_subject_kind_match(input: ContinuousTriggerInput) -> (result: bool) {
+    if input.subject_kinds.len == 0 { return true; }
+    iterate i over input.impact_node_kinds carrying found: bool = false {
+        next found = found || continuous_contains(input.subject_kinds, input.impact_node_kinds[i]);
+    }
+    return found;
+}
+
+fn continuous_obligation_match(input: ContinuousTriggerInput) -> (result: bool) {
+    return continuous_pattern_hits(input.obligation_patterns, input.obligation_added)
+        || continuous_pattern_hits(input.obligation_patterns, input.obligation_resolved)
+        || continuous_pattern_hits(input.obligation_patterns, input.obligation_status_changed);
+}
+
+fn continuous_diagnostic_match(input: ContinuousTriggerInput) -> (result: bool) {
+    return continuous_pattern_hits(input.diagnostic_patterns, input.diagnostic_added)
+        || continuous_pattern_hits(input.diagnostic_patterns, input.diagnostic_resolved);
+}
+
+fn continuous_trigger_matches(input: ContinuousTriggerInput) -> (result: ContinuousTriggerDecision) {
+    let patterns_valid: bool = continuous_patterns_valid(input.contract_patterns)
+        && continuous_patterns_valid(input.obligation_patterns)
+        && continuous_patterns_valid(input.diagnostic_patterns);
+    let security_matches: bool = !input.security
+        || continuous_security_boundary_changed(input)
+        || input.reconciled;
+    let matched: bool = patterns_valid
+        && continuous_event_kind_match(input)
+        && continuous_intersects(input.change_kinds, input.impact_change_kinds)
+        && continuous_intersects(input.guarantee_domains, input.impact_guarantee_domains)
+        && continuous_intersects(input.risk_flags, input.impact_risk_flags)
+        && continuous_subject_kind_match(input)
+        && continuous_contract_match(input)
+        && continuous_obligation_match(input)
+        && continuous_diagnostic_match(input)
+        && security_matches;
+    return ContinuousTriggerDecision { valid: patterns_valid, matched: matched };
+}
+
+// Debounce is a bounded coalescing policy; actual waiting remains a host timer.
+fn continuous_debounce_ms(global_value: i64, trigger_values: [i64; up_to 64]) -> (result: i64) {
+    let initial: i64 = select(global_value > 0, global_value, 0);
+    iterate i over trigger_values carrying maximum: i64 = initial {
+        let value: i64 = select(trigger_values[i] > 0, trigger_values[i], 0);
+        next maximum = select(value > maximum, value, maximum);
+    }
+    if maximum > 5000 { return 5000; }
+    return maximum;
 }
 
 fn verification_resource_outcome_resolved(outcome: ResourceOutcomeStatus) -> (result: bool) {

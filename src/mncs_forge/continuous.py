@@ -9,9 +9,9 @@ every job to a generation, and suppresses stale results.
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
+import queue
 import shlex
 import signal
 import subprocess
@@ -29,7 +29,6 @@ from filelock import FileLock, Timeout
 
 from .application.support import now
 from .errors import ForgeError
-from .execution import ExecutionCancellation, bind_execution_cancellation
 from .mncs_native import NativeForgeAdapter
 from .records import RecordType, new_record
 from .serialization import local_json_identity
@@ -80,6 +79,12 @@ def _compact_resource_evidence(value: object) -> dict[str, object]:
             "native_execution_returncode",
             "cancellation_requested",
             "superseded",
+            "process_status",
+            "process_observation_complete",
+            "tree_empty",
+            "launcher_reaped",
+            "cleanup_complete",
+            "cancellation_complete",
             "verification_deferred",
             "native_admission_reason",
             "resource_admission_status",
@@ -119,23 +124,18 @@ def _compact_resource_evidence(value: object) -> dict[str, object]:
         if isinstance(verifier_ids, list):
             bounded_context["verifier_ids"] = [str(item)[:128] for item in verifier_ids[:32]]
         compact["job_context"] = bounded_context
-    cancellation = _mapping(evidence.get("execution_cancellation"))
-    if cancellation:
-        compact["execution_cancellation"] = {
-            key: cancellation[key]
-            for key in (
-                "cancellation_requested",
-                "superseded",
-                "termination_request_succeeded",
-                "request_to_termination_request_seconds",
-            )
-            if key in cancellation
-        }
     resource_observations = _mapping(evidence.get("resource_observations"))
     if resource_observations:
         compact["resource_observations"] = {
             key: resource_observations[key]
             for key in (
+                "exit_status",
+                "timed_out",
+                "output_limited",
+                "cleanup_known",
+                "cleanup_succeeded",
+                "cancellation_requested",
+                "superseded",
                 "memory_current_bytes",
                 "cgroup_memory_peak_bytes",
                 "process_rss_peak_bytes",
@@ -932,6 +932,81 @@ class LanguageServiceSocket:
         return response.get("result")
 
 
+class _ContinuousEventIngress:
+    """One bounded owner for the resident Language Service event stream.
+
+    Verifier dispatch can block while a generic process effect runs. This
+    ingress keeps consuming the same authoritative stream during that work,
+    lets the supervisor cancel a stale generation, and retains events in a
+    bounded queue for ordinary dispatch when the verifier returns.
+    """
+
+    def __init__(
+        self,
+        supervisor: "ContinuousSupervisor",
+        client: LanguageServiceSocket,
+        *,
+        after_cursor: int,
+        max_events: int,
+        poll_interval: float,
+    ) -> None:
+        self.supervisor = supervisor
+        self.client = client
+        self.cursor = after_cursor
+        self.max_events = max_events
+        self.poll_interval = min(max(poll_interval, 0.01), 0.05)
+        self.events: queue.Queue[dict[str, object]] = queue.Queue(
+            maxsize=CONTINUOUS_PENDING_CAPACITY
+        )
+        self.stop_event = threading.Event()
+        self.failure: str | None = None
+        self.thread = threading.Thread(
+            target=self._run,
+            name="mncs-forge-language-event-ingress",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self.thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.client.request("refresh_workspace", {})
+                poll = self.supervisor._poll(
+                    self.client,
+                    after_cursor=self.cursor,
+                    max_events=self.max_events,
+                )
+            except (ForgeError, TypeError, ValueError) as error:
+                self.failure = f"Language Service event ingress failed: {error}"
+                self.stop_event.set()
+                return
+            if bool(poll.get("reset_required")):
+                self.failure = "Language Service event stream reset requires reconciliation"
+                self.stop_event.set()
+                return
+            observed = [item for item in poll.get("events", []) if isinstance(item, dict)]
+            for event in observed:
+                cursor = int(event.get("cursor", self.cursor))
+                if cursor <= self.cursor:
+                    continue
+                self.supervisor._cancel_active_for_event(event)
+                try:
+                    self.events.put_nowait(event)
+                except queue.Full:
+                    self.failure = "Language Service event ingress reached its bounded queue capacity"
+                    self.stop_event.set()
+                    return
+                self.cursor = cursor
+            if self.stop_event.wait(self.poll_interval):
+                return
+
+
 class ContinuousSupervisor:
     def __init__(self, forge: Forge) -> None:
         self.forge = forge
@@ -965,6 +1040,7 @@ class ContinuousSupervisor:
         self.stream_identity: str | None = None
         self.active_tier = "edit-time"
         self._stop_requested = False
+        self._active_job_lock = threading.Lock()
 
     def request_stop(self) -> None:
         self._stop_requested = True
@@ -1052,71 +1128,96 @@ class ContinuousSupervisor:
                 if key not in {"started_at", "started_monotonic"}
             }
         )
-        self.active_job = job
         runner = getattr(getattr(self, "forge", None), "_executor", None)
         set_context = getattr(runner, "set_job_context", None)
         if callable(set_context):
             set_context(job)
+        with self._active_job_lock:
+            self.active_job = job
         if getattr(getattr(self, "config", None), "state_dir", None) is not None:
             self._write_status(self.status())
-        cancellation = ExecutionCancellation()
-        stop_monitor = threading.Event()
-        monitor: threading.Thread | None = None
-        socket_path = getattr(client, "path", None)
-        if action in {"verification_plan", "micro_verifier", "security_micro_verifier"} and isinstance(
-            socket_path, Path
-        ):
-            work_generation = int(event.get("current_generation", 0))
-
-            def observe_supersession() -> None:
-                observer = LanguageServiceSocket(socket_path, timeout=0.5)
-                while not stop_monitor.wait(0.05):
-                    try:
-                        observed = _mapping(observer.request("workspace_status", {}))
-                        observed_generation = int(observed.get("generation", work_generation))
-                    except (ForgeError, TypeError, ValueError):
-                        continue
-                    if observed_generation <= work_generation:
-                        continue
-                    transition = self._native_resource_transition(
-                        event={**event, "current_generation": observed_generation},
-                        candidate=str(job.get("candidate_identity") or "event"),
-                        verifier_id="in-flight-generation",
-                        outcome="Unknown",
-                        evidence_status="NotRun",
-                        has_outcome=False,
-                        queue_remaining=0,
-                        in_flight=True,
-                        work_generation=work_generation,
-                        current_generation=observed_generation,
-                    )
-                    if transition.cancel_owned_work:
-                        self.current_generation = max(
-                            self.current_generation, observed_generation
-                        )
-                        cancellation.request(superseded=True)
-                        job["cancellation_requested"] = True
-                        job["cancellation_generation"] = observed_generation
-                        return
-
-            monitor = threading.Thread(
-                target=observe_supersession,
-                name="mncs-forge-generation-observer",
-                daemon=True,
-            )
-            monitor.start()
         try:
-            with bind_execution_cancellation(cancellation):
-                yield cancellation
+            yield None
         finally:
-            stop_monitor.set()
-            if monitor is not None:
-                monitor.join(timeout=0.75)
             if callable(set_context):
                 set_context(None)
-            self.active_job = None
+            if job.get("cancellation_requested") is True:
+                self.last_cancellation = {
+                    key: job[key]
+                    for key in (
+                        "generation",
+                        "cancellation_generation",
+                        "cancellation_event_cursor",
+                        "cancellation_event_to_decision_seconds",
+                        "cancellation_native_transition_seconds",
+                        "cancellation_decision_to_request_seconds",
+                        "cancellation_request_to_reaped_seconds",
+                        "cancellation_observation",
+                    )
+                    if key in job
+                }
+            with self._active_job_lock:
+                self.active_job = None
             if getattr(getattr(self, "config", None), "state_dir", None) is not None:
                 self._write_status(self.status())
+
+    def _cancel_active_for_event(self, event: dict[str, object]) -> None:
+        """Apply native stale disposition to the active generic process handle."""
+
+        with self._active_job_lock:
+            job = self.active_job
+            if not isinstance(job, dict):
+                return
+            work_generation = int(job.get("generation", 0))
+            observed_generation = int(event.get("current_generation", work_generation))
+            if observed_generation <= work_generation:
+                return
+            event_arrived = time.monotonic()
+            transition_started = event_arrived
+            transition = self._native_resource_transition(
+                event=event,
+                candidate=str(job.get("candidate_identity") or "event"),
+                verifier_id="in-flight-generation",
+                outcome="Unknown",
+                evidence_status="NotRun",
+                has_outcome=False,
+                queue_remaining=0,
+                in_flight=True,
+                work_generation=work_generation,
+                current_generation=observed_generation,
+            )
+            decision_at = time.monotonic()
+            if not transition.cancel_owned_work:
+                return
+            self.current_generation = max(self.current_generation, observed_generation)
+            self.current_cursor = max(self.current_cursor, int(event.get("cursor", 0)))
+            self.current_source_identity = (
+                _mapping(event.get("current")).get("identity") or self.current_source_identity
+            )
+            runner = getattr(getattr(self, "forge", None), "_executor", None)
+            cancel = getattr(runner, "cancel_generation", None)
+            cancellation = (
+                cancel(work_generation) if callable(cancel) else {"handle_found": False}
+            )
+            job["cancellation_requested"] = True
+            job["cancellation_generation"] = observed_generation
+            job["cancellation_event_to_decision_seconds"] = round(
+                decision_at - event_arrived, 6
+            )
+            job["cancellation_native_transition_seconds"] = round(
+                decision_at - transition_started, 6
+            )
+            job["cancellation_observation"] = cancellation
+            job["cancellation_event_cursor"] = event.get("cursor")
+            job["cancellation_request_at"] = decision_at
+            if cancellation.get("decision_to_cancel_request_seconds") is not None:
+                job["cancellation_decision_to_request_seconds"] = cancellation[
+                    "decision_to_cancel_request_seconds"
+                ]
+            if cancellation.get("cancel_request_to_reaped_seconds") is not None:
+                job["cancellation_request_to_reaped_seconds"] = cancellation[
+                    "cancel_request_to_reaped_seconds"
+                ]
 
     def _attention(
         self, event: dict[str, object], reason: str, *, tier: str = "incremental"
@@ -1431,102 +1532,41 @@ class ContinuousSupervisor:
             return None
         return value if isinstance(value, dict) else None
 
-    def _event_kinds(self, event: dict[str, object]) -> set[str]:
-        kinds = {"source_changed"}
-        diagnostics = _mapping(event.get("diagnostics"))
-        if diagnostics.get("added"):
-            kinds.add("diagnostic_added")
-        if diagnostics.get("resolved"):
-            kinds.add("diagnostic_resolved")
-        if event.get("semantic_subjects"):
-            kinds.add("semantic_subject_changed")
-        obligations = _mapping(event.get("obligations"))
-        if (
-            obligations.get("added")
-            or obligations.get("resolved")
-            or obligations.get("status_changed")
-        ):
-            kinds.add("obligation_changed")
-        impact = _mapping(event.get("impact"))
-        if "effect_capability" in _list(impact.get("change_kinds")) or "effect_semantics" in _list(
-            impact.get("risk_flags")
-        ):
-            kinds.add("security_boundary_changed")
-        if "public_contract" in _list(impact.get("change_kinds")):
-            kinds.add("public_contract_changed")
-        if bool(event.get("reconciled", False)):
-            kinds.add("workspace_reconciled")
-        return kinds
-
     def _matches(self, trigger: dict[str, object], event: dict[str, object]) -> bool:
-        event_kinds = self._event_kinds(event)
         impact = _mapping(event.get("impact"))
-
-        def intersects(key: str, values: list[str]) -> bool:
-            if not values:
-                return True
-            return bool(set(values).intersection(_list(impact.get(key))))
-
-        trigger_event_kinds = _list(trigger.get("event_kinds"))
-        if trigger_event_kinds and not event_kinds.intersection(trigger_event_kinds):
-            return False
-        if not intersects("change_kinds", _list(trigger.get("change_kinds"))):
-            return False
-        if not intersects("guarantee_domains", _list(trigger.get("guarantee_domains"))):
-            return False
-        if not intersects("risk_flags", _list(trigger.get("risk_flags"))):
-            return False
-        subjects = _list(trigger.get("subject_kinds"))
-        if subjects:
-            node_kinds = {
-                str(_mapping(node).get("kind"))
-                for node in impact.get("nodes", [])
-                if isinstance(node, dict)
-            }
-            if not node_kinds.intersection(subjects):
-                return False
-        contract_identities = _list(trigger.get("contract_identities"))
-        if contract_identities:
-            changed_contracts = {
-                str(_mapping(node).get("identity"))
-                for node in impact.get("nodes", [])
-                if isinstance(node, dict) and _mapping(node).get("kind") == "contract"
-            }
-            if not any(
-                fnmatch.fnmatch(identity, pattern)
-                for identity in changed_contracts
-                for pattern in contract_identities
-            ):
-                return False
-        obligation_identities = _list(trigger.get("obligation_identities"))
-        if obligation_identities:
-            obligations = _mapping(event.get("obligations"))
-            changed_obligations = [
-                *_list(obligations.get("added")),
-                *_list(obligations.get("resolved")),
-                *_list(obligations.get("status_changed")),
-            ]
-            if not any(
-                fnmatch.fnmatch(identity, pattern)
-                for identity in changed_obligations
-                for pattern in obligation_identities
-            ):
-                return False
-        diagnostics = _list(trigger.get("diagnostics"))
-        if diagnostics:
-            observed = [
-                *_list(_mapping(event.get("diagnostics")).get("added")),
-                *_list(_mapping(event.get("diagnostics")).get("resolved")),
-            ]
-            if not any(
-                fnmatch.fnmatch(code, pattern) for code in observed for pattern in diagnostics
-            ):
-                return False
-        return not (
-            bool(trigger.get("security", False))
-            and "security_boundary_changed" not in event_kinds
-            and not bool(event.get("reconciled", False))
-        )
+        diagnostics = _mapping(event.get("diagnostics"))
+        obligations = _mapping(event.get("obligations"))
+        nodes = [node for node in impact.get("nodes", []) if isinstance(node, dict)]
+        state: dict[str, object] = {
+            "event_kinds": _list(trigger.get("event_kinds")),
+            "change_kinds": _list(trigger.get("change_kinds")),
+            "guarantee_domains": _list(trigger.get("guarantee_domains")),
+            "risk_flags": _list(trigger.get("risk_flags")),
+            "subject_kinds": _list(trigger.get("subject_kinds")),
+            "contract_patterns": _list(trigger.get("contract_identities")),
+            "obligation_patterns": _list(trigger.get("obligation_identities")),
+            "diagnostic_patterns": _list(trigger.get("diagnostics")),
+            "diagnostic_added": _list(diagnostics.get("added")),
+            "diagnostic_resolved": _list(diagnostics.get("resolved")),
+            "semantic_subjects": _list(event.get("semantic_subjects")),
+            "obligation_added": _list(obligations.get("added")),
+            "obligation_resolved": _list(obligations.get("resolved")),
+            "obligation_status_changed": _list(obligations.get("status_changed")),
+            "impact_change_kinds": _list(impact.get("change_kinds")),
+            "impact_guarantee_domains": _list(impact.get("guarantee_domains")),
+            "impact_risk_flags": _list(impact.get("risk_flags")),
+            "impact_node_kinds": [str(_mapping(node).get("kind")) for node in nodes],
+            "impact_node_identities": [str(_mapping(node).get("identity")) for node in nodes],
+            "security": bool(trigger.get("security", False)),
+            "reconciled": bool(event.get("reconciled", False)),
+        }
+        matcher = getattr(self._resource_semantics, "continuous_trigger_matches", None)
+        if not callable(matcher):
+            raise ForgeError(
+                "NATIVE_CONTINUOUS_UNAVAILABLE",
+                "continuous trigger routing requires the canonical MNCS Forge core",
+            )
+        return bool(matcher(state))
 
     def _trigger_cost_allowed(self, trigger: dict[str, object], verifier_id: str) -> bool:
         verifier = self.config.verifiers.get(verifier_id)
@@ -1537,13 +1577,18 @@ class ContinuousSupervisor:
         )
 
     def _debounce_ms(self) -> int:
-        values = [int(self.settings.get("debounce_ms", 0) or 0)]
-        values.extend(
+        values = [
             int(trigger.get("debounce_ms", 0) or 0)
             for trigger in self.settings.get("triggers", [])
             if isinstance(trigger, dict)
-        )
-        return min(max(values, default=0), 5000)
+        ]
+        select = getattr(self._resource_semantics, "continuous_debounce_ms", None)
+        if not callable(select):
+            raise ForgeError(
+                "NATIVE_CONTINUOUS_UNAVAILABLE",
+                "continuous debounce selection requires the canonical MNCS Forge core",
+            )
+        return int(select(int(self.settings.get("debounce_ms", 0) or 0), values))
 
     def _current_identity(self, client: LanguageServiceSocket, uri: str) -> str | None:
         try:
@@ -2395,11 +2440,16 @@ class ContinuousSupervisor:
         self.current_source_identity = _mapping(event.get("current")).get("identity") or None
         self.current_cursor = max(self.current_cursor, int(event.get("cursor", 0)))
         triggers = self.settings.get("triggers", [])
-        matched = [
-            trigger
-            for trigger in triggers
-            if isinstance(trigger, dict) and self._matches(trigger, event)
-        ]
+        try:
+            matched = [
+                trigger
+                for trigger in triggers
+                if isinstance(trigger, dict) and self._matches(trigger, event)
+            ]
+        except ForgeError as error:
+            self._attention(event, f"native trigger decision is unknown: {error}")
+            self._record_status("UNKNOWN")
+            return {"generation": generation, "cursor": event.get("cursor"), "status": "UNKNOWN"}
         action_results = []
         repaired = False
         for trigger in matched:
@@ -2580,6 +2630,7 @@ class ContinuousSupervisor:
             "attention_evictions": self.attention_evictions,
             "active_job": active_job,
             "cancellation_requested": self._stop_requested,
+            "last_cancellation": getattr(self, "last_cancellation", None),
             "queue": {
                 "depth": 0,
                 "capacity": 1,
@@ -2658,7 +2709,18 @@ class ContinuousSupervisor:
             )
             self._record_status("UNKNOWN")
         events = [event for event in poll.get("events", []) if isinstance(event, dict)]
-        debounce_ms = self._debounce_ms()
+        try:
+            debounce_ms = self._debounce_ms()
+        except ForgeError as error:
+            self._attention(
+                {"current_generation": self.current_generation},
+                f"native debounce decision is unknown: {error}",
+            )
+            self._record_status("UNKNOWN")
+            result = self.status()
+            result["transport"] = "UNKNOWN"
+            self._write_status(result)
+            return result
         if events and debounce_ms:
             # A debounce window is a bounded event-collection policy, not a
             # semantic guess.  Poll from the original cursor so a rapid edit
@@ -2703,64 +2765,100 @@ class ContinuousSupervisor:
             events_processed = min(_COUNTER_MAX, events_processed + 1)
             result_history.append(_compact_event_result(value))
 
-        for event in events:
-            record_result(self._process_event(client, event))
-        self.current_cursor = max(
-            self.current_cursor, int(poll.get("current_cursor", self.current_cursor))
-        )
-
         def persist_runtime_status() -> None:
             runtime = self.status()
             runtime["events_processed"] = events_processed
             runtime["event_results"] = list(result_history)
             self._write_status(runtime)
 
-        persist_runtime_status()
-        if once:
-            # A Safe Doctor promotion creates a new filesystem generation.
-            # Drain the rebound event in the same bounded invocation so a
-            # one-shot supervisor still proves the candidate's repaired state.
-            for _ in range(8):
-                try:
-                    client.request("refresh_workspace", {})
-                    rebound = self._poll(client, after_cursor=self.current_cursor, max_events=limit)
-                except ForgeError as error:
-                    self._attention({"current_generation": self.current_generation}, str(error))
-                    self._record_status("UNKNOWN")
-                    break
-                rebound_events = [
-                    event for event in rebound.get("events", []) if isinstance(event, dict)
-                ]
-                if not rebound_events:
-                    break
-                for event in rebound_events:
-                    record_result(self._process_event(client, event))
-                self.current_cursor = max(
-                    self.current_cursor, int(rebound.get("current_cursor", self.current_cursor))
-                )
-                persist_runtime_status()
-        else:
-            while not self._stop_requested:
-                time.sleep(interval)
-                if self._stop_requested:
-                    break
-                try:
-                    client.request("refresh_workspace", {})
-                    poll = self._poll(client, after_cursor=self.current_cursor, max_events=limit)
-                except ForgeError as error:
-                    self._attention({"current_generation": self.current_generation}, str(error))
-                    self._record_status("UNKNOWN")
-                    break
-                events = [event for event in poll.get("events", []) if isinstance(event, dict)]
-                if not events:
+        ingress = _ContinuousEventIngress(
+            self,
+            client,
+            after_cursor=int(poll.get("current_cursor", self.current_cursor)),
+            max_events=limit,
+            poll_interval=interval,
+        )
+        ingress_started = bool(events) or not once
+        if ingress_started:
+            ingress.start()
+        try:
+            for event in events:
+                record_result(self._process_event(client, event))
+                self.current_cursor = max(self.current_cursor, int(event.get("cursor", 0)))
+            self.current_cursor = max(
+                self.current_cursor, int(poll.get("current_cursor", self.current_cursor))
+            )
+            persist_runtime_status()
+            if once:
+                # The shared ingress stays attached while a verifier runs.
+                # Drain its bounded queue after each dispatch so edits that
+                # superseded the active generation are handled in this same
+                # one-shot invocation.
+                quiet_intervals = 0
+                for _ in range(8):
+                    if not ingress_started:
+                        break
+                    try:
+                        first = ingress.events.get(timeout=max(interval, 0.05))
+                    except queue.Empty:
+                        quiet_intervals += 1
+                        if quiet_intervals >= 2:
+                            break
+                        continue
+                    quiet_intervals = 0
+                    batch = [first]
+                    while True:
+                        try:
+                            batch.append(ingress.events.get_nowait())
+                        except queue.Empty:
+                            break
+                    for event in batch:
+                        record_result(self._process_event(client, event))
+                        self.current_cursor = max(
+                            self.current_cursor, int(event.get("cursor", 0))
+                        )
                     persist_runtime_status()
-                    continue
-                for event in events:
-                    record_result(self._process_event(client, event))
-                self.current_cursor = max(
-                    self.current_cursor, int(poll.get("current_cursor", self.current_cursor))
-                )
-                persist_runtime_status()
+                    if ingress.failure is not None:
+                        break
+            else:
+                while not self._stop_requested:
+                    if ingress.failure is not None:
+                        self._attention(
+                            {"current_generation": self.current_generation},
+                            ingress.failure,
+                        )
+                        self._record_status("UNKNOWN")
+                        break
+                    try:
+                        first = ingress.events.get(timeout=max(interval, 0.05))
+                    except queue.Empty:
+                        persist_runtime_status()
+                        continue
+                    batch = [first]
+                    while True:
+                        try:
+                            batch.append(ingress.events.get_nowait())
+                        except queue.Empty:
+                            break
+                    for event in batch:
+                        record_result(self._process_event(client, event))
+                        self.current_cursor = max(
+                            self.current_cursor, int(event.get("cursor", 0))
+                        )
+                    persist_runtime_status()
+        except BaseException:
+            if ingress_started:
+                ingress.stop()
+            raise
+        finally:
+            if ingress_started:
+                ingress.stop()
+        if ingress.failure is not None:
+            self._attention(
+                {"current_generation": self.current_generation},
+                ingress.failure,
+            )
+            self._record_status("UNKNOWN")
         result = self.status()
         result["events_processed"] = events_processed
         result["event_results"] = list(result_history)

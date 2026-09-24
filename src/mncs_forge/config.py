@@ -288,6 +288,23 @@ def validate_config_data(data: object) -> dict[str, Any]:
             "CONFIG_INVALID",
             "continuous micro-verifier declarations exceed the per-event capacity of 16",
         )
+    for trigger in triggers:
+        if not isinstance(trigger, dict):
+            continue
+        for field in ("contract_identities", "obligation_identities", "diagnostics"):
+            for pattern in trigger.get(field, []):
+                stars = [index for index, character in enumerate(pattern) if character == "*"]
+                if (
+                    "?" in pattern
+                    or "[" in pattern
+                    or "]" in pattern
+                    or len(stars) > 1
+                    or (stars and stars[0] != len(pattern) - 1)
+                ):
+                    raise ForgeError(
+                        "CONFIG_INVALID",
+                        f"continuous.triggers.{field} supports exact strings or one terminal '*'",
+                    )
     return data
 
 

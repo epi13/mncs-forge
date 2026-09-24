@@ -30,6 +30,7 @@ from typing import Any, TypedDict
 from .errors import ForgeError
 from .execution import run_bounded
 from .ports import Runner
+from .process_effect import ProcessEffectClient
 from .retained_embed import RetainedEmbedError, RetainedEmbedSession
 from .serialization import reject_duplicate_keys
 
@@ -1287,6 +1288,11 @@ class NativeForgeAdapter:
         self._retained_artifact_identity = artifact_identity
         return session
 
+    def process_effect_client(self) -> ProcessEffectClient:
+        """Return a generic process-capability adapter over the retained core."""
+
+        return ProcessEffectClient(self.ensure_session())
+
     def retained_status(self) -> dict[str, object]:
         session = self._retained_session
         return {
@@ -2199,6 +2205,149 @@ class NativeForgeAdapter:
             ),
             duration_seconds=invocation.duration_seconds,
         )
+
+    def continuous_trigger_matches(self, state: Mapping[str, object]) -> bool:
+        """Match one bounded Language Service event against a declared trigger."""
+
+        self.ensure_available()
+        if self._embed_library() is None:
+            raise ForgeError(
+                "NATIVE_EMBED_UNAVAILABLE",
+                "continuous trigger decisions require retained mncs-embed execution",
+            )
+        abi = self.language_owned_abi()
+        record_type = self._abi_record_type(
+            abi, "ContinuousTriggerInput", context="ContinuousTriggerInput"
+        )
+
+        def values(key: str, capacity: int) -> list[str]:
+            raw = state.get(key, [])
+            if not isinstance(raw, list) or len(raw) > capacity:
+                raise ForgeError(
+                    "NATIVE_CONTINUOUS_INPUT",
+                    f"{key} must be a list with at most {capacity} entries",
+                )
+            result: list[str] = []
+            for value in raw:
+                if not isinstance(value, str) or not value:
+                    raise ForgeError(
+                        "NATIVE_CONTINUOUS_INPUT", f"{key} contains an empty or non-text value"
+                    )
+                if len(value.encode("utf-8")) > 1024:
+                    raise ForgeError(
+                        "NATIVE_CONTINUOUS_INPUT", f"{key} contains text over 1024 UTF-8 bytes"
+                    )
+                result.append(value)
+            return result
+
+        def text_sequence(items: list[str]) -> dict[str, object]:
+            encoded = [
+                self._sequence_value(
+                    [{"byte": {"value": byte}} for byte in item.encode("utf-8")]
+                )
+                for item in items
+            ]
+            return self._sequence_value(encoded)
+
+        fields: dict[str, object] = {}
+        for key in (
+            "event_kinds",
+            "change_kinds",
+            "guarantee_domains",
+            "risk_flags",
+            "subject_kinds",
+            "contract_patterns",
+            "obligation_patterns",
+            "diagnostic_patterns",
+            "diagnostic_added",
+            "diagnostic_resolved",
+            "semantic_subjects",
+            "obligation_added",
+            "obligation_resolved",
+            "obligation_status_changed",
+            "impact_change_kinds",
+            "impact_guarantee_domains",
+            "impact_risk_flags",
+            "impact_node_kinds",
+            "impact_node_identities",
+        ):
+            capacity = 64 if key in {
+                "event_kinds",
+                "change_kinds",
+                "guarantee_domains",
+                "risk_flags",
+                "subject_kinds",
+                "contract_patterns",
+                "obligation_patterns",
+                "diagnostic_patterns",
+            } else 256
+            fields[key] = text_sequence(values(key, capacity))
+        for key in ("security", "reconciled"):
+            value = state.get(key)
+            if not isinstance(value, bool):
+                raise ForgeError("NATIVE_CONTINUOUS_INPUT", f"{key} must be a boolean")
+            fields[key] = self._mncs_boolean(value)
+        if len(values("impact_node_kinds", 256)) != len(values("impact_node_identities", 256)):
+            raise ForgeError(
+                "NATIVE_CONTINUOUS_INPUT",
+                "impact node kind and identity arrays must have the same length",
+            )
+        record = self._record_value(record_type, "ContinuousTriggerInput", fields)
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "continuous_trigger_matches"},
+            "arguments": [record],
+            "step_budget": 40_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="continuous-trigger-match.json")
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native continuous trigger decision failed")
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native continuous trigger decision did not return")
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "continuous trigger result arity is invalid")
+        result_type = self._abi_record_type(
+            abi, "ContinuousTriggerDecision", context="ContinuousTriggerDecision"
+        )
+        result_fields = self._record_value_fields(
+            returned[0], result_type, context="continuous trigger decision"
+        )
+        if not self._boolean(result_fields.get("valid"), context="trigger pattern validity"):
+            raise ForgeError(
+                "CONTINUOUS_TRIGGER_PATTERN",
+                "identity/diagnostic patterns support exact strings or one terminal '*' only",
+            )
+        return self._boolean(result_fields.get("matched"), context="trigger match result")
+
+    def continuous_debounce_ms(self, global_value: int, trigger_values: Sequence[int]) -> int:
+        """Select the bounded maximum debounce delay in canonical Forge semantics."""
+
+        if len(trigger_values) > 64:
+            raise ForgeError("NATIVE_CONTINUOUS_INPUT", "at most 64 debounce values are supported")
+        if not isinstance(global_value, int) or isinstance(global_value, bool):
+            raise ForgeError("NATIVE_CONTINUOUS_INPUT", "global debounce value must be an integer")
+        values: list[dict[str, object]] = []
+        for value in trigger_values:
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ForgeError("NATIVE_CONTINUOUS_INPUT", "debounce values must be integers")
+            values.append(self._mncs_integer(value))
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "continuous_debounce_ms"},
+            "arguments": [self._mncs_integer(global_value), self._sequence_value(values)],
+            "step_budget": 10_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="continuous-debounce.json")
+        if not invocation.ok or invocation.payload is None or invocation.payload.get("status") != "returned":
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native debounce selection did not return")
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "continuous debounce result arity is invalid")
+        selected = self._integer(returned[0], context="continuous debounce result")
+        if not 0 <= selected <= 5000:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "continuous debounce result is out of bounds")
+        return selected
 
     def verification_queue_admit(self, total_count: int) -> tuple[int, int]:
         """Return the native bounded per-event verifier selection counts."""
