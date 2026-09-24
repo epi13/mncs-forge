@@ -1,0 +1,91 @@
+mncs 0.18;
+module mncs.forge.continuous_contract_tests;
+
+use mncs.forge.core.v1 as core;
+use mncs.test.assertions;
+use mncs.test.suite;
+
+fn empty_trigger_input() -> (result: core.ContinuousTriggerInput) {
+    return core.ContinuousTriggerInput {
+        event_kinds: [],
+        change_kinds: [],
+        guarantee_domains: [],
+        risk_flags: [],
+        subject_kinds: [],
+        contract_patterns: [],
+        obligation_patterns: [],
+        diagnostic_patterns: [],
+        diagnostic_added: [],
+        diagnostic_resolved: [],
+        semantic_subjects: [],
+        obligation_added: [],
+        obligation_resolved: [],
+        obligation_status_changed: [],
+        impact_change_kinds: [],
+        impact_guarantee_domains: [],
+        impact_risk_flags: [],
+        impact_node_kinds: [],
+        impact_node_identities: [],
+        security: false,
+        reconciled: false
+    };
+}
+
+test trigger_matches_typed_contract_and_evidence_facts() -> (result: TestResult) {
+    let base: core.ContinuousTriggerInput = empty_trigger_input();
+    let input: core.ContinuousTriggerInput = core.ContinuousTriggerInput {
+        ..base,
+        event_kinds: [[115, 111, 117, 114, 99, 101, 95, 99, 104, 97, 110, 103, 101, 100]],
+        change_kinds: [[112, 114, 105, 118, 97, 116, 101, 95, 105, 109, 112, 108, 101, 109, 101, 110, 116]],
+        guarantee_domains: [[114, 117, 110, 116, 105, 109, 101]],
+        risk_flags: [[101, 102, 102, 101, 99, 116, 95, 115, 101, 109, 97, 110, 116, 105, 99, 115]],
+        subject_kinds: [[99, 111, 110, 116, 114, 97, 99, 116]],
+        contract_patterns: [[99, 111, 110, 116, 114, 97, 99, 116, 58, 112, 114, 111, 99, 101, 115, 115, 58, 42]],
+        obligation_patterns: [[77, 78, 67, 83, 45, 84, 79, 79, 76, 73, 78, 71, 45, 42]],
+        diagnostic_patterns: [[69, 45, 42]],
+        diagnostic_added: [[69, 45, 52, 50]],
+        semantic_subjects: [[115, 117, 98, 106, 101, 99, 116]],
+        obligation_added: [[77, 78, 67, 83, 45, 84, 79, 79, 76, 73, 78, 71, 45, 49]],
+        impact_change_kinds: [[112, 114, 105, 118, 97, 116, 101, 95, 105, 109, 112, 108, 101, 109, 101, 110, 116]],
+        impact_guarantee_domains: [[114, 117, 110, 116, 105, 109, 101]],
+        impact_risk_flags: [[101, 102, 102, 101, 99, 116, 95, 115, 101, 109, 97, 110, 116, 105, 99, 115]],
+        impact_node_kinds: [[99, 111, 110, 116, 114, 97, 99, 116]],
+        impact_node_identities: [[99, 111, 110, 116, 114, 97, 99, 116, 58, 112, 114, 111, 99, 101, 115, 115, 58, 118, 49]],
+        security: true
+    };
+    let decision: core.ContinuousTriggerDecision = core.continuous_trigger_matches(input);
+    return from_assertion(equals_bool(true, decision.valid && decision.matched, 7201));
+}
+
+test trigger_rejects_mismatched_guarantee_domain() -> (result: TestResult) {
+    let base: core.ContinuousTriggerInput = empty_trigger_input();
+    let input: core.ContinuousTriggerInput = core.ContinuousTriggerInput {
+        ..base,
+        event_kinds: [[115, 111, 117, 114, 99, 101, 95, 99, 104, 97, 110, 103, 101, 100]],
+        change_kinds: [[112, 114, 105, 118, 97, 116, 101, 95, 105, 109, 112, 108, 101, 109, 101, 110, 116]],
+        guarantee_domains: [[114, 117, 110, 116, 105, 109, 101]],
+        impact_change_kinds: [[112, 114, 105, 118, 97, 116, 101, 95, 105, 109, 112, 108, 101, 109, 101, 110, 116]],
+        impact_guarantee_domains: [[99, 111, 109, 112, 105, 108, 101, 114]]
+    };
+    let decision: core.ContinuousTriggerDecision = core.continuous_trigger_matches(input);
+    return from_assertion(equals_bool(true, decision.valid && !decision.matched, 7202));
+}
+
+test reconciled_event_satisfies_security_trigger() -> (result: TestResult) {
+    let base: core.ContinuousTriggerInput = empty_trigger_input();
+    let input: core.ContinuousTriggerInput = core.ContinuousTriggerInput {
+        ..base,
+        event_kinds: [[119, 111, 114, 107, 115, 112, 97, 99, 101, 95, 114, 101, 99, 111, 110, 99, 105, 108, 101, 100]],
+        security: true,
+        reconciled: true
+    };
+    let decision: core.ContinuousTriggerDecision = core.continuous_trigger_matches(input);
+    return from_assertion(equals_bool(true, decision.valid && decision.matched, 7203));
+}
+
+test debounce_uses_maximum_and_enforces_cap() -> (result: TestResult) {
+    let selected: i64 = core.continuous_debounce_ms(100, [50, 200, -10]);
+    let capped: i64 = core.continuous_debounce_ms(6000, [10]);
+    let empty: i64 = core.continuous_debounce_ms(0, [-10]);
+    return from_assertion(equals_bool(true, selected == 200 && capped == 5000 && empty == 0, 7204));
+}

@@ -205,11 +205,61 @@ class LocalProcessRunner:
             requested = client.cancel(process)
             facts["cancel_requested_at"] = requested_at
             facts["cancel_request_observation"] = requested
-            reaped = client.reap(process)
+            tree_empty_at: float | None = None
+            launcher_reaped_at: float | None = None
+            cleanup_complete_at: float | None = None
+            reap_deadline = time.monotonic() + 5.0
+            while True:
+                reaped = client.observe(process)
+                observed_at = time.monotonic()
+                if (
+                    tree_empty_at is None
+                    and reaped.get("has_tree_empty") is True
+                    and reaped.get("tree_empty") is True
+                ):
+                    tree_empty_at = observed_at
+                if launcher_reaped_at is None and reaped.get("launcher_reaped") is True:
+                    launcher_reaped_at = observed_at
+                if (
+                    reaped.get("has_cleanup_result") is True
+                    and reaped.get("cleanup_complete") is True
+                ):
+                    cleanup_complete_at = observed_at
+                    break
+                if observed_at >= reap_deadline:
+                    reaped = client.reap(process)
+                    observed_at = time.monotonic()
+                    if (
+                        tree_empty_at is None
+                        and reaped.get("has_tree_empty") is True
+                        and reaped.get("tree_empty") is True
+                    ):
+                        tree_empty_at = observed_at
+                    if launcher_reaped_at is None and reaped.get("launcher_reaped") is True:
+                        launcher_reaped_at = observed_at
+                    if (
+                        reaped.get("has_cleanup_result") is True
+                        and reaped.get("cleanup_complete") is True
+                    ):
+                        cleanup_complete_at = observed_at
+                    break
+                time.sleep(0.005)
             completed_at = time.monotonic()
             facts["reap_observation"] = reaped
             facts["cancel_completed_at"] = completed_at
             facts["cancel_request_to_reaped_seconds"] = round(completed_at - requested_at, 6)
+            if tree_empty_at is not None:
+                facts["cancel_request_to_tree_empty_observed_seconds"] = round(
+                    tree_empty_at - requested_at, 6
+                )
+            if launcher_reaped_at is not None:
+                facts["cancel_request_to_launcher_reaped_observed_seconds"] = round(
+                    launcher_reaped_at - requested_at, 6
+                )
+            if cleanup_complete_at is not None:
+                facts["cancel_request_to_cleanup_complete_observed_seconds"] = round(
+                    cleanup_complete_at - requested_at, 6
+                )
             cleanup_complete = reaped.get("cleanup_complete") is True
             cancellation_complete = (
                 reaped.get("status") == "Cancelled"
@@ -223,6 +273,15 @@ class LocalProcessRunner:
                 "handle_found": True,
                 "decision_to_cancel_request_seconds": round(requested_at - decision_at, 6),
                 "cancel_request_to_reaped_seconds": facts["cancel_request_to_reaped_seconds"],
+                "cancel_request_to_tree_empty_observed_seconds": facts.get(
+                    "cancel_request_to_tree_empty_observed_seconds"
+                ),
+                "cancel_request_to_launcher_reaped_observed_seconds": facts.get(
+                    "cancel_request_to_launcher_reaped_observed_seconds"
+                ),
+                "cancel_request_to_cleanup_complete_observed_seconds": facts.get(
+                    "cancel_request_to_cleanup_complete_observed_seconds"
+                ),
                 "cancellation_complete": cancellation_complete,
                 "tree_empty": reaped.get("tree_empty"),
                 "launcher_reaped": reaped.get("launcher_reaped"),

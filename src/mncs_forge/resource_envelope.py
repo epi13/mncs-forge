@@ -1169,16 +1169,44 @@ class SystemdCgroupEnvelope:
 
     def _slice_value(self, filename: str, group: str | None = None) -> int | None:
         selected_group = group if group is not None else self._slice_cgroup_group
-        if not selected_group:
-            return None
-        try:
-            return int(
-                (self._cgroup_root / selected_group.lstrip("/") / filename)
-                .read_text(encoding="ascii")
-                .strip()
-            )
-        except (OSError, ValueError):
-            return None
+        if selected_group:
+            try:
+                return int(
+                    (self._cgroup_root / selected_group.lstrip("/") / filename)
+                    .read_text(encoding="ascii")
+                    .strip()
+                )
+            except (OSError, ValueError):
+                pass
+
+        # A configured systemd slice can be loaded and have all limits
+        # verified while remaining inactive. In that state systemd exposes
+        # ControlGroup="" and there is no cgroup directory to read. An empty,
+        # inactive slice proves zero current tasks and memory; treating it as
+        # UNKNOWN would prevent the first bounded Forge operation from
+        # bootstrapping the Store that owns later evidence.
+        properties = self._unit_properties(SLICE_NAME)
+        current_group = properties.get("ControlGroup") or None
+        if current_group:
+            with self._active_lock:
+                self._slice_cgroup_group = current_group
+            try:
+                return int(
+                    (self._cgroup_root / current_group.lstrip("/") / filename)
+                    .read_text(encoding="ascii")
+                    .strip()
+                )
+            except (OSError, ValueError):
+                return None
+        if (
+            properties.get("LoadState") == "loaded"
+            and properties.get("ActiveState") == "inactive"
+        ):
+            with self._active_lock:
+                self._slice_cgroup_group = None
+            if filename in {"pids.current", "memory.current"}:
+                return 0
+        return None
 
 
 def _process_memory() -> dict[str, int]:

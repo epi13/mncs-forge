@@ -7,7 +7,11 @@ import pytest
 
 from mncs_forge import cli
 from mncs_forge.errors import ForgeError
-from mncs_forge.workspace_binding import resolve_workspace_config
+from mncs_forge.workspace_binding import (
+    _MAX_CONFIG_CANDIDATES,
+    _MAX_SEARCH_DEPTH,
+    resolve_workspace_config,
+)
 
 
 EXAMPLE_CONFIG = Path(__file__).parents[1] / "examples" / "minimal" / "mncs-forge.toml"
@@ -60,6 +64,61 @@ def test_cli_resolves_workspace_before_loading_current_directory_config(
     assert observed == [workspace]
 
 
+@pytest.mark.parametrize("action", ["start", "status", "stop"])
+def test_cli_lifecycle_actions_share_explicit_workspace_resolution(
+    action: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace(tmp_path / "workspace-a", nested=True)
+    neutral = tmp_path / "neutral"
+    neutral.mkdir()
+    monkeypatch.chdir(neutral)
+    observed: list[tuple[Path, str]] = []
+
+    def lifecycle(config, requested_action: str, *, mode: str) -> dict[str, object]:
+        assert mode == "development"
+        observed.append((config.root, requested_action))
+        return {"workspace_root": str(config.root), "action": requested_action}
+
+    monkeypatch.setattr(cli, "continuous_lifecycle", lifecycle)
+    code, value = cli.run(["continuous", action, str(workspace)])
+
+    assert code == 0
+    assert value == {"workspace_root": str(workspace), "action": action}
+    assert observed == [(workspace, action)]
+
+
+def test_explicit_workspace_does_not_fall_back_to_neutral_cwd_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace-without-config"
+    workspace.mkdir()
+    neutral = tmp_path / "neutral"
+    _workspace(neutral)
+    monkeypatch.chdir(neutral)
+
+    code, value = cli.run(["continuous", "enter", str(workspace)])
+
+    assert code == 2
+    assert value["error"]["code"] == "WORKSPACE_CONFIG_NOT_FOUND"
+
+
+def test_explicit_config_must_match_requested_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace(tmp_path / "workspace-a")
+    other = _workspace(tmp_path / "workspace-b")
+    neutral = tmp_path / "neutral"
+    neutral.mkdir()
+    monkeypatch.chdir(neutral)
+
+    code, value = cli.run(
+        ["--config", str(other / "mncs-forge.toml"), "continuous", "status", str(workspace)]
+    )
+
+    assert code == 2
+    assert value["error"]["code"] == "WORKSPACE_BINDING_MISMATCH"
+
+
 def test_workspace_binding_fails_closed_for_mismatch_and_ambiguity(
     tmp_path: Path,
 ) -> None:
@@ -78,3 +137,27 @@ def test_workspace_binding_fails_closed_for_mismatch_and_ambiguity(
     with pytest.raises(ForgeError, match="multiple Forge configurations") as ambiguous:
         resolve_workspace_config(workspace_a)
     assert ambiguous.value.code == "WORKSPACE_BINDING_AMBIGUOUS"
+
+
+def test_workspace_configuration_discovery_fails_closed_when_bounded_scan_is_exceeded(
+    tmp_path: Path,
+) -> None:
+    deep = tmp_path / "deep-workspace"
+    cursor = deep
+    cursor.mkdir()
+    for index in range(_MAX_SEARCH_DEPTH + 1):
+        cursor = cursor / f"level-{index}"
+        cursor.mkdir()
+    with pytest.raises(ForgeError, match="maximum depth") as depth:
+        resolve_workspace_config(deep)
+    assert depth.value.code == "WORKSPACE_RESOLUTION_LIMIT"
+
+    broad = tmp_path / "broad-workspace"
+    broad.mkdir()
+    for index in range(_MAX_CONFIG_CANDIDATES + 1):
+        candidate = broad / f"project-{index}"
+        candidate.mkdir()
+        (candidate / "mncs-forge.toml").write_text("", encoding="utf-8")
+    with pytest.raises(ForgeError, match="more than") as candidates:
+        resolve_workspace_config(broad)
+    assert candidates.value.code == "WORKSPACE_RESOLUTION_LIMIT"

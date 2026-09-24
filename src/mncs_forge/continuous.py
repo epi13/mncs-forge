@@ -1151,6 +1151,9 @@ class ContinuousSupervisor:
                         "cancellation_event_to_decision_seconds",
                         "cancellation_native_transition_seconds",
                         "cancellation_decision_to_request_seconds",
+                        "cancellation_request_to_tree_empty_observed_seconds",
+                        "cancellation_request_to_launcher_reaped_observed_seconds",
+                        "cancellation_request_to_cleanup_complete_observed_seconds",
                         "cancellation_request_to_reaped_seconds",
                         "cancellation_observation",
                     )
@@ -1218,6 +1221,22 @@ class ContinuousSupervisor:
                 job["cancellation_request_to_reaped_seconds"] = cancellation[
                     "cancel_request_to_reaped_seconds"
                 ]
+            for source, target in (
+                (
+                    "cancel_request_to_tree_empty_observed_seconds",
+                    "cancellation_request_to_tree_empty_observed_seconds",
+                ),
+                (
+                    "cancel_request_to_launcher_reaped_observed_seconds",
+                    "cancellation_request_to_launcher_reaped_observed_seconds",
+                ),
+                (
+                    "cancel_request_to_cleanup_complete_observed_seconds",
+                    "cancellation_request_to_cleanup_complete_observed_seconds",
+                ),
+            ):
+                if cancellation.get(source) is not None:
+                    job[target] = cancellation[source]
 
     def _attention(
         self, event: dict[str, object], reason: str, *, tier: str = "incremental"

@@ -388,8 +388,11 @@ def test_superseding_generation_cancels_generic_process_tree(tmp_path: Path) -> 
     assert cancellation["cancellation_generation"] == 8
     assert cancellation["cancellation_event_to_decision_seconds"] < 0.5
     assert cancellation["cancellation_request_to_reaped_seconds"] < 1.5
+    assert cancellation["cancellation_request_to_tree_empty_observed_seconds"] < 1.5
+    assert cancellation["cancellation_request_to_launcher_reaped_observed_seconds"] < 1.5
+    assert cancellation["cancellation_request_to_cleanup_complete_observed_seconds"] < 1.5
     assert server.published_monotonic is not None
-    assert time.monotonic() - server.published_monotonic < 1.5
+    dispatch_latency: list[float] = []
     assert supervisor.current_generation == 8
     next_generation_event = ingress.events.get_nowait()
     assert next_generation_event["current_generation"] == 8
@@ -416,14 +419,70 @@ def test_superseding_generation_cancels_generic_process_tree(tmp_path: Path) -> 
     assert transition.disposition == "DiscardStale"
     assert transition.evidence_status == "Unknown"
 
-    supervisor.settings = {"candidate_identity": "candidate:test", "triggers": []}
+    verifier_dispatches: list[dict[str, object]] = []
+
+    def dispatch_next_generation(
+        verifier_id: str,
+        *,
+        candidate_identity: str | None = None,
+        changed_paths: list[str] | None = None,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        assert server.published_monotonic is not None
+        dispatch_latency.append(time.monotonic() - server.published_monotonic)
+        verifier_dispatches.append(
+            {
+                "verifier_id": verifier_id,
+                "candidate_identity": candidate_identity,
+                "changed_paths": changed_paths,
+            }
+        )
+        return {"status": "PASS", "dependency_envelope": {"complete": True}}
+
+    supervisor.settings = {
+        "candidate_identity": "candidate:test",
+        "triggers": [
+            {
+                "id": "resume-generation-8",
+                "action": "micro_verifier",
+                "maximum_cost": "low",
+                "event_kinds": ["source_changed"],
+                "verifier_ids": ["verifier:test"],
+            }
+        ],
+    }
     supervisor.current_source_identity = None
     supervisor.current_cursor = 0
+    supervisor.config = SimpleNamespace(
+        state_dir=None,
+        root=Path("/"),
+        verifiers={"verifier:test": SimpleNamespace(cost="low")},
+    )
+    supervisor.recomputed_evidence = 0
+    supervisor.reused_evidence = 0
+    supervisor.deferred_jobs = 0
+    supervisor.forge = SimpleNamespace(
+        _executor=runner,
+        verifier_run=dispatch_next_generation,
+    )
+    supervisor._reusable_result = lambda *_args: None
     next_generation = supervisor._process_event(
         SimpleNamespace(request=lambda *_args: {"generation": 8}),
         next_generation_event,
     )
     assert next_generation["status"] == "PASS"
+    assert len(verifier_dispatches) == 1
+    assert verifier_dispatches[0]["verifier_id"] == "verifier:test"
+    assert dispatch_latency[0] < 1.5
+    print(
+        "supersession latency (ms): "
+        f"event-to-native-decision={cancellation['cancellation_event_to_decision_seconds'] * 1000:.3f}, "
+        f"decision-to-cancel-request={cancellation['cancellation_decision_to_request_seconds'] * 1000:.3f}, "
+        f"request-to-tree-empty-observed={cancellation['cancellation_request_to_tree_empty_observed_seconds'] * 1000:.3f}, "
+        f"request-to-launcher-reaped-observed={cancellation['cancellation_request_to_launcher_reaped_observed_seconds'] * 1000:.3f}, "
+        f"request-to-cleanup-complete={cancellation['cancellation_request_to_cleanup_complete_observed_seconds'] * 1000:.3f}, "
+        f"generation-8-arrival-to-verifier-dispatch={dispatch_latency[0] * 1000:.3f}"
+    )
 
 
 def test_reconciled_security_trigger_runs_bounded_verifier_and_reuses_evidence(

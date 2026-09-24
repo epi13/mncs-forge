@@ -557,6 +557,9 @@ class NativeAbi:
 
 _NATIVE_CACHE_MAX_ENTRIES = 64
 _NATIVE_CACHE_MAX_BYTES = 2 * 1024 * 1024
+# The complete source-owned Forge ABI is about 2.5 MiB after typed projection.
+# Keep its exact-identity cache bounded while allowing one warm ABI entry.
+_NATIVE_ABI_CACHE_MAX_BYTES = 4 * 1024 * 1024
 _COUNTER_MAX = (1 << 63) - 1
 
 
@@ -731,7 +734,13 @@ class NativeForgeAdapter:
         self._retained_call_mean_seconds = 0.0
         self._retained_call_max_seconds = 0.0
         self._native_caches = {
-            name: BoundedNativeCache()
+            name: BoundedNativeCache(
+                max_bytes=(
+                    _NATIVE_ABI_CACHE_MAX_BYTES
+                    if name == "abi"
+                    else _NATIVE_CACHE_MAX_BYTES
+                )
+            )
             for name in (
                 "lifecycle",
                 "lifecycle_projection",

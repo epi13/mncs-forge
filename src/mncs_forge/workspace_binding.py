@@ -21,24 +21,71 @@ _SKIP_DIRECTORIES = {
     "target",
     "vendor",
 }
-_MAX_CONFIG_CANDIDATES = 4096
+_MAX_SEARCHED_DIRECTORIES = 4096
+_MAX_SEARCH_DEPTH = 8
+_MAX_CONFIG_CANDIDATES = 64
 
 
 def _candidate_configs(workspace: Path) -> list[Path]:
+    """Perform bounded bootstrap discovery for nested Forge project metadata.
+
+    The mature environment-entry path should resolve workspace identity from
+    authoritative project/family metadata. Until that mapping is available,
+    this no-follow walk supports existing nested integration configs while
+    failing closed on broad, deep, or unreadable workspaces.
+    """
+
     found: list[Path] = []
-    for current, directories, filenames in os.walk(workspace, followlinks=False):
+    visited = 0
+
+    def fail_on_walk_error(error: OSError) -> None:
+        location = error.filename or workspace
+        raise ForgeError(
+            "WORKSPACE_SCAN_UNKNOWN",
+            f"cannot establish workspace configuration candidates below {location}: {error.strerror or error}",
+            details={"workspace": str(workspace), "path": str(location)},
+        ) from error
+
+    for current, directories, filenames in os.walk(
+        workspace,
+        followlinks=False,
+        onerror=fail_on_walk_error,
+    ):
+        visited += 1
+        if visited > _MAX_SEARCHED_DIRECTORIES:
+            raise ForgeError(
+                "WORKSPACE_RESOLUTION_LIMIT",
+                f"workspace scan exceeds {_MAX_SEARCHED_DIRECTORIES} directories",
+                details={"workspace": str(workspace), "maximum_directories": _MAX_SEARCHED_DIRECTORIES},
+            )
+        current_path = Path(current)
         directories[:] = sorted(
             name
             for name in directories
             if name not in _SKIP_DIRECTORIES
-            and not (Path(current) / name).is_symlink()
+            and not (current_path / name).is_symlink()
         )
+        depth = len(current_path.relative_to(workspace).parts)
+        if depth >= _MAX_SEARCH_DEPTH and directories:
+            raise ForgeError(
+                "WORKSPACE_RESOLUTION_LIMIT",
+                f"workspace scan exceeds maximum depth {_MAX_SEARCH_DEPTH}",
+                details={"workspace": str(workspace), "maximum_depth": _MAX_SEARCH_DEPTH},
+            )
         if "mncs-forge.toml" in filenames:
-            found.append(Path(current) / "mncs-forge.toml")
+            candidate = current_path / "mncs-forge.toml"
+            if candidate.is_symlink():
+                raise ForgeError(
+                    "WORKSPACE_CONFIG_INVALID",
+                    f"workspace Forge configuration must not be a symlink: {candidate}",
+                    details={"config_path": str(candidate)},
+                )
+            found.append(candidate)
             if len(found) > _MAX_CONFIG_CANDIDATES:
                 raise ForgeError(
                     "WORKSPACE_RESOLUTION_LIMIT",
                     f"workspace contains more than {_MAX_CONFIG_CANDIDATES} Forge configurations",
+                    details={"workspace": str(workspace), "maximum_configs": _MAX_CONFIG_CANDIDATES},
                 )
     return found
 
