@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,7 @@ class RetainedEmbedSession:
         self.library_path = library_path.resolve()
         self._library_handle = self._library(self.library_path)
         self._handle: int | None = None
+        self._call_lock = threading.RLock()
         self.closed = False
         self.call_count = 0
         self.call_seconds: list[float] = []
@@ -103,9 +105,7 @@ class RetainedEmbedSession:
         step_budget: int,
         grants: list[dict[str, object]] | None = None,
     ) -> tuple[dict[str, object], float]:
-        if self.closed or self._handle is None:
-            raise RetainedEmbedError("retained mncs-embed session is closed")
-        request = [
+        return self._call_payload(
             {
                 "module": module,
                 "function": function,
@@ -113,12 +113,43 @@ class RetainedEmbedSession:
                 "grants": list(grants or []),
                 "step_budget": step_budget,
             }
-        ]
-        started = time.perf_counter()
-        response = self._library_handle.mncs_session_call_batch(
-            self._handle,
-            json.dumps(request, separators=(",", ":")).encode("utf-8"),
         )
+
+    def call_typed(
+        self,
+        module: str,
+        function: str,
+        typed_arguments: list[dict[str, object]],
+        *,
+        step_budget: int,
+        grants: list[dict[str, object]] | None = None,
+    ) -> tuple[dict[str, object], float]:
+        """Call a retained entrypoint using language-resolved nominal names."""
+
+        return self._call_payload(
+            {
+                "module": module,
+                "function": function,
+                "typed_args": typed_arguments,
+                "grants": list(grants or []),
+                "step_budget": step_budget,
+            }
+        )
+
+    def _call_payload(
+        self, call: dict[str, object]
+    ) -> tuple[dict[str, object], float]:
+        if self.closed or self._handle is None:
+            raise RetainedEmbedError("retained mncs-embed session is closed")
+        request = [call]
+        started = time.perf_counter()
+        with self._call_lock:
+            if self.closed or self._handle is None:
+                raise RetainedEmbedError("retained mncs-embed session is closed")
+            response = self._library_handle.mncs_session_call_batch(
+                self._handle,
+                json.dumps(request, separators=(",", ":")).encode("utf-8"),
+            )
         elapsed = time.perf_counter() - started
         value = self._response_json(response, fallback="mncs-embed retained call failed")
         if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
@@ -130,10 +161,11 @@ class RetainedEmbedSession:
     def close(self) -> None:
         if self.closed:
             return
-        if self._handle is not None:
-            self._library_handle.mncs_session_close(self._handle)
-            self._handle = None
-        self.closed = True
+        with self._call_lock:
+            if self._handle is not None:
+                self._library_handle.mncs_session_close(self._handle)
+                self._handle = None
+            self.closed = True
 
     def __enter__(self) -> RetainedEmbedSession:
         return self

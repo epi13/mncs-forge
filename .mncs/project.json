@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-forge",
-  "revision": 6,
+  "revision": 7,
   "manifest_location": "in-repository",
   "authority": {
     "note": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority."
@@ -27,7 +27,10 @@
   },
   "contracts": {
     "provides": [
-      {"contract": "assurance-workflow", "version": "1", "kind": "candidate-evidence-workflow", "stability": "experimental", "fingerprint_sources": ["src/", "schemas/"]}
+      {"contract": "assurance-workflow", "version": "1", "kind": "candidate-evidence-workflow", "stability": "experimental", "fingerprint_sources": ["src/", "schemas/"]},
+      {"contract": "continuous-trigger-routing", "version": "1", "kind": "native-event-routing-policy", "stability": "experimental", "fingerprint_sources": ["src/mncs_forge/resources/native/forge/core.mncs"]},
+      {"contract": "continuous-process-supervision", "version": "1", "kind": "generic-process-effect-supervision", "stability": "experimental", "fingerprint_sources": ["src/mncs_forge/process_effect.py", "src/mncs_forge/continuous.py", "src/mncs_forge/adapters.py"]},
+      {"contract": "workspace-first-continuous-entry", "version": "1", "kind": "workspace-bound-continuous-entry", "stability": "experimental", "fingerprint_sources": ["src/mncs_forge/workspace_binding.py", "src/mncs_forge/continuous.py"]}
     ],
     "consumes": [
       {"contract": "ravel.verification-plan", "envelope": {"op": "any"}, "required": true},
@@ -45,8 +48,11 @@
     ],
     "tests": [
       {"test": "forge-assurance-regressions", "covers": ["assurance-workflow"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest", "tests", "-q", "--ignore=tests/test_mncs_assurance.py"]}},
-      {"test": "forge-assurance-differential-oracle", "covers": ["assurance-workflow"], "obligation": "family-integration", "command": {"argv": ["python3", "-m", "pytest", "tests/test_mncs_assurance.py", "-q"]}}
-      ,{"test": "forge-store-persistence", "covers": ["mncs-store.persistent-object", "mncs-store.scalable-content", "mncs-store.durable-publication", "mncs-store.provenance", "mncs-store.typed-relations", "mncs-store.commit-feed"], "obligation": "family-integration", "command": {"argv": ["python3", "-m", "pytest", "tests/test_store_backed_record_store.py", "-q"]}}
+      {"test": "forge-assurance-differential-oracle", "covers": ["assurance-workflow"], "obligation": "family-integration", "command": {"argv": ["python3", "-m", "pytest", "tests/test_mncs_assurance.py", "-q"]}},
+      {"test": "forge-store-persistence", "covers": ["mncs-store.persistent-object", "mncs-store.scalable-content", "mncs-store.durable-publication", "mncs-store.provenance", "mncs-store.typed-relations", "mncs-store.commit-feed"], "obligation": "family-integration", "command": {"argv": ["python3", "-m", "pytest", "tests/test_store_backed_record_store.py", "-q"]}},
+      {"test": "forge-continuous-process-supervision", "covers": ["continuous-process-supervision"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest", "tests/test_continuous.py::test_superseding_generation_cancels_generic_process_tree", "-q"]}},
+      {"test": "forge-continuous-trigger-routing", "covers": ["continuous-trigger-routing"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest", "tests/test_continuous.py::test_trigger_matching_is_explicit_and_compact", "tests/test_continuous.py::test_debounce_policy_is_bounded_and_trigger_declared", "-q"]}},
+      {"test": "forge-workspace-first-continuous-entry", "covers": ["workspace-first-continuous-entry"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest", "tests/test_workspace_binding.py", "-q"]}}
     ]
   }
 }

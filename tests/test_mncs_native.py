@@ -128,6 +128,12 @@ def test_language_owned_abi_metadata_is_available_to_external_consumers() -> Non
         for value in abi.composites.values()
         if isinstance(value, dict)
     )
+    cached = adapter.language_owned_abi()
+    assert cached is abi
+    stats = adapter.cache_status()["abi"]
+    assert stats["entries"] == 1
+    assert stats["retained_bytes_estimate"] <= stats["byte_capacity"] == 4 * 1024 * 1024
+    assert stats["hits"] >= 1
 
 
 def test_native_canonical_material_matches_host_materialization() -> None:

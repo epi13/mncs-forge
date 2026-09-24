@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.verification-obligation-inventory/v1",
   "repository": "mncs-forge",
-  "revision": 1,
+  "revision": 2,
   "obligations": [
     {
       "identity": "mncs-forge.assurance.native-state-machine",
@@ -47,6 +47,39 @@
         "replacement": "mncs-forge.assurance.native-state-machine",
         "retain_as": "scheduled"
       }
+    },
+    {
+      "identity": "mncs-forge.continuous-native-trigger-routing",
+      "title": "Native continuous trigger routing and debounce policy select only declared current work",
+      "guarantee_domain": "semantic",
+      "evidence_role": "canonical_regression",
+      "lifecycle": "permanent",
+      "scope": "local",
+      "subjects": [
+        "mncs:0.2:function:mncs.forge.core.v1::continuous_trigger_matches",
+        "mncs:0.2:function:mncs.forge.core.v1::continuous_debounce_ms"
+      ],
+      "invalidation_dependencies": [
+        "src/mncs_forge/resources/native/forge/core.mncs",
+        "tests/native/continuous_contract_tests.mncs"
+      ],
+      "executor": {
+        "provider": "mncs-test",
+        "kind": "native_first_class_test",
+        "entrypoint": "mncs test tests/native/continuous_contract_tests.mncs",
+        "test_case_identities": [
+          "mncs:0.2:test-case:mncs.forge.continuous_contract_tests::debounce_uses_maximum_and_enforces_cap::2e670125c46f17b43da2243996f8cb407034b17dc5533039c3843c65ff733ba6",
+          "mncs:0.2:test-case:mncs.forge.continuous_contract_tests::reconciled_event_satisfies_security_trigger::74546f5f349ca6d1bbd974bce5b57eca65387a90c72879a4ab71f9ba5b50bbf0",
+          "mncs:0.2:test-case:mncs.forge.continuous_contract_tests::trigger_matches_typed_contract_and_evidence_facts::2117712bfb3824eeeed85b872bf760a927fc302ab2c81d138238ead893402208",
+          "mncs:0.2:test-case:mncs.forge.continuous_contract_tests::trigger_rejects_mismatched_guarantee_domain::8d86c86cafc36a776e13454442aed8e3e8f83499c553191a01c4dcc8ea5a2d7c"
+        ]
+      },
+      "evidence_identity": {
+        "subject_fields": ["subject_fingerprint"],
+        "definition_fields": ["obligation_identity"],
+        "execution_fields": ["test_case_identity", "verifier_identity"]
+      },
+      "notes": "MNCS-native test identities are selected through the compiler impact graph. Python integration coverage for event supersession, config entry, trigger facts, and debounce remains declared separately in .mncs/project.json."
     }
   ]
 }

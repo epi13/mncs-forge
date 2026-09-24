@@ -8,6 +8,9 @@ import os
 import platform
 import shutil
 import tempfile
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,6 +22,7 @@ from .execution_observations import ExecutionObservationBuilder
 from .identity import content_identity, file_identity, identity_map
 from .paths import is_within, resolve_contained, validate_relative_path
 from .ports import ExecutionObservation, ExecutionResult, ExecutionSession, RunnerCapabilities
+from .process_effect import OwnedProcess, ProcessEffectClient
 from .resource_envelope import ResourceSemantics, SystemdCgroupEnvelope
 from .serialization import local_json_identity, read_json
 
@@ -31,8 +35,21 @@ class LocalProcessRunner:
 
     runner_identity = "runner.local-process-v1"
 
-    def __init__(self, resource_envelope: SystemdCgroupEnvelope | None = None) -> None:
+    def __init__(
+        self,
+        resource_envelope: SystemdCgroupEnvelope | None = None,
+        *,
+        process_capability: object | None = None,
+    ) -> None:
         self.resource_envelope = resource_envelope
+        self.process_capability = process_capability
+        self._job_context: dict[str, object] = {}
+        self._owned_lock = threading.RLock()
+        self._owned_changed = threading.Condition(self._owned_lock)
+        self._owned: dict[int, tuple[ProcessEffectClient, OwnedProcess, dict[str, object]]] = {}
+        self._launching: set[int] = set()
+        self._cancellation_waiters: set[int] = set()
+        self._cancelled_generations: OrderedDict[int, None] = OrderedDict()
 
     def execute(
         self,
@@ -111,6 +128,17 @@ class LocalProcessRunner:
             network_policy="ambient-process-network",
             same_operator=True,
         )
+        if self.process_capability is not None:
+            return self._run_process_effect(
+                argv,
+                cwd=cwd,
+                timeout=timeout,
+                output_cap=output_cap,
+                stderr_cap=stderr_cap or output_cap,
+                environment=environment,
+                stdin=stdin,
+                builder=builder,
+            )
         try:
             result = run_bounded(
                 argv,
@@ -134,6 +162,363 @@ class LocalProcessRunner:
             return builder.session(None, exc)
         builder.completed(result)
         return builder.session(result, None)
+
+    def cancel_generation(self, generation: int) -> dict[str, object]:
+        """Cancel and reap the exact generic process bound to one generation."""
+
+        decision_at = time.monotonic()
+        with self._owned_lock:
+            self._cancelled_generations[generation] = None
+            self._cancelled_generations.move_to_end(generation)
+            while len(self._cancelled_generations) > 64:
+                self._cancelled_generations.popitem(last=False)
+            self._cancellation_waiters.add(generation)
+            self._owned_changed.wait_for(
+                lambda: generation in self._owned or generation not in self._launching,
+                timeout=5.0,
+            )
+            active = self._owned.get(generation)
+            launching = generation in self._launching
+        if active is None:
+            with self._owned_changed:
+                self._cancellation_waiters.discard(generation)
+                self._owned_changed.notify_all()
+            if launching:
+                return {
+                    "execution_generation": generation,
+                    "handle_found": False,
+                    "cancellation_pending": True,
+                    "cancellation_complete": False,
+                    "tree_empty": None,
+                    "cleanup_complete": False,
+                }
+            return {
+                "execution_generation": generation,
+                "handle_found": False,
+                "cancellation_complete": True,
+                "tree_empty": True,
+                "cleanup_complete": True,
+            }
+        client, process, facts = active
+        requested_at = time.monotonic()
+        try:
+            requested = client.cancel(process)
+            facts["cancel_requested_at"] = requested_at
+            facts["cancel_request_observation"] = requested
+            tree_empty_at: float | None = None
+            launcher_reaped_at: float | None = None
+            cleanup_complete_at: float | None = None
+            reap_deadline = time.monotonic() + 5.0
+            while True:
+                reaped = client.observe(process)
+                observed_at = time.monotonic()
+                if (
+                    tree_empty_at is None
+                    and reaped.get("has_tree_empty") is True
+                    and reaped.get("tree_empty") is True
+                ):
+                    tree_empty_at = observed_at
+                if launcher_reaped_at is None and reaped.get("launcher_reaped") is True:
+                    launcher_reaped_at = observed_at
+                if (
+                    reaped.get("has_cleanup_result") is True
+                    and reaped.get("cleanup_complete") is True
+                ):
+                    cleanup_complete_at = observed_at
+                    break
+                if observed_at >= reap_deadline:
+                    reaped = client.reap(process)
+                    observed_at = time.monotonic()
+                    if (
+                        tree_empty_at is None
+                        and reaped.get("has_tree_empty") is True
+                        and reaped.get("tree_empty") is True
+                    ):
+                        tree_empty_at = observed_at
+                    if launcher_reaped_at is None and reaped.get("launcher_reaped") is True:
+                        launcher_reaped_at = observed_at
+                    if (
+                        reaped.get("has_cleanup_result") is True
+                        and reaped.get("cleanup_complete") is True
+                    ):
+                        cleanup_complete_at = observed_at
+                    break
+                time.sleep(0.005)
+            completed_at = time.monotonic()
+            facts["reap_observation"] = reaped
+            facts["cancel_completed_at"] = completed_at
+            facts["cancel_request_to_reaped_seconds"] = round(completed_at - requested_at, 6)
+            if tree_empty_at is not None:
+                facts["cancel_request_to_tree_empty_observed_seconds"] = round(
+                    tree_empty_at - requested_at, 6
+                )
+            if launcher_reaped_at is not None:
+                facts["cancel_request_to_launcher_reaped_observed_seconds"] = round(
+                    launcher_reaped_at - requested_at, 6
+                )
+            if cleanup_complete_at is not None:
+                facts["cancel_request_to_cleanup_complete_observed_seconds"] = round(
+                    cleanup_complete_at - requested_at, 6
+                )
+            cleanup_complete = reaped.get("cleanup_complete") is True
+            cancellation_complete = (
+                reaped.get("status") == "Cancelled"
+                and reaped.get("cancellation_complete") is True
+                and cleanup_complete
+                and reaped.get("launcher_reaped") is True
+                and reaped.get("tree_empty") is True
+            )
+            return {
+                "execution_generation": generation,
+                "handle_found": True,
+                "decision_to_cancel_request_seconds": round(requested_at - decision_at, 6),
+                "cancel_request_to_reaped_seconds": facts["cancel_request_to_reaped_seconds"],
+                "cancel_request_to_tree_empty_observed_seconds": facts.get(
+                    "cancel_request_to_tree_empty_observed_seconds"
+                ),
+                "cancel_request_to_launcher_reaped_observed_seconds": facts.get(
+                    "cancel_request_to_launcher_reaped_observed_seconds"
+                ),
+                "cancel_request_to_cleanup_complete_observed_seconds": facts.get(
+                    "cancel_request_to_cleanup_complete_observed_seconds"
+                ),
+                "cancellation_complete": cancellation_complete,
+                "tree_empty": reaped.get("tree_empty"),
+                "launcher_reaped": reaped.get("launcher_reaped"),
+                "cleanup_complete": cleanup_complete,
+                "status": reaped.get("status"),
+            }
+        finally:
+            with self._owned_changed:
+                self._cancellation_waiters.discard(generation)
+                self._owned_changed.notify_all()
+
+    def _run_process_effect(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+        output_cap: int,
+        stderr_cap: int,
+        environment: dict[str, str],
+        stdin: bytes,
+        builder: ExecutionObservationBuilder,
+    ) -> ExecutionSession:
+        provider = getattr(self.process_capability, "process_effect_client", None)
+        if not callable(provider):
+            error = ForgeError(
+                "PROCESS_EFFECT_UNAVAILABLE",
+                "Forge has no generic MNCS process capability client",
+            )
+            builder.failed(error)
+            return builder.session(None, error)
+        generation_value: object
+        with self._owned_lock:
+            generation_value = self._job_context.get("generation")
+            generation = (
+                generation_value
+                if isinstance(generation_value, int) and not isinstance(generation_value, bool)
+                else None
+            )
+            if generation is not None and generation in self._cancelled_generations:
+                error = ForgeError(
+                    "EXECUTION_CANCELLED",
+                    "the semantic owner cancelled this generation before process launch",
+                    details={"execution_generation": generation},
+                )
+                builder.failed(error)
+                return builder.session(None, error)
+        limits = self.resource_envelope.budget if self.resource_envelope is not None else None
+        if self.resource_envelope is not None and not self.resource_envelope.available:
+            error = ForgeError(
+                "RESOURCE_ENVELOPE_UNAVAILABLE",
+                str(self.resource_envelope.status().get("limitation") or "resource envelope unavailable"),
+                details={"resource_evidence": self.resource_envelope.status()},
+            )
+            builder.failed(error)
+            return builder.session(None, error)
+        if generation is not None:
+            with self._owned_changed:
+                if generation in self._cancelled_generations:
+                    error = ForgeError(
+                        "EXECUTION_CANCELLED",
+                        "the semantic owner cancelled this generation before process launch",
+                        details={"execution_generation": generation},
+                    )
+                    builder.failed(error)
+                    return builder.session(None, error)
+                self._launching.add(generation)
+        try:
+            client: ProcessEffectClient = provider()
+            process, started = client.start(
+                argv,
+                cwd=cwd,
+                environment=environment,
+                stdin=stdin,
+                stdout_limit=min(output_cap, 1024),
+                stderr_limit=min(stderr_cap, 1024),
+                deadline_ms=max(1, int(timeout * 1000)),
+                memory_high_bytes=limits.memory_high_bytes if limits else 0,
+                memory_max_bytes=limits.memory_max_bytes if limits else 0,
+                swap_max_bytes=limits.memory_swap_max_bytes if limits else 0,
+                has_swap_max=limits is not None,
+                process_max=limits.tasks_max if limits else 0,
+            )
+            facts: dict[str, object] = {
+                "process_handle": process,
+                "start_observation": started,
+                "generation": generation,
+            }
+            if generation is not None:
+                with self._owned_changed:
+                    self._owned[generation] = (client, process, facts)
+                    self._launching.discard(generation)
+                    cancelled_during_start = (
+                        generation in self._cancelled_generations
+                        and generation not in self._cancellation_waiters
+                    )
+                    self._owned_changed.notify_all()
+                if cancelled_during_start:
+                    client.cancel(process)
+            builder.process_started()
+            if limits is not None:
+                builder.resource_started(limits.to_dict())
+            observation = started
+            while observation.get("status") == "Running":
+                observation = client.observe(process)
+                if observation.get("status") == "Running":
+                    time.sleep(0.01)
+            if observation.get("cleanup_complete") is not True:
+                observation = client.reap(process)
+            facts["terminal_observation"] = observation
+            resource_observations = self._native_resource_observations(
+                observation, timeout=timeout, process=process
+            )
+            builder.resource_finished(resource_observations)
+            stdout = observation.get("stdout")
+            stderr = observation.get("stderr")
+            if not isinstance(stdout, bytes) or not isinstance(stderr, bytes):
+                raise ForgeError("PROCESS_EFFECT_ABI", "MNCS process output was malformed")
+            status = observation.get("status")
+            exit_code = observation.get("exit_code")
+            if status == "Exited" and observation.get("cleanup_complete") is True:
+                if observation.get("has_exit_code") is not True or not isinstance(exit_code, int):
+                    raise ForgeError(
+                        "PROCESS_CLEANUP_UNKNOWN",
+                        "MNCS process exited without an established exit status",
+                        details={"resource_evidence": resource_observations},
+                    )
+                result = ExecutionResult(
+                    argv=argv,
+                    returncode=exit_code,
+                    stdout=stdout,
+                    stderr=stderr,
+                    duration_seconds=float(observation.get("duration_ms", 0)) / 1000,
+                    resource_envelope=limits.to_dict() if limits else {},
+                    resource_observations=resource_observations,
+                )
+                builder.feed("stdout", stdout)
+                builder.feed("stderr", stderr)
+                if observation.get("stdout_truncated") is True:
+                    builder.mark_limit("stdout", output_cap)
+                if observation.get("stderr_truncated") is True:
+                    builder.mark_limit("stderr", stderr_cap)
+                builder.completed(result)
+                return builder.session(result, None)
+            error_code = {
+                "Cancelled": "EXECUTION_CANCELLED",
+                "TimedOut": "TIMEOUT",
+                "ResourceExhausted": "RESOURCE_LIMIT",
+                "OutputExhausted": "OUTPUT_LIMIT",
+            }.get(str(status), "PROCESS_CLEANUP_UNKNOWN")
+            error = ForgeError(
+                error_code,
+                f"MNCS process lifecycle ended as {status}; cleanup must be established before accepting a result",
+                details={
+                    "resource_evidence": resource_observations,
+                    "process_observation": observation,
+                    "execution_generation": generation,
+                },
+            )
+            builder.failed(error)
+            return builder.session(None, error)
+        except ForgeError as error:
+            if isinstance(error.details.get("resource_evidence"), Mapping):
+                builder.resource_finished(error.details["resource_evidence"])
+            builder.failed(error)
+            return builder.session(None, error)
+        finally:
+            if generation is not None:
+                with self._owned_changed:
+                    self._owned.pop(generation, None)
+                    self._launching.discard(generation)
+                    self._owned_changed.notify_all()
+
+    def _native_resource_observations(
+        self,
+        observation: Mapping[str, object],
+        *,
+        timeout: float,
+        process: OwnedProcess,
+    ) -> dict[str, object]:
+        classify = getattr(self.process_capability, "resource_outcome", None)
+        duration_seconds = float(observation.get("duration_ms", 0)) / 1000
+        raw = {
+            "exit_status": observation.get("exit_code")
+            if observation.get("has_exit_code") is True
+            else None,
+            "timed_out": observation.get("status") == "TimedOut",
+            "output_limited": observation.get("status") == "OutputExhausted",
+            "memory_high_events": observation.get("memory_high_events"),
+            "memory_max_events": observation.get("memory_max_events"),
+            "memory_oom_events": observation.get("oom_events"),
+            "memory_oom_kill_events": observation.get("oom_kill_events"),
+            "memory_oom_group_kill_events": 0,
+            "process_limit_events": observation.get("process_limit_events"),
+            "cleanup_known": observation.get("has_cleanup_result") is True,
+            "cleanup_succeeded": observation.get("cleanup_complete") is True,
+            "cancellation_requested": observation.get("cancellation_requested") is True,
+            "superseded": False,
+        }
+        outcome = classify(raw) if callable(classify) else None
+        metric = getattr(outcome, "metric", "Unknown")
+        observed_value: object = None
+        bound_value: object = None
+        if metric == "WallTime":
+            observed_value = duration_seconds
+            bound_value = timeout
+        elif metric == "Output":
+            observed_value = max(
+                len(observation.get("stdout", b""))
+                if isinstance(observation.get("stdout"), bytes)
+                else 0,
+                len(observation.get("stderr", b""))
+                if isinstance(observation.get("stderr"), bytes)
+                else 0,
+            )
+        values: dict[str, object] = {
+            "process_status": observation.get("status"),
+            "process_observation_complete": observation.get("observation_complete"),
+            "tree_empty": observation.get("tree_empty"),
+            "launcher_reaped": observation.get("launcher_reaped"),
+            "cleanup_complete": observation.get("cleanup_complete"),
+            "cancellation_requested": observation.get("cancellation_requested"),
+            "cancellation_complete": observation.get("cancellation_complete"),
+            "resource_observations": dict(raw),
+            "execution_handle_identity": process.value.get("record", {}).get("type_identity"),
+            "resource_outcome": getattr(outcome, "status", "Unknown"),
+            "resource_exhausted": getattr(outcome, "resource_exhausted", False),
+            "verification_deferred": getattr(outcome, "deferred", False),
+            "native_execution_returncode_available": getattr(
+                outcome, "has_execution_exit_status", False
+            ),
+            "native_execution_returncode": getattr(outcome, "execution_exit_status", None),
+            "resource_metric": metric,
+            "resource_bound": bound_value,
+            "resource_observed": observed_value,
+        }
+        return values
 
     @staticmethod
     def _host_identity() -> str:
@@ -191,6 +576,12 @@ class LocalProcessRunner:
         return self.resource_envelope.status()
 
     def set_job_context(self, value: Mapping[str, object] | None) -> None:
+        with self._owned_lock:
+            self._job_context = (
+                {str(key): item for key, item in value.items()}
+                if isinstance(value, Mapping)
+                else {}
+            )
         if self.resource_envelope is not None:
             self.resource_envelope.set_job_context(value)
 
@@ -217,7 +608,10 @@ def build_runner(
         else None
     )
     if kind == "local-process":
-        return LocalProcessRunner(resource_envelope)
+        return LocalProcessRunner(
+            resource_envelope,
+            process_capability=resource_semantics,
+        )
     if kind == "podman-rootless":
         from .podman_runner import build_podman_runner
 

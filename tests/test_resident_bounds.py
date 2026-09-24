@@ -509,6 +509,23 @@ def _fake_systemd_manager(
     return manager, commands, job_group
 
 
+def test_inactive_verified_slice_reports_zero_current_processes_and_refreshes(
+    tmp_path: Path,
+) -> None:
+    manager, _commands, group = _fake_systemd_manager(tmp_path)
+    manager._slice_cgroup_group = None
+    state = {"LoadState": "loaded", "ActiveState": "inactive", "ControlGroup": ""}
+    manager._unit_properties = lambda _unit: dict(state)  # type: ignore[method-assign]
+
+    assert manager._slice_value("pids.current") == 0
+    assert manager._slice_value("memory.current") == 0
+    assert manager._slice_value("pids.peak") is None
+
+    state.update({"ActiveState": "active", "ControlGroup": f"/{group.name}"})
+    assert manager._slice_value("pids.current") == 0
+    assert manager._slice_cgroup_group == f"/{group.name}"
+
+
 def test_small_cgroup_budget_and_memory_pid_timeout_evidence_use_fake_kernel_state(
     tmp_path: Path,
 ) -> None:
