@@ -1436,7 +1436,16 @@
         "operation_id": "development.continuous.run"
       },
       "continuous status": {
-        "arguments": [],
+        "arguments": [
+          {
+            "default": null,
+            "destination": "workspace",
+            "nargs": "?",
+            "options": [],
+            "required": false,
+            "value_type": "path"
+          }
+        ],
         "operation_id": "development.continuous.status"
       },
       "doctor": {
@@ -2353,7 +2362,7 @@
     },
     "global_arguments": [
       {
-        "default": "mncs-forge.toml",
+        "default": null,
         "destination": "config",
         "nargs": null,
         "options": [
@@ -2393,6 +2402,10 @@
         "properties": [],
         "required": []
       },
+      "familyPath": {
+        "properties": [],
+        "required": []
+      },
       "pathList": {
         "properties": [],
         "required": []
@@ -2406,6 +2419,10 @@
         "required": []
       },
       "stringList": {
+        "properties": [],
+        "required": []
+      },
+      "triggerStringList": {
         "properties": [],
         "required": []
       }
@@ -2438,7 +2455,7 @@
       "version",
       "workflows"
     ],
-    "semantic_sha256": "7cfe17d86395720304fd7ba69602e3f83559f5e0405680c7fdd4966982d53aad"
+    "semantic_sha256": "aca2f2f0b91cf368691cb157aff25e2e832b12f8867400e99282c8ad34f7cd69"
   },
   "intentional_exclusions": [
     "human-readable help and error prose",
@@ -3625,7 +3642,7 @@
     "aggregate_status": "(statuses: 'Iterable[str]') -> 'str'",
     "class": "mncs_forge.engine.Forge",
     "methods": {
-      "__init__": "(self, config: 'ForgeConfig', mode: 'str' = 'development', *, record_store: 'RecordStore | None' = None) -> 'None'",
+      "__init__": "(self, config: 'ForgeConfig', mode: 'str' = 'development', *, record_store: 'RecordStore | None' = None, runner: 'Runner | None' = None) -> 'None'",
       "bundle_build": "(self, workflow_name: 'str', candidate_id: 'str | None' = None) -> 'dict[str, object]'",
       "candidate_compare": "(self, candidate_ids: 'list[str]') -> 'dict[str, object]'",
       "candidate_disposition": "(self, candidate_id: 'str', *, disposition: 'str', reason: 'str') -> 'dict[str, object]'",
@@ -3637,6 +3654,7 @@
       "cell_execution_assess": "(self, policy: 'Mapping[str, object]', record: 'Mapping[str, object]', expected_nonce: 'str | None' = None) -> 'dict[str, object]'",
       "claim_blockers": "(self, requested_claim: 'str') -> 'dict[str, object]'",
       "claim_status": "(self) -> 'dict[str, object]'",
+      "close": "(self) -> 'None'",
       "compiler_candidate_attach_validation": "(self, candidate_id: 'str', *, validator_identity: 'str', judgement: 'str', claimed_relation: 'str', counterexample: 'dict[str, object] | None' = None, limitations: 'list[str] | None' = None, stale: 'bool' = False, expected_artifact_identity: 'str | None' = None) -> 'dict[str, object]'",
       "compiler_candidate_inspect": "(self, candidate_id: 'str') -> 'dict[str, object]'",
       "compiler_candidate_register": "(self, *, baseline_artifact_identity: 'str', candidate_artifact_identity: 'str', generator_identity: 'str', declared_transformation: 'str', claimed_relation: 'str', expected_benefit: 'str', protected_properties: 'list[str] | None' = None, target_envelope: 'str' = 'unspecified', required_validation: 'str' = 'translation-validation') -> 'dict[str, object]'",

@@ -110,3 +110,10 @@ typed artifact identities, and copied validator observations while leaving exper
 semantic legality, assurance, and conformance under their declared owners.
 
 Licensed under Apache-2.0.
+
+## Resident Environment provider
+
+Environment can compose Forge through checkout-owned status, reconciliation,
+stop, and work invocation descriptors. See [the resident provider contract](docs/RESIDENT_PROVIDER.md)
+for bounded readiness, selected runtime identity, Linux process ownership,
+and asynchronous startup.

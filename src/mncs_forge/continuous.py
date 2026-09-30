@@ -356,7 +356,16 @@ def _language_service_socket(config: Any) -> Path:
     value = config.continuous_settings.get(
         "language_service_socket", ".mncs/mnls-language-service.sock"
     )
-    return config.root / str(value)
+    path = config.root / str(value)
+    if (
+        len(os.fsencode(path)) >= 104
+        and "language_service_socket" not in config.continuous_settings
+    ):
+        identity = local_json_identity({"root": str(config.root)})[-24:]
+        path = (
+            Path(tempfile.gettempdir()) / f"mncs-forge-{os.getuid()}-{identity}" / "language.sock"
+        )
+    return path
 
 
 def _probe_language_service(config: Any) -> dict[str, object]:
@@ -424,17 +433,42 @@ def _terminate_language_service_start(
     socket_path.unlink(missing_ok=True)
 
 
-def ensure_language_service(config: Any) -> dict[str, object]:
+def ensure_language_service(
+    config: Any, *, selected_bindings: dict[str, Any] | None = None
+) -> dict[str, object]:
     try:
         status = _probe_language_service(config)
+        if selected_bindings is not None:
+            from .resident import owns_process
+
+            lease = _read_json_path(_language_service_lease_path(config)) or {}
+            if not owns_process(lease) or lease.get("selected_bindings") != selected_bindings:
+                raise ForgeError(
+                    "LANGUAGE_SERVICE_SELECTION_MISMATCH",
+                    "Language Service is not owned by the selected binding; "
+                    "stop it through its owning provider",
+                )
         return {"state": "attached", "pid": None, "status": status}
     except ForgeError as error:
-        if error.code == "LANGUAGE_SERVICE_IDENTITY":
+        if error.code in {"LANGUAGE_SERVICE_IDENTITY", "LANGUAGE_SERVICE_SELECTION_MISMATCH"}:
             raise
     socket_path = _language_service_socket(config)
+    if not socket_path.is_relative_to(config.root):
+        socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if (
+            socket_path.parent.is_symlink()
+            or socket_path.parent.stat().st_uid != os.getuid()
+            or socket_path.parent.stat().st_mode & 0o077
+        ):
+            raise ForgeError(
+                "LANGUAGE_SERVICE_SOCKET_AUTHORITY",
+                "short socket directory must be private and owned by this user",
+            )
     if socket_path.exists():
         socket_path.unlink()
     command = _language_service_command(config)
+    if selected_bindings is not None:
+        command = [selected_bindings["MNCS_LANGUAGE_SERVICE_HOST"]]
     lease_path = _language_service_lease_path(config)
     log_path = _lifecycle_dir(config) / "language-service.log"
     environment = dict(os.environ)
@@ -460,6 +494,14 @@ def ensure_language_service(config: Any) -> dict[str, object]:
         log.close()
         raise ForgeError("LANGUAGE_SERVICE_START_FAILED", str(error)) from error
     log.close()
+    ownership = {}
+    if selected_bindings is not None:
+        from .resident import process_identity
+
+        ownership = {
+            "process_identity": process_identity(process.pid),
+            "selected_bindings": selected_bindings,
+        }
     _write_json_path(
         lease_path,
         {
@@ -468,6 +510,7 @@ def ensure_language_service(config: Any) -> dict[str, object]:
             "pid": process.pid,
             "workspace_root": str(config.root),
             "owned_by_continuous": True,
+            **ownership,
         },
     )
     deadline = time.monotonic() + float(config.continuous_settings.get("start_timeout_seconds", 60))
@@ -492,6 +535,12 @@ def _supervisor_status(config: Any) -> dict[str, object]:
     if not lease:
         return {"state": "stopped", "pid": None}
     pid = int(lease.get("pid", 0) or 0)
+    if "process_identity" in lease:
+        from .resident import owns_process
+
+        if not owns_process(lease):
+            return {**lease, "state": "stale"}
+        return {**lease, "state": str(lease.get("phase", "starting"))}
     if not _supervisor_process_matches(pid, config):
         path.unlink(missing_ok=True)
         return {"state": "stale", "pid": pid}
@@ -1056,8 +1105,7 @@ class ContinuousSupervisor:
             pass
 
     def _socket(self) -> LanguageServiceSocket:
-        value = self.settings.get("language_service_socket", ".mncs/mnls-language-service.sock")
-        return LanguageServiceSocket(self.config.root / str(value))
+        return LanguageServiceSocket(_language_service_socket(self.config))
 
     def _status_path(self) -> Path:
         return self.config.state_dir / "continuous" / "status.json"

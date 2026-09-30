@@ -88,14 +88,16 @@ def test_trigger_matching_is_explicit_and_compact() -> None:
 
 def test_event_kinds_preserve_security_and_attention_classifications() -> None:
     supervisor = _supervisor()
-    kinds = supervisor._event_kinds(_event())
-    assert {
+    kinds = {
         "source_changed",
         "diagnostic_added",
         "semantic_subject_changed",
         "security_boundary_changed",
         "public_contract_changed",
-    }.issubset(kinds)
+    }
+    for kind in kinds:
+        assert supervisor._matches({"id": "classification", "action": "micro_verifier",
+                                    "maximum_cost": "low", "event_kinds": [kind]}, _event())
 
 
 def test_trigger_can_bind_contract_and_obligation_identities() -> None:
@@ -367,7 +369,7 @@ def test_superseding_generation_cancels_generic_process_tree(tmp_path: Path) -> 
                 cwd=tmp_path,
                 timeout=20,
                 output_cap=1024,
-                environment={"PATH": os.environ.get("PATH", "")},
+                environment={},  # Both Python executables are explicitly addressed.
             )
     finally:
         ingress.stop()
