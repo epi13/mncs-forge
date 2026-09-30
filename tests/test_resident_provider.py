@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -202,3 +203,29 @@ def test_live_ambient_language_service_is_not_attached(config, identity, monkeyp
     )
     with pytest.raises(ForgeError, match="not owned"):
         continuous.ensure_language_service(config, selected_bindings=identity["runtime"])
+
+
+@pytest.mark.parametrize("operation", ["status", "reconcile"])
+def test_provider_deadline_includes_configuration_and_artifact_reads(
+    operation, monkeypatch, capsys
+):
+    monkeypatch.setattr(resident, "DEADLINE_SECONDS", 0.02)
+    monkeypatch.setattr(resident, "resolve_continuous_config", lambda **_kw: time.sleep(1))
+    before = time.monotonic()
+    assert resident.main([operation, "--config", "/selected/forge.toml"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert time.monotonic() - before < 0.5
+    assert result["state"] == "blocked"
+    assert result["diagnostics"][0]["code"] == "RESIDENT_DEADLINE"
+
+
+def test_provider_result_output_has_a_total_bound(config, identity, monkeypatch, capsys):
+    monkeypatch.setattr(resident, "resolve_continuous_config", lambda **_kw: config)
+    monkeypatch.setattr(resident, "selected_identity", lambda _c: identity)
+    monkeypatch.setattr(
+        resident, "resident_status", lambda *_a: {"extra": "x" * resident.MAX_BYTES}
+    )
+    assert resident.main(["status", "--config", "/selected/forge.toml"]) == 0
+    output = capsys.readouterr().out
+    assert len(output.encode()) <= resident.MAX_BYTES
+    assert json.loads(output)["diagnostics"][0]["code"] == "RESIDENT_OUTPUT_LIMIT"

@@ -30,9 +30,11 @@ The startup identity is checked again after native Forge initialization.
 `mncs.forge.resident-status/1`. It creates no directories, locks, processes,
 Store transactions, or lease repairs. It reads at most 8192 lease/transport
 bytes, uses a 0.35-second total challenge deadline, a 0.75-second Language
-Service probe, and a 0.5-second Git observation. Output is bounded by selected
-identity admission and these input bounds; Environment additionally enforces
-its three-second/16384-byte invocation budget.
+Service probe, and a 0.5-second Git observation. The CLI enforces a total
+2.5-second operation deadline, including configuration and artifact reads, and
+8192-byte result limit. Exceeding either returns a structured
+`RESIDENT_DEADLINE` or `RESIDENT_OUTPUT_LIMIT` diagnostic. Environment
+additionally enforces its three-second/16384-byte invocation budget.
 
 `ready` requires a Linux process birth identity, a live nonce challenge to the
 actual supervisor, matching provider/runtime/configuration/instance identity,

@@ -37,6 +37,7 @@ from .workspace_binding import resolve_continuous_config
 STATUS_SCHEMA = "mncs.forge.resident-status/1"
 RECONCILE_SCHEMA = "mncs.forge.resident-reconciliation/1"
 MAX_BYTES = 8192
+DEADLINE_SECONDS = 2.5
 
 
 def process_identity(pid: int) -> dict[str, str] | None:
@@ -511,6 +512,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace", type=Path)
     parser.add_argument("--include-language-service", action="store_true")
     args = parser.parse_args(argv)
+
+    def deadline(_signal: int, _frame: Any) -> None:
+        raise ForgeError("RESIDENT_DEADLINE", "resident operation exceeded its 2.5-second deadline")
+
+    # This provider already requires Linux. Bound configuration/artifact reads
+    # as well as the individual socket and Git operations, including direct
+    # invocation without Environment's additional transport budget.
+    previous_handler = signal.signal(signal.SIGALRM, deadline)
+    signal.setitimer(signal.ITIMER_REAL, DEADLINE_SECONDS)
     try:
         config = resolve_continuous_config(workspace=args.workspace, explicit_config=args.config)
         identity = selected_identity(config)
@@ -532,5 +542,23 @@ def main(argv: list[str] | None = None) -> int:
                 {"code": getattr(error, "code", "RESIDENT_TRANSPORT"), "message": str(error)[:512]}
             ],
         }
-    print(json.dumps(result, sort_keys=True))
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+    encoded = json.dumps(result, sort_keys=True)
+    if len(encoded.encode()) + 1 > MAX_BYTES:
+        encoded = json.dumps(
+            {
+                "schema_version": STATUS_SCHEMA if args.operation == "status" else RECONCILE_SCHEMA,
+                "state": "blocked",
+                "diagnostics": [
+                    {
+                        "code": "RESIDENT_OUTPUT_LIMIT",
+                        "message": "resident result exceeds 8192 bytes",
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+    print(encoded)
     return 0
