@@ -174,6 +174,7 @@ def test_missing_selected_runtime_never_uses_ambient(config, monkeypatch):
 def test_child_runtime_ignores_ambient_imports_and_compiler(config, identity, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", "/ambient-forge:/ambient-store")
     monkeypatch.setenv("MNCS_CLI", "/ambient-mncs")
+    monkeypatch.setenv("MNCS_FORGE_NATIVE_MODE", "off")
     runtime = {
         "MNCS_BIN": "/selected/language/mncs",
         "MNCS_LANGUAGE_SERVICE_HOST": "/selected/service",
@@ -182,6 +183,7 @@ def test_child_runtime_ignores_ambient_imports_and_compiler(config, identity, mo
     }
     environment = resident.selected_environment({**identity, "runtime": runtime})
     assert environment["MNCS_CLI"] == runtime["MNCS_BIN"]
+    assert "MNCS_FORGE_NATIVE_MODE" not in environment
     assert environment["PYTHONPATH"] == identity["checkout"] + "/src:/selected/store/python"
 
 

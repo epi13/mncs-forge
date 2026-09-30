@@ -19,7 +19,9 @@ def main() -> int:
     parser.add_argument("--config", required=True, type=Path)
     selected, _ = parser.parse_known_args()
     identity = selected_identity(load_config(selected.config))
-    os.environ.update(selected_environment(identity))
+    environment = selected_environment(identity)
+    os.environ.clear()
+    os.environ.update(environment)
     sys.path.insert(0, str(Path(identity["runtime"]["MNCS_STORE_ROOT"]) / "python"))
     from mncs_forge.cli import main as forge_main
 
