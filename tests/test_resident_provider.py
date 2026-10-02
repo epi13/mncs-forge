@@ -181,8 +181,10 @@ def test_child_runtime_ignores_ambient_imports_and_compiler(config, identity, mo
         "MNCS_LANGUAGE_SERVICE_HOST": "/selected/service",
         "MNCS_LANGUAGE_ROOT": "/selected/language",
         "MNCS_STORE_ROOT": "/selected/store",
+        "MNCS_LIBRARY_ROOT": "/selected/stdlib/library",
     }
     environment = resident.selected_environment({**identity, "runtime": runtime})
+    assert environment["MNCS_LIBRARY_PATH"] == runtime["MNCS_LIBRARY_ROOT"]
     assert environment["MNCS_CLI"] == runtime["MNCS_BIN"]
     assert "MNCS_FORGE_NATIVE_MODE" not in environment
     assert environment["PYTHONPATH"] == identity["checkout"] + "/src:/selected/store/python"

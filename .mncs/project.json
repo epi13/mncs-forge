@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-forge",
-  "revision": 9,
+  "revision": 10,
   "manifest_location": "in-repository",
   "authority": {
     "note": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority."
@@ -13,6 +13,7 @@
   "organization": {
     "layout": "mncs.repository-layout/1",
     "surfaces": [
+      {"path": "src/mncs_forge/provider_artifacts.py", "class": "host-boundary", "authority": "none", "note": "Confined provider build/execution transport; Commons provenance and Doctor remediation remain MNCS-native. Compilation is never Test PASS.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "process", "semantic_role": "platform-adapter"}},
       {"path": "src/mncs_forge/resident.py", "class": "host-boundary", "authority": "none", "note": "Bounded Linux resident transport and lifecycle control; selected binding identity, live readiness challenge, and pidfd ownership. Delegates assurance and supervision to the existing native Forge loop.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "process", "semantic_role": "platform-adapter"}},
       {"path": "src/mncs_forge/application/mncs_development.py", "class": "host-boundary", "authority": "none", "note": "Acquires and validates provider documents, invokes external providers, performs repair mechanics, and adapts normalized facts; it does not own the final assurance disposition when native mode is enabled.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "process", "semantic_role": "platform-adapter"}},
       {"path": "src/mncs_forge/verification_plan_contract.py", "class": "host-boundary", "authority": "none", "note": "Provider-plan membrane and structural admission remain host-side; Forge assurance policy consumes the resulting typed facts.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "external-provider", "semantic_role": "compatibility-adapter"}},
@@ -35,7 +36,8 @@
       {"contract": "resident-status", "version": "1", "kind": "resident-provider-status", "effects": ["read"], "invocation": {"kind": "python", "path": "scripts/resident.py", "fixed_argv": ["status"], "toolchain": {"repository": "mncs-language-service", "path": "target/debug/mnls-language-service-host"}, "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST"}},
       {"contract": "resident-reconcile", "version": "1", "kind": "resident-provider-reconcile", "effects": ["execute"], "invocation": {"kind": "python", "path": "scripts/resident.py", "fixed_argv": ["reconcile"], "toolchain": {"repository": "mncs-language-service", "path": "target/debug/mnls-language-service-host"}, "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST"}},
       {"contract": "resident-stop", "version": "1", "kind": "resident-provider-stop", "effects": ["execute"], "invocation": {"kind": "python", "path": "scripts/resident.py", "fixed_argv": ["stop"], "toolchain": {"repository": "mncs-language-service", "path": "target/debug/mnls-language-service-host"}, "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST"}},
-      {"contract": "resident-work", "version": "1", "kind": "selected-resident-workflow", "effects": ["write"], "invocation": {"kind": "python", "path": "scripts/provider.py", "fixed_argv": [], "toolchain": {"repository": "mncs-language-service", "path": "target/debug/mnls-language-service-host"}, "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST"}}
+      {"contract": "resident-work", "version": "1", "kind": "selected-resident-workflow", "effects": ["write"], "invocation": {"kind": "python", "path": "scripts/provider.py", "fixed_argv": [], "toolchain": {"repository": "mncs-language-service", "path": "target/debug/mnls-language-service-host"}, "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST"}},
+      {"contract": "mncs-forge.provider-artifact-execution", "version": "1", "kind": "bounded-provider-artifact-transport", "fingerprint_sources": ["src/mncs_forge/provider_artifacts.py", "src/mncs_forge/retained_embed.py"], "effects": ["read", "execute"]}
     ],
     "consumes": [
       {"contract": "ravel.verification-plan", "envelope": {"op": "any"}, "required": true},
@@ -62,7 +64,9 @@
           "src/mncs_forge/resources/pressure-reproducers/process-resource-handle.mncs"
         ],
         "scope": "native runtime imports; legacy pre-extraction toolchains may bind equivalent language library sources"
-      }
+      },
+      {"contract": "mncs-commons.provider-provenance", "envelope": {"op": "any"}, "required": false, "evidence": {"source": "src/mncs_forge/provider_artifacts.py", "kind": "declared-provider-policy-interface"}},
+      {"contract": "mncs-doctor.provider-artifact-remediation", "envelope": {"op": "any"}, "required": false, "evidence": {"source": "src/mncs_forge/provider_artifacts.py", "kind": "declared-provider-policy-interface"}}
     ],
     "tests": [
       {"test": "forge-assurance-regressions", "covers": ["assurance-workflow"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest", "tests", "-q", "--ignore=tests/test_mncs_assurance.py"]}},

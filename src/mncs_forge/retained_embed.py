@@ -9,6 +9,7 @@ and in the caller that constructs those values.
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import threading
 import time
@@ -24,12 +25,22 @@ class RetainedEmbedSession:
     """One verified artifact retained across typed named-entrypoint calls."""
 
     _libraries: dict[str, ctypes.CDLL] = {}
+    _library_digests: dict[str, str] = {}
+    _load_lock = threading.RLock()
 
     @classmethod
     def _library(cls, path: Path) -> ctypes.CDLL:
+        with cls._load_lock:
+            return cls._load_library(path)
+
+    @classmethod
+    def _load_library(cls, path: Path) -> ctypes.CDLL:
         key = str(path.resolve())
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
         library = cls._libraries.get(key)
         if library is not None:
+            if cls._library_digests[key] != sha:
+                raise RetainedEmbedError("loaded executor bytes changed; restart with the selected executor")
             return library
         if not path.is_file():
             raise RetainedEmbedError(f"mncs-embed library not found: {path}")
@@ -48,12 +59,17 @@ class RetainedEmbedSession:
         library.mncs_response_free.restype = None
         library.mncs_last_error.argtypes = []
         library.mncs_last_error.restype = ctypes.c_char_p
+        if hashlib.sha256(path.read_bytes()).hexdigest() != sha:
+            raise RetainedEmbedError("executor changed during loading")
+        cls._library_digests[key] = sha
         cls._libraries[key] = library
         return library
 
     def __init__(self, library_path: Path, artifact: bytes) -> None:
         self.library_path = library_path.resolve()
         self._library_handle = self._library(self.library_path)
+        self.executor_sha256 = self._library_digests[str(self.library_path)]
+        self.artifact_envelope_sha256 = hashlib.sha256(artifact).hexdigest()
         self._handle: int | None = None
         self._call_lock = threading.RLock()
         self.closed = False

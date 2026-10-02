@@ -32,6 +32,7 @@ from .continuous import (
     _write_json_path,
 )
 from .errors import ForgeError
+from .mncs_native import selected_library_root
 from .workspace_binding import resolve_continuous_config
 
 STATUS_SCHEMA = "mncs.forge.resident-status/1"
@@ -108,6 +109,14 @@ def selected_identity(config: Any) -> dict[str, Any]:
             )
         runtime[name] = str(Path(raw).resolve())
     language = Path(runtime["MNCS_LANGUAGE_ROOT"])
+    library = selected_library_root(language)
+    if library is None or not library.is_dir():
+        raise ForgeError("RESIDENT_BINDING_MISSING", "selected stdlib library is unavailable")
+    runtime["MNCS_LIBRARY_ROOT"] = str(library.resolve())
+    stdlib_identity = hashlib.sha256(json.dumps(
+        [[str(path.relative_to(library)), hashlib.sha256(path.read_bytes()).hexdigest()]
+         for path in sorted(library.rglob("*.mncs"))], separators=(",", ":")
+    ).encode()).hexdigest()
     artifacts = {}
     for name in ("MNCS_BIN", "MNCS_EMBED_LIB", "MNCS_LANGUAGE_SERVICE_HOST"):
         path = Path(runtime[name])
@@ -135,6 +144,7 @@ def selected_identity(config: Any) -> dict[str, Any]:
         ).hexdigest(),
         "runtime": runtime,
         "runtime_artifacts": artifacts,
+        "effective_stdlib_content_identity": stdlib_identity,
     }
     if len(json.dumps(identity).encode()) > MAX_BYTES // 2:
         raise ForgeError("RESIDENT_BINDING_LIMIT", "selected binding identity exceeds 4096 bytes")
@@ -152,7 +162,7 @@ def selected_environment(identity: dict[str, Any]) -> dict[str, str]:
     environment.update(
         MNCS_CLI=environment["MNCS_BIN"],
         MNLS_LANGUAGE_SERVICE_HOST=environment["MNCS_LANGUAGE_SERVICE_HOST"],
-        MNCS_LIBRARY_PATH=str(Path(environment["MNCS_LANGUAGE_ROOT"]) / "library"),
+        MNCS_LIBRARY_PATH=environment["MNCS_LIBRARY_ROOT"],
         PYTHONPATH=os.pathsep.join(
             [
                 str(Path(identity["checkout"]) / "src"),

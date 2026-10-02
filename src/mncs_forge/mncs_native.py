@@ -705,6 +705,24 @@ def canonical_candidate_digest(
     ).digest()
 
 
+def selected_library_root(language: Path | None) -> Path | None:
+    """Provider-owned effective stdlib selection; no Language ownership guess."""
+    explicit = os.environ.get('MNCS_LIBRARY_ROOT')
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    provider = os.environ.get('MNCS_STDLIB_ROOT')
+    if provider:
+        return (Path(provider).expanduser().resolve() / 'library')
+    if language is not None:
+        dedicated = language.parent / 'mncs-stdlib/library'
+        if dedicated.is_dir():
+            return dedicated.resolve()
+        legacy = language / 'library'
+        if legacy.is_dir():
+            return legacy.resolve()
+    return None
+
+
 class NativeForgeAdapter:
     """Execute the language-owned Forge application without per-query processes."""
 
@@ -719,6 +737,7 @@ class NativeForgeAdapter:
     ) -> None:
         self.forge_root = forge_root.resolve()
         self.language_root = self._discover_language_root(language_root)
+        self.library_root = selected_library_root(self.language_root)
         self.timeout_seconds = timeout_seconds
         self.output_bytes = output_bytes
         self.runner = runner
@@ -795,13 +814,13 @@ class NativeForgeAdapter:
         candidates.append(Path(__file__).resolve().parents[3] / "mncs-language")
         for candidate in candidates:
             root = candidate.resolve()
-            if (root / "Cargo.toml").is_file() and (root / "library").is_dir():
+            if (root / "Cargo.toml").is_file():
                 return root
         return None
 
     @property
     def available(self) -> bool:
-        return self.language_root is not None
+        return self.language_root is not None and self.library_root is not None and self.library_root.is_dir()
 
     @property
     def source_available(self) -> bool:
@@ -832,6 +851,8 @@ class NativeForgeAdapter:
 
         if self.language_root is None:
             raise ForgeError("NATIVE_UNAVAILABLE", "mncs-language checkout is unavailable")
+        if self.library_root is None or not self.library_root.is_dir():
+            raise ForgeError("NATIVE_UNAVAILABLE", "selected stdlib library is unavailable")
         if not self.forge_modules_available:
             raise ForgeError("NATIVE_UNAVAILABLE", "packaged Forge MNCS modules are unavailable")
         self._command()
@@ -841,7 +862,7 @@ class NativeForgeAdapter:
 
         if mode == "off":
             return {"mode": mode, "selected": False, "available": False, "reason": "disabled"}
-        available = self.language_root is not None and self.forge_modules_available
+        available = self.available and self.forge_modules_available
         if available:
             try:
                 command = self._command()
@@ -991,14 +1012,11 @@ class NativeForgeAdapter:
         return max(existing, key=lambda path: path.stat().st_mtime_ns) if existing else None
 
     def _environment(self) -> dict[str, str]:
-        if self.language_root is None:
-            raise ForgeError(
-                "NATIVE_UNAVAILABLE",
-                "mncs-language sibling checkout is unavailable; native Forge is UNKNOWN",
-            )
+        if self.language_root is None or self.library_root is None or not self.library_root.is_dir():
+            raise ForgeError("NATIVE_UNAVAILABLE", "selected compiler/stdlib is unavailable; native Forge is UNKNOWN")
         environment = dict(os.environ)
         environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(
-            (str(self.language_root / "library"), str(self.native_root))
+            (str(self.library_root), str(self.native_root))
         )
         return environment
 
@@ -1100,7 +1118,7 @@ class NativeForgeAdapter:
             key=lambda path: path.as_posix(),
         )
         library_sources = sorted(
-            (self.language_root / "library").rglob("*.mncs"),
+            self.library_root.rglob("*.mncs"),
             key=lambda path: path.as_posix(),
         )
         selected_binary = Path(command[0]) if command and Path(command[0]).is_file() else None
@@ -1166,8 +1184,8 @@ class NativeForgeAdapter:
             "backend": NATIVE_BACKEND,
             "source_profile": NATIVE_SOURCE_PROFILE,
             "runtime_configuration": runtime_configuration,
-            "library_path": str((self.language_root / "library").resolve())
-            if self.language_root is not None
+            "library_path": str(self.library_root.resolve())
+            if self.library_root is not None
             else None,
         }
         prior_identity = self._identity_value
