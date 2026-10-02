@@ -1,6 +1,10 @@
 .venv/
 .mncs-forge/
 .mncs/cache/
+.mncs/doctor/
+# Provider-managed agent worktrees (environment provision_checkouts);
+# environment-owned runtime state, never source.
+/.worktrees/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
