@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-forge",
-  "revision": 8,
+  "revision": 9,
   "manifest_location": "in-repository",
   "authority": {
     "note": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority."
@@ -49,7 +49,20 @@
       ,{"contract": "mncs-store.durable-publication", "version": "1", "kind": "storage-contract", "required": true, "scope": "generation publication and recovery"}
       ,{"contract": "mncs-store.provenance", "version": "1", "kind": "storage-contract", "required": true, "scope": "legacy import and native record provenance"}
       ,{"contract": "mncs-store.typed-relations", "version": "2", "kind": "storage-contract", "required": true, "scope": "Forge lineage and evidence relationships"}
-      ,{"contract": "mncs-store.commit-feed", "version": "1", "kind": "storage-contract", "required": true, "scope": "rebuildable Forge index projection"}
+      ,{"contract": "mncs-store.commit-feed", "version": "1", "kind": "storage-contract", "required": true, "scope": "rebuildable Forge index projection"},
+      {
+        "contract": "mncs-stdlib.stdlib-source",
+        "envelope": {
+          "op": "any"
+        },
+        "required": true,
+        "evidence_refs": [
+          "src/mncs_forge/resources/native/forge/assurance_application.mncs",
+          "src/mncs_forge/resources/native/forge/core.mncs",
+          "src/mncs_forge/resources/pressure-reproducers/process-resource-handle.mncs"
+        ],
+        "scope": "native runtime imports; legacy pre-extraction toolchains may bind equivalent language library sources"
+      }
     ],
     "tests": [
       {"test": "forge-assurance-regressions", "covers": ["assurance-workflow"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest", "tests", "-q", "--ignore=tests/test_mncs_assurance.py"]}},
