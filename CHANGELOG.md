@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Drop previous test result/check artifacts before each invoke-mode test
+  run so a provider failure (including a mismatched `test_runner_mode`
+  override) fails loudly with `PROVIDER_CONTRACT_INVALID` instead of
+  silently reading a stale verdict. Covered by
+  `test_failure_loop_drops_stale_results_before_invoke`.
 - Execute test-mode work natively when the configured runner is a direct
   native executable. `failure_loop` gains `test_runner_mode`
   (`auto`/`native`/`legacy`): `auto` keeps `[python, *.py]` and

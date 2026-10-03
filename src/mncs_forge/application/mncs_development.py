@@ -325,6 +325,18 @@ class MncsDevelopmentService:
             raise ForgeError("PROVIDER_CONTRACT_INVALID", f"{label} must be a JSON object")
         return value
 
+    @staticmethod
+    def _drop_stale(paths: tuple[Path, ...]) -> None:
+        for path in paths:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise ForgeError(
+                    "PATH_RESOLUTION", f"cannot clear previous provider output: {exc}"
+                ) from exc
+
     def _relative(self, path: Path) -> str:
         return path.resolve().relative_to(self.config.root.resolve()).as_posix()
 
@@ -1657,6 +1669,9 @@ class MncsDevelopmentService:
 
         test_prefix = self._command_prefix(test_command, "mncs_test")
         if provider_mode == "invoke":
+            # Invoke mode owns these outputs: drop any previous verdict so a
+            # provider failure cannot masquerade as fresh evidence.
+            self._drop_stale((result_path, check_path))
             test_work = self._test_work_request(
                 test_prefix,
                 manifest=manifest_path,
@@ -2531,6 +2546,7 @@ class MncsDevelopmentService:
         after_result = result_path.with_name(result_path.stem + ".after" + result_path.suffix)
         after_check = check_path.with_name(check_path.stem + ".after" + check_path.suffix)
         after_artifacts = test_artifacts.with_name(test_artifacts.name + ".after")
+        self._drop_stale((after_result, after_check))
         after_work = self._test_work_request(
             test_prefix,
             manifest=manifest_path,

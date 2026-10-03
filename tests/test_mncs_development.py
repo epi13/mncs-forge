@@ -303,6 +303,44 @@ def test_work_request_native_rejects_bad_manifest(config, project: Path) -> None
         build(missing_library)
 
 
+def test_failure_loop_drops_stale_results_before_invoke(config, project: Path) -> None:
+    from mncs_forge.adapters import LocalProcessRunner
+
+    manifest = _write_test_manifest(project)
+    stale_result = project / ".mncs-forge" / "mncs-test-result.json"
+    stale_check = project / ".mncs-forge" / "mncs-test-check.json"
+    stale_result.parent.mkdir(parents=True, exist_ok=True)
+    stale_result.write_text(
+        json.dumps(
+            {
+                "schema_version": "mncs.test-result/1",
+                "provider": "mncs-test",
+                "verdict": "FAIL",
+                "tests": [{"id": "stale", "verdict": "FAIL"}],
+                "run_id": "stale-run",
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_check.write_text(
+        json.dumps(
+            {"schema_version": "mncs.check-result/1", "provider": "mncs-test", "verdict": "FAIL"}
+        ),
+        encoding="utf-8",
+    )
+    stub = project / "candidate" / "stub-runner.py"
+    stub.write_text("import sys\nsys.exit(2)\n", encoding="utf-8")
+    service = MncsDevelopmentService(config=config, executor=LocalProcessRunner())
+    with pytest.raises(ForgeError) as error:
+        service.failure_loop(
+            manifest=str(manifest.relative_to(project)),
+            test_command=[sys.executable, str(stub)],
+        )
+    assert error.value.code == "PROVIDER_CONTRACT_INVALID"
+    assert not stale_result.exists()
+    assert not stale_check.exists()
+
+
 def test_failure_loop_rejects_unknown_runner_mode(config, project: Path) -> None:
     service = MncsDevelopmentService(config=config, executor=object())
     with pytest.raises(ForgeError) as error:
