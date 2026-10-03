@@ -13,6 +13,7 @@ from jsonschema import Draft202012Validator
 
 from mncs_forge.application.mncs_development import MncsDevelopmentService
 from mncs_forge.engine import Forge
+from mncs_forge.errors import ForgeError
 
 PROJECTS = Path(__file__).resolve().parents[2]
 MNCS_TEST = Path(os.environ.get("MNCS_TEST_REPO", PROJECTS / "mncs-test"))
@@ -153,6 +154,164 @@ def test_replan_binds_supplied_graph_owner_as_commons_root(
     assert isinstance(command, list)
     assert command[command.index("--family-graph") + 1] == str(graph.resolve())
     assert command[command.index("--commons-root") + 1] == str(graph.parent.parent.resolve())
+
+
+def _write_test_manifest(project: Path, *, libraries: list[str] | None = None) -> Path:
+    source = project / "candidate" / "suite.mncs"
+    source.write_text("test suite\n", encoding="utf-8")
+    entries = ", ".join(json.dumps(item) for item in (libraries if libraries is not None else []))
+    manifest = project / "candidate" / "suite.toml"
+    manifest.write_text(
+        'schema_version = "mncs.test-manifest/1"\n'
+        'name = "suite"\n'
+        'source = "suite.mncs"\n'
+        'module = "tests.suite"\n'
+        "step_budget = 1234\n"
+        f"libraries = [{entries}]\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def test_runner_mode_auto_selects_policy_per_prefix(config, project: Path) -> None:
+    service = MncsDevelopmentService(config=config, executor=object())
+    assert (
+        service._test_runner_mode([sys.executable, "tools/mncs_test.py"], "auto") == "test-legacy"
+    )
+    assert service._test_runner_mode(["/repo/bin/mncs-test"], "auto") == "test-native"
+    assert service._test_runner_mode(["/repo/bin/mncs-test-compat"], "auto") == "test-legacy"
+    assert service._test_runner_mode(["runner.py"], "auto") == "test-legacy"
+    assert service._test_runner_mode(["/bin/env", "mncs-test"], "auto") == "test-legacy"
+
+
+def test_runner_mode_override_wins(config, project: Path) -> None:
+    service = MncsDevelopmentService(config=config, executor=object())
+    assert service._test_runner_mode(["/repo/bin/mncs-test"], "legacy") == "test-legacy"
+    assert service._test_runner_mode([sys.executable, "x.py"], "native") == "test-native"
+
+
+def test_work_request_native_shape_and_bindings(config, project: Path) -> None:
+    library = project / "candidate" / "lib"
+    library.mkdir()
+    manifest = _write_test_manifest(project, libraries=["lib"])
+    service = MncsDevelopmentService(config=config, executor=object())
+    request = service._test_work_request(
+        ["/repo/bin/mncs-test"],
+        manifest=manifest,
+        result=project / "r.json",
+        check=project / "c.json",
+        artifacts=project / "artifacts",
+        mncs_binary="/repo/mncs",
+        library_paths=["/explicit/lib"],
+        embed_library=None,
+        runner_mode="auto",
+    )
+    assert request.mode == "test-native"
+    assert request.argv[:2] == ["/repo/bin/mncs-test", str(project / "candidate" / "suite.mncs")]
+    assert request.argv[request.argv.index("--step-budget") + 1] == "1234"
+    assert "--format" in request.argv and request.argv[request.argv.index("--format") + 1] == "json"
+    assert "run" not in request.argv and "--manifest" not in request.argv
+    assert "--mncs" not in request.argv and "--embed-library" not in request.argv
+    assert request.argv.count("--library") == 2
+    assert request.environment_overlay == {"MNCS": "/repo/mncs"}
+
+
+def test_work_request_legacy_shape_unchanged(config, project: Path) -> None:
+    manifest = _write_test_manifest(project)
+    service = MncsDevelopmentService(config=config, executor=object())
+    prefix = [sys.executable, "/repo/tools/mncs_test.py"]
+    plan = project / "plan.json"
+    plan.write_text("{}\n", encoding="utf-8")
+    request = service._test_work_request(
+        prefix,
+        manifest=manifest,
+        result=project / "r.json",
+        check=project / "c.json",
+        artifacts=project / "artifacts",
+        mncs_binary="/repo/mncs",
+        library_paths=["/explicit/lib"],
+        embed_library="/repo/libembed.so",
+        verification_plan=plan,
+        runner_mode="auto",
+    )
+    assert request.mode == "test-legacy"
+    assert request.argv == [
+        *prefix,
+        "run",
+        "--manifest",
+        str(manifest),
+        "--result",
+        str(project / "r.json"),
+        "--check-result",
+        str(project / "c.json"),
+        "--artifacts",
+        str(project / "artifacts"),
+        "--mncs",
+        "/repo/mncs",
+        "--library",
+        "/explicit/lib",
+        "--embed-library",
+        "/repo/libembed.so",
+        "--verification-plan",
+        str(plan),
+    ]
+    assert request.environment_overlay == {}
+
+
+def test_work_request_native_rejects_bad_manifest(config, project: Path) -> None:
+    service = MncsDevelopmentService(config=config, executor=object())
+    manifest = _write_test_manifest(project)
+
+    def build(path: Path) -> None:
+        service._test_work_request(
+            ["/repo/bin/mncs-test"],
+            manifest=path,
+            result=project / "r.json",
+            check=project / "c.json",
+            artifacts=project / "artifacts",
+            mncs_binary=None,
+            library_paths=None,
+            embed_library=None,
+        )
+
+    bad_schema = project / "candidate" / "bad-schema.toml"
+    bad_schema.write_text(
+        manifest.read_text(encoding="utf-8").replace("mncs.test-manifest/1", "other/9"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ForgeError):
+        build(bad_schema)
+    missing_source = project / "candidate" / "missing-source.toml"
+    missing_source.write_text(
+        manifest.read_text(encoding="utf-8").replace("suite.mncs", "absent.mncs"), encoding="utf-8"
+    )
+    with pytest.raises(ForgeError):
+        build(missing_source)
+    bad_budget = project / "candidate" / "bad-budget.toml"
+    bad_budget.write_text(
+        manifest.read_text(encoding="utf-8").replace("step_budget = 1234", "step_budget = 0"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ForgeError):
+        build(bad_budget)
+    missing_library = project / "candidate" / "missing-library.toml"
+    missing_library.write_text(
+        manifest.read_text(encoding="utf-8").replace("libraries = []", 'libraries = ["absent"]'),
+        encoding="utf-8",
+    )
+    with pytest.raises(ForgeError):
+        build(missing_library)
+
+
+def test_failure_loop_rejects_unknown_runner_mode(config, project: Path) -> None:
+    service = MncsDevelopmentService(config=config, executor=object())
+    with pytest.raises(ForgeError) as error:
+        service.failure_loop(
+            manifest="candidate/suite.toml",
+            test_command=["/repo/bin/mncs-test"],
+            test_runner_mode="sometimes",
+        )
+    assert error.value.code == "MNCS_PROVIDER_INPUT"
 
 
 def test_failure_loop_preserves_lineage_and_verifies_exact_repair(config, project: Path) -> None:

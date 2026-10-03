@@ -263,6 +263,7 @@ class MncsFailureLoopInput(OperationInput):
     minimize: bool = False
     test_id: str | None = None
     provider_mode: str = "invoke"
+    test_runner_mode: str = "auto"
     debug_check_file: str | None = None
     actions_evidence_files: list[str] | None = None
     actions_command: list[str] | None = None
@@ -276,6 +277,26 @@ class MncsFailureLoopInput(OperationInput):
     post_repair_verification_plan_file: str | None = None
     ravel_command: list[str] | None = None
     diagnostic_depth: str = "minimal"
+    output_file: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MncsObserveInput(OperationInput):
+    program: str
+    request: str
+    debug_command: list[str] | None = None
+    mncs_binary: str | None = None
+    library_paths: list[str] | None = None
+    core_path: str | None = None
+    test_result: str | None = None
+    working_directory: str = "."
+    witness_file: str = ".mncs-forge/mncs-observe-witness.json"
+    capture_policy: str = "bounded"
+    max_events: int = 512
+    max_values: int = 1024
+    max_value_bytes: int = 4096
+    selected_operations: list[str] | None = None
+    timeout_seconds: float | None = None
     output_file: str | None = None
 
 
@@ -545,6 +566,7 @@ class ForgeOperationTarget(Protocol):
         minimize: bool = False,
         test_id: str | None = None,
         provider_mode: str = "invoke",
+        test_runner_mode: str = "auto",
         debug_check_file: str | None = None,
         actions_evidence_files: list[str] | None = None,
         actions_command: list[str] | None = None,
@@ -558,6 +580,26 @@ class ForgeOperationTarget(Protocol):
         post_repair_verification_plan_file: str | None = None,
         ravel_command: list[str] | None = None,
         diagnostic_depth: str = "minimal",
+        output_file: str | None = None,
+    ) -> JsonObject: ...
+    def mncs_observe(
+        self,
+        *,
+        program: str,
+        request: str,
+        debug_command: list[str] | None = None,
+        mncs_binary: str | None = None,
+        library_paths: list[str] | None = None,
+        core_path: str | None = None,
+        test_result: str | None = None,
+        working_directory: str = ".",
+        witness_file: str = ".mncs-forge/mncs-observe-witness.json",
+        capture_policy: str = "bounded",
+        max_events: int = 512,
+        max_values: int = 1024,
+        max_value_bytes: int = 4096,
+        selected_operations: list[str] | None = None,
+        timeout_seconds: float | None = None,
         output_file: str | None = None,
     ) -> JsonObject: ...
     def candidate_compare(self, candidate_ids: list[str]) -> JsonObject: ...
@@ -899,6 +941,7 @@ def _mncs_failure_loop(forge: ForgeOperationTarget, value: OperationInput) -> Js
         minimize=request.minimize,
         test_id=request.test_id,
         provider_mode=request.provider_mode,
+        test_runner_mode=request.test_runner_mode,
         debug_check_file=request.debug_check_file,
         actions_evidence_files=request.actions_evidence_files,
         actions_command=request.actions_command,
@@ -912,6 +955,28 @@ def _mncs_failure_loop(forge: ForgeOperationTarget, value: OperationInput) -> Js
         post_repair_verification_plan_file=request.post_repair_verification_plan_file,
         ravel_command=request.ravel_command,
         diagnostic_depth=request.diagnostic_depth,
+        output_file=request.output_file,
+    )
+
+
+def _mncs_observe(forge: ForgeOperationTarget, value: OperationInput) -> JsonObject:
+    request = _typed(value, MncsObserveInput)
+    return forge.mncs_observe(
+        program=request.program,
+        request=request.request,
+        debug_command=request.debug_command,
+        mncs_binary=request.mncs_binary,
+        library_paths=request.library_paths,
+        core_path=request.core_path,
+        test_result=request.test_result,
+        working_directory=request.working_directory,
+        witness_file=request.witness_file,
+        capture_policy=request.capture_policy,
+        max_events=request.max_events,
+        max_values=request.max_values,
+        max_value_bytes=request.max_value_bytes,
+        selected_operations=request.selected_operations,
+        timeout_seconds=request.timeout_seconds,
         output_file=request.output_file,
     )
 
@@ -1569,6 +1634,7 @@ _OPERATIONS = (
                 _binding("minimize", "minimize"),
                 _binding("test_id", "test_id"),
                 _binding("provider_mode", "provider_mode"),
+                _binding("test_runner_mode", "test_runner_mode"),
                 _binding("debug_check_file", "debug_check_file"),
                 _binding("actions_evidence_files", "actions_evidence_files", CliDecoder.JSON_VALUE),
                 _binding("actions_command", "actions_command", CliDecoder.JSON_VALUE),
@@ -1588,6 +1654,43 @@ _OPERATIONS = (
             ),
         ),
         mcp=_mcp("mncs_forge_mncs_failure_loop", DEVELOPMENT_ONLY),
+    ),
+    _operation(
+        "development.mncs.observe",
+        modes=DEVELOPMENT_ONLY,
+        mutation=MutationClass.MUTATING,
+        input_model=MncsObserveInput,
+        output=OutputContract.RECORD,
+        handler=_mncs_observe,
+        authority=AuthorityRequirement.DEVELOPMENT,
+        disclosure=DisclosureClass.DEVELOPMENT_EVIDENCE,
+        description=(
+            "Execute one record-equivalent mncs-debug observation under Forge-owned "
+            "confinement, deadline, and provenance, and return the bounded witness."
+        ),
+        cli=_cli(
+            "mncs",
+            "observe",
+            bindings=(
+                _binding("program"),
+                _binding("request"),
+                _binding("debug_command", "debug_command", CliDecoder.JSON_VALUE),
+                _binding("mncs_binary"),
+                _binding("library_paths", "library_paths", CliDecoder.JSON_VALUE),
+                _binding("core_path", "core_path"),
+                _binding("test_result", "test_result"),
+                _binding("working_directory", "working_directory"),
+                _binding("witness_file", "witness_file"),
+                _binding("capture_policy", "capture_policy"),
+                _binding("max_events", "max_events"),
+                _binding("max_values", "max_values"),
+                _binding("max_value_bytes", "max_value_bytes"),
+                _binding("selected_operations", "selected_operations"),
+                _binding("timeout_seconds", "timeout_seconds"),
+                _binding("output_file", "output_file"),
+            ),
+        ),
+        mcp=_mcp("mncs_forge_mncs_observe", DEVELOPMENT_ONLY),
     ),
     _operation(
         "candidates.compare",

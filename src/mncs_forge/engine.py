@@ -75,9 +75,7 @@ class Forge:
         # native Forge core, even when native public-mode selection is optional.
         self._resource_semantics = native
         self._executor = (
-            runner
-            if runner is not None
-            else build_runner(config, resource_semantics=native)
+            runner if runner is not None else build_runner(config, resource_semantics=native)
         )
         native.runner = self._executor
         self._observer = LocalProjectObserver(config)
@@ -533,6 +531,7 @@ class Forge:
         minimize: bool = False,
         test_id: str | None = None,
         provider_mode: str = "invoke",
+        test_runner_mode: str = "auto",
         debug_check_file: str | None = None,
         actions_evidence_files: list[str] | None = None,
         actions_command: list[str] | None = None,
@@ -570,6 +569,7 @@ class Forge:
             minimize=minimize,
             test_id=test_id,
             provider_mode=provider_mode,
+            test_runner_mode=test_runner_mode,
             debug_check_file=debug_check_file,
             actions_evidence_files=actions_evidence_files,
             actions_command=actions_command,
@@ -583,6 +583,45 @@ class Forge:
             post_repair_verification_plan_file=post_repair_verification_plan_file,
             ravel_command=ravel_command,
             diagnostic_depth=diagnostic_depth,
+            output_file=output_file,
+        )
+
+    def mncs_observe(
+        self,
+        *,
+        program: str,
+        request: str,
+        debug_command: list[str] | None = None,
+        mncs_binary: str | None = None,
+        library_paths: list[str] | None = None,
+        core_path: str | None = None,
+        test_result: str | None = None,
+        working_directory: str = ".",
+        witness_file: str = ".mncs-forge/mncs-observe-witness.json",
+        capture_policy: str = "bounded",
+        max_events: int = 512,
+        max_values: int = 1024,
+        max_value_bytes: int = 4096,
+        selected_operations: list[str] | None = None,
+        timeout_seconds: float | None = None,
+        output_file: str | None = None,
+    ) -> dict[str, object]:
+        return self._mncs_development_service.observe(
+            program=program,
+            request=request,
+            debug_command=debug_command,
+            mncs_binary=mncs_binary,
+            library_paths=library_paths,
+            core_path=core_path,
+            test_result=test_result,
+            working_directory=working_directory,
+            witness_file=witness_file,
+            capture_policy=capture_policy,
+            max_events=max_events,
+            max_values=max_values,
+            max_value_bytes=max_value_bytes,
+            selected_operations=selected_operations,
+            timeout_seconds=timeout_seconds,
             output_file=output_file,
         )
 

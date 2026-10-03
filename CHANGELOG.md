@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Execute test-mode work natively when the configured runner is a direct
+  native executable. `failure_loop` gains `test_runner_mode`
+  (`auto`/`native`/`legacy`): `auto` keeps `[python, *.py]` and
+  `mncs-test-compat` on the legacy `run --manifest` shape and routes
+  `mncs-test` to the native `mncs test SOURCE ... --result ... --format
+  json` shape (mirroring Actions, with the declared `mncs_binary` bound as
+  explicit `MNCS`). Both shapes run through the same bounded Runner and
+  validate the same envelopes; the policy is recorded as `execution_mode`.
+  Implements the Forge-owned half of MNCS-TEST-P-013. Covered by the
+  `test_work_request_*` / `test_runner_mode_*` unit tests.
+- Add Forge-owned observation-mode execution
+  (`development.mncs.observe`, `mncs observe`, `mncs_forge_mncs_observe`).
+  Debug submits program, request, and capture policy; Forge owns the
+  working directory, environment, deadline, and provenance, invokes the
+  local record entry, validates the witness, and returns the
+  `mncs.forge-observation/1` record with the embedded witness document and
+  Forge execution identity. `mncs-debug record` / `import-test` target it
+  with `--executor forge --forge-config ...`. Implements the Forge-owned
+  half of MNCS-DEBUG-P-016. Covered by `tests/test_mncs_observe.py`.
 - Decouple semantic tests from native-toolchain speed. Batch tests asserting
   semantic outcomes opt into headroom for compiler latency through a
   `with_native_latency_allowance` test helper (product defaults untouched;

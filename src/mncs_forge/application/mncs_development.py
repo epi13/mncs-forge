@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tomllib
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -23,6 +25,12 @@ from ..verification_plan_contract import validate_plan
 
 TEST_RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_RESULT_SCHEMA = "mncs.check-result/1"
+TEST_MANIFEST_SCHEMA = "mncs.test-manifest/1"
+TEST_MANIFEST_BYTE_CAP = 65536
+# Native `mncs test` default, shared with Actions' native branch: passing it
+# explicitly keeps the invocation self-describing without changing semantics.
+NATIVE_TEST_STEP_BUDGET_DEFAULT = 200000
+TEST_RUNNER_MODES = ("auto", "native", "legacy")
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 CAPABILITIES_SCHEMA = "mncs.debug-capabilities/1"
 SESSION_SCHEMA = "mncs.debug-session/1"
@@ -38,7 +46,11 @@ MINIMIZATION_SCHEMA = "mncs.debug-minimization/1"
 SUFFICIENCY_SCHEMA = "mncs.debug-sufficiency/1"
 DIAGNOSIS_SCHEMA = "mncs.debug-diagnosis/1"
 SELECTIVE_FAMILY_PROOF_SCHEMA = "mncs-actions.selective-family-proof/1"
+FORGE_OBSERVATION_SCHEMA = "mncs.forge-observation/1"
+OBSERVE_DEFAULT_TIMEOUT_SECONDS = 30.0
+WITNESS_BYTE_CAP = 4_000_000
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
+CAPTURE_POLICIES = ("failure-only", "selected", "bounded", "diagnostic", "events")
 
 
 def _mapping(value: object) -> dict[str, Any]:
@@ -59,6 +71,38 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class TestWorkRequest:
+    """Typed test-mode work over one resolved invocation shape.
+
+    The mode selects policy, never a parallel execution stack: both the
+    native ``mncs test`` shape and the legacy ``run --manifest`` shape run
+    through the same bounded Runner and produce the same validated
+    ``mncs.test-result/1`` / ``mncs.check-result/1`` envelopes.
+    ``environment_overlay`` carries explicit declared bindings (currently
+    only ``MNCS`` for native runners) over the allowlisted environment.
+    """
+
+    argv: list[str]
+    mode: str
+    environment_overlay: dict[str, str]
+
+
+@dataclass(frozen=True)
+class ObservationWorkRequest:
+    """Typed observe-mode work: one record-equivalent debug observation.
+
+    Debug declares intent (program, request, capture policy); Forge owns
+    the execution mechanics (contained working directory, allowlisted
+    environment, deadline, bounded output) and returns the witness with
+    Forge execution identity and provenance attached.
+    """
+
+    argv: list[str]
+    mode: str
+    environment_overlay: dict[str, str]
 
 
 class MncsDevelopmentService:
@@ -84,9 +128,7 @@ class MncsDevelopmentService:
         allowed = self.config.raw.get("environment_allowlist", [])
         return {key: os.environ[key] for key in allowed if key in os.environ}
 
-    def _assurance_decision(
-        self, value: NativeAssuranceInput
-    ) -> NativeAssuranceDecision | None:
+    def _assurance_decision(self, value: NativeAssuranceInput) -> NativeAssuranceDecision | None:
         """Interpret normalized provider facts through the one Forge policy owner."""
 
         if self.native_mode == "off":
@@ -172,6 +214,49 @@ class MncsDevelopmentService:
             provider_evidence_present=provider_evidence_present,
         )
 
+    @staticmethod
+    def _check_capture_policy(
+        capture_policy: str,
+        max_events: int,
+        max_values: int,
+        max_value_bytes: int,
+        selected_operations: list[str] | None,
+    ) -> None:
+        if capture_policy not in CAPTURE_POLICIES:
+            raise ForgeError(
+                "MNCS_DEBUG_INPUT",
+                "capture_policy must be failure-only, selected, bounded, diagnostic, or events",
+            )
+        if max_events < 1 or max_events > 512:
+            raise ForgeError("MNCS_DEBUG_INPUT", "max_events must be between 1 and 512")
+        if max_values < 0 or max_values > 2048:
+            raise ForgeError("MNCS_DEBUG_INPUT", "max_values must be between 0 and 2048")
+        if max_value_bytes < 0 or max_value_bytes > 65536:
+            raise ForgeError("MNCS_DEBUG_INPUT", "max_value_bytes must be between 0 and 65536")
+        if capture_policy == "selected" and not selected_operations:
+            raise ForgeError(
+                "MNCS_DEBUG_INPUT", "selected capture requires at least one operation identity"
+            )
+
+    def _explicit_input_path(self, value: str, *, label: str) -> Path:
+        """Resolve an explicit caller-declared provider input.
+
+        Absolute paths are accepted as declared (the caller, not Forge,
+        owns their location); relative paths stay contained in the Forge
+        project. Either way the input must exist.
+        """
+
+        candidate = Path(value)
+        if candidate.is_absolute():
+            try:
+                resolved = candidate.resolve(strict=True)
+            except OSError as exc:
+                raise ForgeError("PATH_RESOLUTION", f"{label} is unavailable: {exc}") from exc
+            if not resolved.is_file():
+                raise ForgeError("PATH_RESOLUTION", f"{label} is not a file")
+            return resolved
+        return self._path(value, must_exist=True)
+
     def _command_prefix(self, supplied: list[str] | None, configured_name: str) -> list[str]:
         value = supplied
         if value is None:
@@ -188,14 +273,23 @@ class MncsDevelopmentService:
         return list(value)
 
     def _run(
-        self, command: list[str], cwd: Path, *, label: str, timeout: float
+        self,
+        command: list[str],
+        cwd: Path,
+        *,
+        label: str,
+        timeout: float,
+        extra_environment: dict[str, str] | None = None,
     ) -> dict[str, object]:
+        environment = self._environment()
+        if extra_environment:
+            environment = {**environment, **extra_environment}
         session = self.executor.run(
             command,
             cwd=cwd,
             timeout=timeout,
             output_cap=self.config.output_cap,
-            environment=self._environment(),
+            environment=environment,
         )
         if session.error_code is not None:
             raise ForgeError(
@@ -434,7 +528,105 @@ class MncsDevelopmentService:
             "sufficient_to_stop": proof.get("sufficient_to_stop"),
         }
 
-    def _test_command(
+    @staticmethod
+    def _test_runner_mode(prefix: list[str], override: str) -> str:
+        """Resolve test-mode policy for one configured runner prefix.
+
+        ``[python, script.py]`` and ``*.py`` runners only serve the legacy
+        ``run --manifest`` shape, as does the explicit ``mncs-test-compat``
+        adapter. A direct native executable (``mncs-test``) takes the native
+        ``mncs test SOURCE ...`` shape. Unknown multi-item prefixes keep the
+        historical legacy shape; deployments with renamed binaries choose
+        explicitly through ``test_runner_mode``.
+        """
+
+        if override == "native":
+            return "test-native"
+        if override == "legacy":
+            return "test-legacy"
+        if (
+            len(prefix) == 2
+            and Path(prefix[0]).name.startswith("python")
+            and Path(prefix[1]).suffix == ".py"
+        ):
+            return "test-legacy"
+        if len(prefix) == 1:
+            name = Path(prefix[0]).name
+            if name.endswith(".py") or name == "mncs-test-compat" or name.endswith("-compat"):
+                return "test-legacy"
+            return "test-native"
+        return "test-legacy"
+
+    def _read_test_manifest(self, manifest: Path) -> dict[str, Any]:
+        """Project the native invocation inputs out of a test manifest.
+
+        Resolution mirrors the legacy runner: ``source`` and ``libraries``
+        are absolute or manifest-relative paths that must exist. Forge does
+        not reinterpret test selection or oracle semantics here.
+        """
+
+        try:
+            data = manifest.read_bytes()
+        except OSError as exc:
+            raise ForgeError("PATH_RESOLUTION", f"test manifest is unavailable: {exc}") from exc
+        if len(data) > TEST_MANIFEST_BYTE_CAP:
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "test manifest exceeds its read bound")
+        try:
+            raw = tomllib.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", f"test manifest is not valid TOML: {exc}"
+            ) from exc
+        if not isinstance(raw, dict) or raw.get("schema_version") != TEST_MANIFEST_SCHEMA:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "test manifest schema_version must be mncs.test-manifest/1",
+            )
+        for field_name in ("name", "source", "module"):
+            value = raw.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ForgeError(
+                    "PROVIDER_CONTRACT_INVALID",
+                    f"test manifest field {field_name!r} must be a non-empty string",
+                )
+        step_budget = raw.get("step_budget", NATIVE_TEST_STEP_BUDGET_DEFAULT)
+        if not isinstance(step_budget, int) or isinstance(step_budget, bool) or step_budget <= 0:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "test manifest step_budget must be a positive integer",
+            )
+        libraries = raw.get("libraries", [])
+        if not isinstance(libraries, list) or not all(
+            isinstance(item, str) and item for item in libraries
+        ):
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "test manifest libraries must be an array of non-empty strings",
+            )
+        base = manifest.parent
+        source_value = raw["source"]
+        source_path = Path(source_value)
+        resolved_source = (
+            source_path if source_path.is_absolute() else base / source_path
+        ).resolve()
+        if not resolved_source.is_file():
+            raise ForgeError(
+                "PATH_RESOLUTION", f"test manifest source is unavailable: {source_value}"
+            )
+        resolved_libraries: list[str] = []
+        for item in libraries:
+            candidate = Path(item)
+            resolved = (candidate if candidate.is_absolute() else base / candidate).resolve()
+            if not resolved.is_dir():
+                raise ForgeError("PATH_RESOLUTION", f"test manifest library is unavailable: {item}")
+            resolved_libraries.append(str(resolved))
+        return {
+            "source": resolved_source,
+            "step_budget": step_budget,
+            "libraries": resolved_libraries,
+        }
+
+    def _test_work_request(
         self,
         prefix: list[str],
         *,
@@ -446,28 +638,58 @@ class MncsDevelopmentService:
         library_paths: list[str] | None,
         embed_library: str | None,
         verification_plan: Path | None = None,
-    ) -> list[str]:
+        runner_mode: str = "auto",
+    ) -> TestWorkRequest:
+        """Build typed test-mode work for the selected runner policy."""
+
+        mode = self._test_runner_mode(prefix, runner_mode)
+        if mode == "test-legacy":
+            command = [
+                *prefix,
+                "run",
+                "--manifest",
+                str(manifest),
+                "--result",
+                str(result),
+                "--check-result",
+                str(check),
+                "--artifacts",
+                str(artifacts),
+            ]
+            if mncs_binary:
+                command.extend(("--mncs", mncs_binary))
+            for path in library_paths or []:
+                command.extend(("--library", path))
+            if embed_library:
+                command.extend(("--embed-library", embed_library))
+            if verification_plan is not None:
+                command.extend(("--verification-plan", str(verification_plan)))
+            return TestWorkRequest(argv=command, mode=mode, environment_overlay={})
+        declared = self._read_test_manifest(manifest)
         command = [
             *prefix,
-            "run",
-            "--manifest",
-            str(manifest),
+            str(declared["source"]),
+            "--step-budget",
+            str(declared["step_budget"]),
             "--result",
             str(result),
             "--check-result",
             str(check),
             "--artifacts",
             str(artifacts),
+            "--format",
+            "json",
         ]
-        if mncs_binary:
-            command.extend(("--mncs", mncs_binary))
-        for path in library_paths or []:
-            command.extend(("--library", path))
-        if embed_library:
-            command.extend(("--embed-library", embed_library))
         if verification_plan is not None:
             command.extend(("--verification-plan", str(verification_plan)))
-        return command
+        for path in dict.fromkeys([*(library_paths or []), *declared["libraries"]]):
+            command.extend(("--library", path))
+        overlay: dict[str, str] = {}
+        if mncs_binary:
+            # The native adapter resolves its toolchain from MNCS; bind the
+            # declared binary explicitly instead of inheriting ambient state.
+            overlay["MNCS"] = mncs_binary
+        return TestWorkRequest(argv=command, mode=mode, environment_overlay=overlay)
 
     @staticmethod
     def _family_runner_path(prefix: list[str], *, label: str) -> str:
@@ -1317,6 +1539,7 @@ class MncsDevelopmentService:
         minimize: bool = False,
         test_id: str | None = None,
         provider_mode: str = "invoke",
+        test_runner_mode: str = "auto",
         debug_check_file: str | None = None,
         actions_evidence_files: list[str] | None = None,
         actions_command: list[str] | None = None,
@@ -1341,26 +1564,18 @@ class MncsDevelopmentService:
             )
         if provider_mode not in {"invoke", "consume"}:
             raise ForgeError("MNCS_PROVIDER_INPUT", "provider_mode must be invoke or consume")
+        if test_runner_mode not in TEST_RUNNER_MODES:
+            raise ForgeError(
+                "MNCS_PROVIDER_INPUT", "test_runner_mode must be auto, native, or legacy"
+            )
         if diagnostic_depth not in {"minimal", "standard", "deep"}:
             raise ForgeError(
                 "MNCS_DEBUG_INPUT",
                 "diagnostic_depth must be minimal, standard, or deep",
             )
-        if capture_policy not in {"failure-only", "selected", "bounded", "diagnostic", "events"}:
-            raise ForgeError(
-                "MNCS_DEBUG_INPUT",
-                "capture_policy must be failure-only, selected, bounded, diagnostic, or events",
-            )
-        if max_events < 1 or max_events > 512:
-            raise ForgeError("MNCS_DEBUG_INPUT", "max_events must be between 1 and 512")
-        if max_values < 0 or max_values > 2048:
-            raise ForgeError("MNCS_DEBUG_INPUT", "max_values must be between 0 and 2048")
-        if max_value_bytes < 0 or max_value_bytes > 65536:
-            raise ForgeError("MNCS_DEBUG_INPUT", "max_value_bytes must be between 0 and 65536")
-        if capture_policy == "selected" and not selected_operations:
-            raise ForgeError(
-                "MNCS_DEBUG_INPUT", "selected capture requires at least one operation identity"
-            )
+        self._check_capture_policy(
+            capture_policy, max_events, max_values, max_value_bytes, selected_operations
+        )
         timeout = float(timeout_seconds if timeout_seconds is not None else self.config.timeout)
         if timeout <= 0:
             raise ForgeError("MNCS_DEBUG_INPUT", "timeout_seconds must be positive")
@@ -1442,7 +1657,7 @@ class MncsDevelopmentService:
 
         test_prefix = self._command_prefix(test_command, "mncs_test")
         if provider_mode == "invoke":
-            test_argv = self._test_command(
+            test_work = self._test_work_request(
                 test_prefix,
                 manifest=manifest_path,
                 result=result_path,
@@ -1452,8 +1667,16 @@ class MncsDevelopmentService:
                 library_paths=library_paths,
                 embed_library=embed_library,
                 verification_plan=verification_plan_path,
+                runner_mode=test_runner_mode,
             )
-            before_execution = self._run(test_argv, cwd, label="mncs-test", timeout=timeout)
+            before_execution = self._run(
+                test_work.argv,
+                cwd,
+                label="mncs-test",
+                timeout=timeout,
+                extra_environment=test_work.environment_overlay,
+            )
+            before_execution["execution_mode"] = test_work.mode
         else:
             if not result_path.is_file() or not check_path.is_file():
                 raise ForgeError(
@@ -2308,7 +2531,7 @@ class MncsDevelopmentService:
         after_result = result_path.with_name(result_path.stem + ".after" + result_path.suffix)
         after_check = check_path.with_name(check_path.stem + ".after" + check_path.suffix)
         after_artifacts = test_artifacts.with_name(test_artifacts.name + ".after")
-        after_argv = self._test_command(
+        after_work = self._test_work_request(
             test_prefix,
             manifest=manifest_path,
             result=after_result,
@@ -2318,10 +2541,16 @@ class MncsDevelopmentService:
             library_paths=library_paths,
             embed_library=embed_library,
             verification_plan=after_plan_path,
+            runner_mode=test_runner_mode,
         )
         after_execution = self._run(
-            after_argv, cwd, label="mncs-test-verification", timeout=timeout
+            after_work.argv,
+            cwd,
+            label="mncs-test-verification",
+            timeout=timeout,
+            extra_environment=after_work.environment_overlay,
         )
+        after_execution["execution_mode"] = after_work.mode
         after_test = self._read(after_result, label="mncs-test verification result")
         after_check_value = self._read(after_check, label="mncs-test verification check")
         self._validate_test_result(after_test)
@@ -2399,9 +2628,10 @@ class MncsDevelopmentService:
             family_status = family_proof.get("status")
             family_proof_status = str(family_status) if family_status in VERDICTS else "UNKNOWN"
             family_proof_present = family_status in VERDICTS
-            family_proof_sufficient = _mapping(family_proof.get("proof")).get(
-                "sufficient_to_stop"
-            ) is True or family_status == "PASS"
+            family_proof_sufficient = (
+                _mapping(family_proof.get("proof")).get("sufficient_to_stop") is True
+                or family_status == "PASS"
+            )
         base["provenance"]["identity_continuity"] = {
             "before_test_run_id": test_result.get("run_id"),
             "before_test_id": selected_id,
@@ -2413,8 +2643,7 @@ class MncsDevelopmentService:
             "source_after_sha256": after_source_sha,
         }
         after_proof_required = after_plan is not None and (
-            _mapping(after_plan.get("selection")).get("routing_scope")
-            == "selected_repositories"
+            _mapping(after_plan.get("selection")).get("routing_scope") == "selected_repositories"
             or not proof_sufficient
         )
         decision = apply_assurance(
@@ -2438,6 +2667,181 @@ class MncsDevelopmentService:
         if decision is None and "selected_family_proof" not in base["observability"]:
             base["verdict"] = after_test.get("verdict") if proof_sufficient else "UNKNOWN"
         return self._persist(base, output_file)
+
+    def _observe_work_request(
+        self,
+        prefix: list[str],
+        *,
+        program: Path,
+        request: Path,
+        witness: Path,
+        cwd: Path,
+        mncs_binary: str | None,
+        library_paths: list[str] | None,
+        core_path: Path | None,
+        capture_policy: str,
+        max_events: int,
+        max_values: int,
+        max_value_bytes: int,
+        selected_operations: list[str] | None,
+        timeout: float,
+        test_result: Path | None = None,
+    ) -> ObservationWorkRequest:
+        """Build typed observe-mode work over the debug record entry."""
+
+        command = [*prefix, "record", str(program), str(request)]
+        if test_result is not None:
+            command.extend(("--test-result", str(test_result)))
+        if mncs_binary:
+            command.extend(("--mncs", mncs_binary))
+        command.extend(("--cwd", str(cwd), "--timeout", str(timeout)))
+        if core_path is not None:
+            command.extend(("--core", str(core_path)))
+        command.extend(
+            (
+                "--capture",
+                capture_policy,
+                "--max-events",
+                str(max_events),
+                "--max-values",
+                str(max_values),
+                "--max-value-bytes",
+                str(max_value_bytes),
+            )
+        )
+        if capture_policy == "selected":
+            for operation in selected_operations or []:
+                command.extend(("--operation", operation))
+        for path in library_paths or []:
+            command.extend(("--library", path))
+        # Forge invokes the local record entry: the outer execution is
+        # already Forge-owned, so a nested Forge submission would recurse.
+        command.extend(("--executor", "local"))
+        command.extend(("--output", str(witness), "--format", "json"))
+        return ObservationWorkRequest(argv=command, mode="observe", environment_overlay={})
+
+    def observe(
+        self,
+        *,
+        program: str,
+        request: str,
+        debug_command: list[str] | None = None,
+        mncs_binary: str | None = None,
+        library_paths: list[str] | None = None,
+        core_path: str | None = None,
+        test_result: str | None = None,
+        working_directory: str = ".",
+        witness_file: str = ".mncs-forge/mncs-observe-witness.json",
+        capture_policy: str = "bounded",
+        max_events: int = 512,
+        max_values: int = 1024,
+        max_value_bytes: int = 4096,
+        selected_operations: list[str] | None = None,
+        timeout_seconds: float | None = None,
+        output_file: str | None = None,
+    ) -> dict[str, object]:
+        """Execute one record-equivalent observation under Forge ownership.
+
+        Defaults match ``mncs-debug record`` so a local record and a
+        Forge-submitted observation differ only in execution ownership,
+        never in capture semantics.
+        """
+
+        if (
+            self.config.raw.get("authority", {}).get("development", {}).get("may_run_providers")
+            is not True
+        ):
+            raise ForgeError(
+                "AUTHORITY_FORBIDDEN", "development authority does not permit provider execution"
+            )
+        self._check_capture_policy(
+            capture_policy, max_events, max_values, max_value_bytes, selected_operations
+        )
+        timeout = float(
+            timeout_seconds if timeout_seconds is not None else OBSERVE_DEFAULT_TIMEOUT_SECONDS
+        )
+        if timeout <= 0:
+            raise ForgeError("MNCS_DEBUG_INPUT", "timeout_seconds must be positive")
+        program_path = self._explicit_input_path(program, label="observation program")
+        request_path = self._explicit_input_path(request, label="observation request")
+        core_resolved = (
+            self._explicit_input_path(core_path, label="debug core")
+            if core_path is not None
+            else None
+        )
+        test_result_resolved = (
+            self._explicit_input_path(test_result, label="pinned test result")
+            if test_result is not None
+            else None
+        )
+        cwd = self._path(working_directory, must_exist=True)
+        witness_path = self._path(witness_file)
+        witness_path.parent.mkdir(parents=True, exist_ok=True)
+        prefix = self._command_prefix(debug_command, "mncs_debug")
+        work = self._observe_work_request(
+            prefix,
+            program=program_path,
+            request=request_path,
+            witness=witness_path,
+            cwd=cwd,
+            mncs_binary=mncs_binary,
+            library_paths=library_paths,
+            core_path=core_resolved,
+            capture_policy=capture_policy,
+            max_events=max_events,
+            max_values=max_values,
+            max_value_bytes=max_value_bytes,
+            selected_operations=selected_operations,
+            timeout=timeout,
+            test_result=test_result_resolved,
+        )
+        execution = self._run(
+            work.argv,
+            cwd,
+            label="mncs-debug-observe",
+            timeout=timeout,
+            extra_environment=work.environment_overlay,
+        )
+        execution["execution_mode"] = work.mode
+        if not witness_path.is_file():
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID",
+                "mncs-debug record produced no observation witness",
+            )
+        witness = self._read(witness_path, label="observation witness", byte_cap=WITNESS_BYTE_CAP)
+        if witness.get("schema_version") != WITNESS_SCHEMA:
+            raise ForgeError("PROVIDER_CONTRACT_INVALID", "mncs-debug did not emit a debug witness")
+        witness_id = witness.get("witness_id")
+        if not isinstance(witness_id, str) or not witness_id:
+            raise ForgeError(
+                "PROVIDER_CONTRACT_INVALID", "observation witness has no witness identity"
+            )
+        observation = self._validate_native_observation(witness)
+        runtime = _mapping(witness.get("runtime"))
+        outcome = _mapping(witness.get("outcome"))
+        result: dict[str, object] = {
+            "schema_version": FORGE_OBSERVATION_SCHEMA,
+            "operation": "development.mncs.observe",
+            "mode": work.mode,
+            "witness": {
+                "ref": self._ref(witness_path, "mncs-debug-witness", WITNESS_SCHEMA),
+                "witness_id": witness_id,
+                "execution_identity": witness.get("execution_identity"),
+                "observation_identity": runtime.get("observation_identity"),
+                "failure_class": outcome.get("failure_class"),
+                "observation_present": observation is not None,
+            },
+            "witness_document": witness,
+            "execution": execution,
+            "provenance": {
+                "program": {"path": str(program_path), "sha256": _sha256(program_path)},
+                "request": {"path": str(request_path), "sha256": _sha256(request_path)},
+                "mncs_binary": mncs_binary,
+                "library_paths": list(library_paths or []),
+                "capture_policy": capture_policy,
+            },
+        }
+        return self._persist(result, output_file)
 
     def _persist(self, result: dict[str, Any], output_file: str | None) -> dict[str, Any]:
         material = dict(result)

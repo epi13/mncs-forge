@@ -467,6 +467,11 @@
         },
         {
           "decoder": "value",
+          "input": "test_runner_mode",
+          "namespace": "test_runner_mode"
+        },
+        {
+          "decoder": "value",
           "input": "debug_check_file",
           "namespace": "debug_check_file"
         },
@@ -529,6 +534,88 @@
           "decoder": "value",
           "input": "diagnostic_depth",
           "namespace": "diagnostic_depth"
+        },
+        {
+          "decoder": "value",
+          "input": "output_file",
+          "namespace": "output_file"
+        }
+      ],
+      "development.mncs.observe": [
+        {
+          "decoder": "value",
+          "input": "program",
+          "namespace": "program"
+        },
+        {
+          "decoder": "value",
+          "input": "request",
+          "namespace": "request"
+        },
+        {
+          "decoder": "json-value",
+          "input": "debug_command",
+          "namespace": "debug_command"
+        },
+        {
+          "decoder": "value",
+          "input": "mncs_binary",
+          "namespace": "mncs_binary"
+        },
+        {
+          "decoder": "json-value",
+          "input": "library_paths",
+          "namespace": "library_paths"
+        },
+        {
+          "decoder": "value",
+          "input": "core_path",
+          "namespace": "core_path"
+        },
+        {
+          "decoder": "value",
+          "input": "test_result",
+          "namespace": "test_result"
+        },
+        {
+          "decoder": "value",
+          "input": "working_directory",
+          "namespace": "working_directory"
+        },
+        {
+          "decoder": "value",
+          "input": "witness_file",
+          "namespace": "witness_file"
+        },
+        {
+          "decoder": "value",
+          "input": "capture_policy",
+          "namespace": "capture_policy"
+        },
+        {
+          "decoder": "value",
+          "input": "max_events",
+          "namespace": "max_events"
+        },
+        {
+          "decoder": "value",
+          "input": "max_values",
+          "namespace": "max_values"
+        },
+        {
+          "decoder": "value",
+          "input": "max_value_bytes",
+          "namespace": "max_value_bytes"
+        },
+        {
+          "decoder": "value",
+          "input": "selected_operations",
+          "namespace": "selected_operations"
+        },
+        {
+          "decoder": "value",
+          "input": "timeout_seconds",
+          "namespace": "timeout_seconds"
         },
         {
           "decoder": "value",
@@ -1795,6 +1882,20 @@
             "required": false
           },
           {
+            "choices": [
+              "auto",
+              "native",
+              "legacy"
+            ],
+            "default": "auto",
+            "destination": "test_runner_mode",
+            "nargs": null,
+            "options": [
+              "--test-runner-mode"
+            ],
+            "required": false
+          },
+          {
             "default": null,
             "destination": "debug_check_file",
             "nargs": null,
@@ -1927,6 +2028,162 @@
           }
         ],
         "operation_id": "development.mncs.failure-loop"
+      },
+      "mncs observe": {
+        "arguments": [
+          {
+            "default": null,
+            "destination": "program",
+            "nargs": null,
+            "options": [],
+            "required": true
+          },
+          {
+            "default": null,
+            "destination": "request",
+            "nargs": null,
+            "options": [],
+            "required": true
+          },
+          {
+            "default": null,
+            "destination": "debug_command",
+            "nargs": null,
+            "options": [
+              "--debug-command"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "mncs_binary",
+            "nargs": null,
+            "options": [
+              "--mncs-binary"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "library_paths",
+            "nargs": null,
+            "options": [
+              "--library-paths"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "core_path",
+            "nargs": null,
+            "options": [
+              "--core-path"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "test_result",
+            "nargs": null,
+            "options": [
+              "--test-result"
+            ],
+            "required": false
+          },
+          {
+            "default": ".",
+            "destination": "working_directory",
+            "nargs": null,
+            "options": [
+              "--working-directory"
+            ],
+            "required": false
+          },
+          {
+            "default": ".mncs-forge/mncs-observe-witness.json",
+            "destination": "witness_file",
+            "nargs": null,
+            "options": [
+              "--witness-file"
+            ],
+            "required": false
+          },
+          {
+            "choices": [
+              "failure-only",
+              "selected",
+              "bounded",
+              "diagnostic",
+              "events"
+            ],
+            "default": "bounded",
+            "destination": "capture_policy",
+            "nargs": null,
+            "options": [
+              "--capture-policy"
+            ],
+            "required": false
+          },
+          {
+            "default": 512,
+            "destination": "max_events",
+            "nargs": null,
+            "options": [
+              "--max-events"
+            ],
+            "required": false,
+            "value_type": "int"
+          },
+          {
+            "default": 1024,
+            "destination": "max_values",
+            "nargs": null,
+            "options": [
+              "--max-values"
+            ],
+            "required": false,
+            "value_type": "int"
+          },
+          {
+            "default": 4096,
+            "destination": "max_value_bytes",
+            "nargs": null,
+            "options": [
+              "--max-value-bytes"
+            ],
+            "required": false,
+            "value_type": "int"
+          },
+          {
+            "default": null,
+            "destination": "selected_operations",
+            "nargs": null,
+            "options": [
+              "--selected-operation"
+            ],
+            "required": false
+          },
+          {
+            "default": null,
+            "destination": "timeout_seconds",
+            "nargs": null,
+            "options": [
+              "--timeout-seconds"
+            ],
+            "required": false,
+            "value_type": "float"
+          },
+          {
+            "default": null,
+            "destination": "output_file",
+            "nargs": null,
+            "options": [
+              "--output-file"
+            ],
+            "required": false
+          }
+        ],
+        "operation_id": "development.mncs.observe"
       },
       "operations": {
         "arguments": [],
@@ -2966,14 +3223,41 @@
             "test_command",
             "test_id",
             "test_result_file",
+            "test_runner_mode",
             "timeout_seconds",
             "verification_plan_file",
             "working_directory"
           ],
-          "input_schema_sha256": "5cbf5c56ca5e8fddf2e213df3789057f8e5dffeb4a70f50862d3f87e0df7a294",
+          "input_schema_sha256": "a3a3089a2397fc54304e632c0113592218d757066e676c8d2f0a50a992218c8e",
           "output_schema_sha256": "82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
           "required_inputs": [
             "manifest"
+          ]
+        },
+        "mncs_forge_mncs_observe": {
+          "input_properties": [
+            "capture_policy",
+            "core_path",
+            "debug_command",
+            "library_paths",
+            "max_events",
+            "max_value_bytes",
+            "max_values",
+            "mncs_binary",
+            "output_file",
+            "program",
+            "request",
+            "selected_operations",
+            "test_result",
+            "timeout_seconds",
+            "witness_file",
+            "working_directory"
+          ],
+          "input_schema_sha256": "3333c35398441ccd6c59d20c5742a273364cdf99c1792f23f49e2bc76bdb7e29",
+          "output_schema_sha256": "82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+          "required_inputs": [
+            "program",
+            "request"
           ]
         },
         "mncs_forge_project_inspect": {
@@ -3596,6 +3880,7 @@
       "development.continuous.status",
       "development.failure.explain",
       "development.mncs.failure-loop",
+      "development.mncs.observe",
       "epochs.begin",
       "evaluation.final.run",
       "evidence.reconcile",
@@ -3621,7 +3906,7 @@
       "verifiers.run"
     ],
     "schema_version": "1",
-    "semantic_sha256": "955e3fb96e4ff64025029537a3085ddf013c491422e31ac82c44b2cfe943c0c4"
+    "semantic_sha256": "7a2ec5641eb86c10fae12f777f806772c36831d5f8d44c144ccf1eab40d2327a"
   },
   "packaging": {
     "dependencies": [
@@ -3684,7 +3969,8 @@
       "learned_specialist_shadow": "(self, artifact_path: 'str', provider_command: 'list[str]', source_records: 'list[dict[str, object]]', *, context_observations: 'list[dict[str, object]] | None' = None, lineage_identity: 'str | None' = None, timeout_seconds: 'float' = 5.0) -> 'dict[str, object]'",
       "ledger_verify": "(self) -> 'dict[str, object]'",
       "license_evidence_scan": "(self) -> 'dict[str, object]'",
-      "mncs_failure_loop": "(self, *, manifest: 'str', test_command: 'list[str] | None' = None, debug_command: 'list[str] | None' = None, mncs_binary: 'str | None' = None, library_paths: 'list[str] | None' = None, embed_library: 'str | None' = None, working_directory: 'str' = '.', test_result_file: 'str' = '.mncs-forge/mncs-test-result.json', test_check_file: 'str' = '.mncs-forge/mncs-test-check.json', test_artifacts_directory: 'str' = '.mncs-forge/mncs-test-artifacts', debug_witness_file: 'str' = '.mncs-forge/mncs-debug-witness.json', debug_artifacts_directory: 'str' = '.mncs-forge/mncs-debug-artifacts', capture_policy: 'str' = 'failure-only', max_events: 'int' = 256, max_values: 'int' = 1024, max_value_bytes: 'int' = 4096, selected_operations: 'list[str] | None' = None, timeout_seconds: 'float | None' = None, minimize: 'bool' = False, test_id: 'str | None' = None, provider_mode: 'str' = 'invoke', debug_check_file: 'str | None' = None, actions_evidence_files: 'list[str] | None' = None, actions_command: 'list[str] | None' = None, family_graph_file: 'str | None' = None, family_workspace_root: 'str | None' = None, family_proof_directory: 'str' = '.mncs-forge/family-proof', repair_path: 'str | None' = None, repair_from: 'str | None' = None, repair_to: 'str | None' = None, verification_plan_file: 'str | None' = None, post_repair_verification_plan_file: 'str | None' = None, ravel_command: 'list[str] | None' = None, diagnostic_depth: 'str' = 'minimal', output_file: 'str | None' = None) -> 'dict[str, object]'",
+      "mncs_failure_loop": "(self, *, manifest: 'str', test_command: 'list[str] | None' = None, debug_command: 'list[str] | None' = None, mncs_binary: 'str | None' = None, library_paths: 'list[str] | None' = None, embed_library: 'str | None' = None, working_directory: 'str' = '.', test_result_file: 'str' = '.mncs-forge/mncs-test-result.json', test_check_file: 'str' = '.mncs-forge/mncs-test-check.json', test_artifacts_directory: 'str' = '.mncs-forge/mncs-test-artifacts', debug_witness_file: 'str' = '.mncs-forge/mncs-debug-witness.json', debug_artifacts_directory: 'str' = '.mncs-forge/mncs-debug-artifacts', capture_policy: 'str' = 'failure-only', max_events: 'int' = 256, max_values: 'int' = 1024, max_value_bytes: 'int' = 4096, selected_operations: 'list[str] | None' = None, timeout_seconds: 'float | None' = None, minimize: 'bool' = False, test_id: 'str | None' = None, provider_mode: 'str' = 'invoke', test_runner_mode: 'str' = 'auto', debug_check_file: 'str | None' = None, actions_evidence_files: 'list[str] | None' = None, actions_command: 'list[str] | None' = None, family_graph_file: 'str | None' = None, family_workspace_root: 'str | None' = None, family_proof_directory: 'str' = '.mncs-forge/family-proof', repair_path: 'str | None' = None, repair_from: 'str | None' = None, repair_to: 'str | None' = None, verification_plan_file: 'str | None' = None, post_repair_verification_plan_file: 'str | None' = None, ravel_command: 'list[str] | None' = None, diagnostic_depth: 'str' = 'minimal', output_file: 'str | None' = None) -> 'dict[str, object]'",
+      "mncs_observe": "(self, *, program: 'str', request: 'str', debug_command: 'list[str] | None' = None, mncs_binary: 'str | None' = None, library_paths: 'list[str] | None' = None, core_path: 'str | None' = None, test_result: 'str | None' = None, working_directory: 'str' = '.', witness_file: 'str' = '.mncs-forge/mncs-observe-witness.json', capture_policy: 'str' = 'bounded', max_events: 'int' = 512, max_values: 'int' = 1024, max_value_bytes: 'int' = 4096, selected_operations: 'list[str] | None' = None, timeout_seconds: 'float | None' = None, output_file: 'str | None' = None) -> 'dict[str, object]'",
       "project_inspect": "(self) -> 'dict[str, object]'",
       "provider_list": "(self) -> 'dict[str, object]'",
       "provider_probe": "(self, provider_id: 'str') -> 'dict[str, object]'",

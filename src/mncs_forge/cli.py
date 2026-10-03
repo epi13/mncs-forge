@@ -218,6 +218,9 @@ def _common_parser() -> argparse.ArgumentParser:
     failure_loop.add_argument("--minimize", action="store_true")
     failure_loop.add_argument("--test-id", default=None)
     failure_loop.add_argument("--provider-mode", choices=("invoke", "consume"), default="invoke")
+    failure_loop.add_argument(
+        "--test-runner-mode", choices=("auto", "native", "legacy"), default="auto"
+    )
     failure_loop.add_argument("--debug-check-file", default=None)
     failure_loop.add_argument("--actions-evidence-files", default=None)
     failure_loop.add_argument("--actions-command", default=None)
@@ -234,6 +237,33 @@ def _common_parser() -> argparse.ArgumentParser:
         "--diagnostic-depth", choices=("minimal", "standard", "deep"), default="minimal"
     )
     failure_loop.add_argument("--output-file", default=None)
+
+    observe = _register(
+        mncs_commands.add_parser(_cli_command("development.mncs.observe")),
+        "development.mncs.observe",
+    )
+    observe.add_argument("program")
+    observe.add_argument("request")
+    observe.add_argument("--debug-command", default=None)
+    observe.add_argument("--mncs-binary", default=None)
+    observe.add_argument("--library-paths", default=None)
+    observe.add_argument("--core-path", default=None)
+    observe.add_argument("--test-result", default=None)
+    observe.add_argument("--working-directory", default=".")
+    observe.add_argument("--witness-file", default=".mncs-forge/mncs-observe-witness.json")
+    observe.add_argument(
+        "--capture-policy",
+        choices=("failure-only", "selected", "bounded", "diagnostic", "events"),
+        default="bounded",
+    )
+    observe.add_argument("--max-events", type=int, default=512)
+    observe.add_argument("--max-values", type=int, default=1024)
+    observe.add_argument("--max-value-bytes", type=int, default=4096)
+    observe.add_argument(
+        "--selected-operation", dest="selected_operations", action="append", default=None
+    )
+    observe.add_argument("--timeout-seconds", type=float, default=None)
+    observe.add_argument("--output-file", default=None)
 
     explain = _register(
         commands.add_parser(_cli_command("development.failure.explain")),
