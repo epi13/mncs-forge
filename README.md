@@ -1,5 +1,25 @@
 # MNCS Forge
 
+<!-- MNCS:generated:begin -->
+## Project entry
+
+Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority.
+
+Declared capabilities (declarations do not establish execution health):
+
+- `assurance-workflow/1` — candidate-evidence-workflow (experimental)
+- `continuous-process-supervision/1` — generic-process-effect-supervision (experimental)
+- `continuous-trigger-routing/1` — native-event-routing-policy (experimental)
+- `mncs-forge.provider-artifact-execution/1` — bounded-provider-artifact-transport (experimental)
+- `resident-reconcile/1` — resident-provider-reconcile (experimental)
+- `resident-status/1` — resident-provider-status (experimental)
+- `resident-stop/1` — resident-provider-stop (experimental)
+- `resident-work/1` — selected-resident-workflow (experimental)
+- `workspace-first-continuous-entry/1` — workspace-bound-continuous-entry (experimental)
+
+Semantic sources and ownership: `.mncs/projections.json`.
+<!-- MNCS:generated:end -->
+
 MNCS Forge is an experimental, non-normative CLI for
 machine-native development and evidence control. It makes project authority, candidate lineage,
 declared checks, provider capabilities, evidence gaps, selection, freeze, and evaluator-mode

@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.project-intent/1",
+  "purpose": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority.",
+  "entry": [],
+  "milestones": [
+    {
+      "id": "mncs-forge:projection-conformance",
+      "title": "Declared ambient projection surfaces satisfy their contract",
+      "subject_slot": "declarations",
+      "evidence": "projection-conformance",
+      "dependencies": [],
+      "blockers": []
+    }
+  ]
+}

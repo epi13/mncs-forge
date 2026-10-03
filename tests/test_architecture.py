@@ -131,6 +131,7 @@ def test_subprocess_implementation_is_confined_to_execution_modules() -> None:
         "continuous.py",
         "execution.py",
         "execution_windows.py",
+        "provider_artifacts.py",
         "resident.py",
         "resource_envelope.py",
     ]

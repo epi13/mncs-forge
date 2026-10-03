@@ -1,5 +1,11 @@
 # MNCS Forge development roadmap
 
+<!-- MNCS:generated:begin -->
+## Evidence-bound roadmap
+
+- **complete** — Declared ambient projection surfaces satisfy their contract (`mncs-forge:projection-conformance`)
+<!-- MNCS:generated:end -->
+
 This roadmap separates low-risk repository maintenance from architectural changes that require
 focused implementation, compatibility work, and adversarial testing. It is directional rather
 than normative and does not change the claim boundary of Forge or MNCS/MNCDS.

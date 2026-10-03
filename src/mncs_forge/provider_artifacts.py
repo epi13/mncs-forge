@@ -174,7 +174,7 @@ class ProviderArtifact:
             result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60, check=False)
             path = Path(directory) / 'backend.json'
             if result.returncode or not path.is_file():
-                raise ProviderArtifactError('owner build failed: ' + result.stderr[-500:])
+                raise ProviderArtifactError('owner build failed: ' + (result.stderr or result.stdout)[-1500:])
             data = path.read_bytes()
             artifact = json.loads(data)
             modules = sorted({name.rsplit('::', 1)[0] for name in artifact['function_value_contracts'] if '::' in name})
