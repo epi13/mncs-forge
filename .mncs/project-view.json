@@ -274,7 +274,7 @@
   "purpose": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority.",
   "repository": "mncs-forge",
   "schema_version": "mncs.project-view/1",
-  "source_identity": "sha256:05d9ea342ba5e63b968786ec78911d25fbd13fc2e5fc9ede10aff2ae8d143dd2",
+  "source_identity": "sha256:5d1998d214497b96e420edfd6c308980cb6602de6324c24dbcd093d0a952a501",
   "structure": {
     "layout": "mncs.repository-layout/1",
     "surfaces": [
