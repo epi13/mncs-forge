@@ -17,7 +17,12 @@ from .retained_embed import RetainedEmbedError, RetainedEmbedSession
 
 PROCESS_MODULE = "mncs.std.process.v1"
 PROCESS_CAPABILITY = "process_capability"
-MAX_TYPED_OUTPUT = 1024
+# Capture budget ceiling mirror: the runtime refuses larger requested
+# capture budgets (mncs_model::process::MAX_CAPTURE_BYTES). The 1KB typed
+# observation window is enforced runtime-side at materialization; Forge
+# requests its real configured budget so legitimately chatty provider
+# output terminates with truncation reported instead of killing the run.
+PROCESS_CAPTURE_BUDGET_MAX = 4 * 1024 * 1024
 
 
 def _integer(value: int) -> dict[str, object]:
@@ -217,8 +222,8 @@ class ProcessEffectClient:
         if not argv or not argv[0]:
             raise ForgeError("COMMAND_START", "the process effect requires an explicit program")
         program = argv[0]
-        bounded_stdout = min(MAX_TYPED_OUTPUT, max(1, stdout_limit))
-        bounded_stderr = min(MAX_TYPED_OUTPUT, max(1, stderr_limit))
+        bounded_stdout = min(PROCESS_CAPTURE_BUDGET_MAX, max(1, stdout_limit))
+        bounded_stderr = min(PROCESS_CAPTURE_BUDGET_MAX, max(1, stderr_limit))
         env = [
             _record("EnvironmentEntry", {"key": _bytes(key.encode()), "value": _bytes(value.encode())})
             for key, value in sorted(environment.items())
