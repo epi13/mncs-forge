@@ -40,6 +40,9 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_OUTPUT_BYTES = 1_000_000
 NATIVE_ARTIFACT_OUTPUT_BYTES = 128_000_000
 NATIVE_ABI_OUTPUT_BYTES = 8_000_000
+# Identity-addressed cache entries are immutable; pruning only loses a warm
+# hit, never correctness. Keep the newest generations across compiler churn.
+NATIVE_ARTIFACT_CACHE_KEEP = 8
 NATIVE_BACKEND = "mncs-research-bytecode"
 NATIVE_SOURCE_PROFILE = "0.10"
 _MNCS_TYPE_PREFIX = "mncs:0.2:finite-type:"
@@ -742,6 +745,7 @@ class NativeForgeAdapter:
         self.output_bytes = output_bytes
         self.runner = runner
         self._assurance_cache_option_supported: bool | None = None
+        self._session_lock = threading.RLock()
         self._retained_session: RetainedEmbedSession | None = None
         self._retained_identity: str | None = None
         self._retained_artifact_identity: str | None = None
@@ -787,13 +791,17 @@ class NativeForgeAdapter:
     def close(self) -> None:
         """Release adapter-owned retained application state at Forge shutdown."""
 
-        session = getattr(self, "_retained_session", None)
-        if session is not None:
-            with suppress(Exception):
-                session.close()
-            self._retained_session = None
-            self._retained_identity = None
-            self._retained_artifact_identity = None
+        lock = getattr(self, "_session_lock", None)
+        if lock is None:  # pragma: no cover - partially constructed adapter
+            return
+        with lock:
+            session = self._retained_session
+            if session is not None:
+                with suppress(Exception):
+                    session.close()
+                self._retained_session = None
+                self._retained_identity = None
+                self._retained_artifact_identity = None
         for cache in getattr(self, "_native_caches", {}).values():
             cache.clear()
         # ``as_file`` normally resolves to the installed filesystem. This
@@ -1209,28 +1217,19 @@ class NativeForgeAdapter:
             root = self.forge_root / ".mncs" / "cache" / "native-applications"
         return root / f"forge-core-{identity}.json"
 
-    def _compile_native_artifact(self, identity: str) -> bytes:
-        """Compile/import the Forge core once; semantic calls never use this path."""
+    def _read_cached_artifact(self, identity: str) -> bytes | None:
+        """Read the identity-addressed artifact without admitting it."""
 
-        embed_library = self._embed_library()
-        if embed_library is None:
-            raise ForgeError(
-                "NATIVE_EMBED_UNAVAILABLE",
-                "the language-owned mncs-embed library is unavailable",
-            )
-        cache_path = self._artifact_cache_path(identity)
         try:
-            cached = cache_path.read_bytes()
+            cached = self._artifact_cache_path(identity).read_bytes()
         except OSError:
-            cached = None
-        if cached:
-            try:
-                with RetainedEmbedSession(embed_library, cached):
-                    return cached
-            except RetainedEmbedError:
-                # A present-but-invalid cache entry is not an authority.  The
-                # exact source/runtime identity below produces a fresh one.
-                pass
+            return None
+        return cached or None
+
+    def _compile_fresh_artifact(self, identity: str) -> bytes:
+        """Compile the Forge core for one identity; semantic calls never use this path."""
+
+        cache_path = self._artifact_cache_path(identity)
         with tempfile.TemporaryDirectory(prefix=".mncs-native-artifact-", dir=self.forge_root) as directory:
             output_dir = Path(directory)
             command = [
@@ -1281,26 +1280,38 @@ class NativeForgeAdapter:
             # The admitted artifact is still valid for this resident session;
             # an unwritable cache only loses the next-process warm hit.
             pass
+        else:
+            self._prune_artifact_cache(cache_path.parent, keep=cache_path.name)
         return artifact
 
-    def ensure_session(self) -> RetainedEmbedSession:
-        """Admit the exact Forge core artifact and retain one embed session."""
+    @staticmethod
+    def _prune_artifact_cache(directory: Path, *, keep: str) -> None:
+        """Bound the identity-addressed artifact cache to its newest entries.
 
-        identity = self.semantic_input_identity()
-        if self._retained_session is not None and self._retained_identity == identity:
-            return self._retained_session
-        if self._retained_session is not None:
-            self._retained_session.close()
-            self._retained_session = None
-            self._retained_identity = None
-            self._retained_artifact_identity = None
-        embed_library = self._embed_library()
-        if embed_library is None:
-            raise ForgeError(
-                "NATIVE_EMBED_UNAVAILABLE",
-                "the language-owned mncs-embed library is unavailable",
+        Best-effort: a concurrent compiler generation recreates any entry a
+        prune removes. In-flight ``.*.tmp`` writes from other processes and
+        the just-written entry are never touched.
+        """
+
+        try:
+            entries = sorted(
+                directory.glob("forge-core-*.json"),
+                key=lambda path: path.stat().st_mtime_ns,
+                reverse=True,
             )
-        artifact = self._compile_native_artifact(identity)
+        except OSError:
+            return
+        for stale in entries[NATIVE_ARTIFACT_CACHE_KEEP:]:
+            if stale.name == keep:
+                continue
+            with suppress(OSError):
+                stale.unlink()
+
+    def _open_retained_session(
+        self, embed_library: Path, artifact: bytes
+    ) -> tuple[RetainedEmbedSession, str]:
+        """Open one embed session and bind its language-reported identity."""
+
         try:
             session = RetainedEmbedSession(embed_library, artifact)
         except RetainedEmbedError as exc:
@@ -1310,10 +1321,58 @@ class NativeForgeAdapter:
         if not isinstance(artifact_identity, str) or not artifact_identity:
             session.close()
             raise ForgeError("NATIVE_ADMISSION_FAILED", "admitted artifact has no identity")
-        self._retained_session = session
-        self._retained_identity = identity
-        self._retained_artifact_identity = artifact_identity
-        return session
+        return session, artifact_identity
+
+    def ensure_session(self) -> RetainedEmbedSession:
+        """Admit the exact Forge core artifact and retain one embed session.
+
+        Single-flight within this adapter: concurrent callers needing the
+        same uncached preparation share one compilation instead of each
+        compiling. Preparation has no caller cancellation, so a waiter
+        never cancels work another caller still needs. A cache hit opens
+        the artifact exactly once: the validating session is adopted,
+        never discarded and reopened.
+        """
+
+        identity = self.semantic_input_identity()
+        with self._session_lock:
+            if self._retained_session is not None and self._retained_identity == identity:
+                return self._retained_session
+            if self._retained_session is not None:
+                self._retained_session.close()
+                self._retained_session = None
+                self._retained_identity = None
+                self._retained_artifact_identity = None
+            embed_library = self._embed_library()
+            if embed_library is None:
+                raise ForgeError(
+                    "NATIVE_EMBED_UNAVAILABLE",
+                    "the language-owned mncs-embed library is unavailable",
+                )
+            cache_path = self._artifact_cache_path(identity)
+            cached = self._read_cached_artifact(identity)
+            if cached is not None:
+                try:
+                    session, artifact_identity = self._open_retained_session(
+                        embed_library, cached
+                    )
+                except ForgeError:
+                    # A present-but-invalid cache entry is not an authority.
+                    # The exact source/runtime identity below produces a
+                    # fresh one, replacing the corrupt entry.
+                    pass
+                else:
+                    self._prune_artifact_cache(cache_path.parent, keep=cache_path.name)
+                    self._retained_session = session
+                    self._retained_identity = identity
+                    self._retained_artifact_identity = artifact_identity
+                    return session
+            artifact = self._compile_fresh_artifact(identity)
+            session, artifact_identity = self._open_retained_session(embed_library, artifact)
+            self._retained_session = session
+            self._retained_identity = identity
+            self._retained_artifact_identity = artifact_identity
+            return session
 
     def process_effect_client(self) -> ProcessEffectClient:
         """Return a generic process-capability adapter over the retained core."""

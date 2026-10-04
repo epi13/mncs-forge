@@ -21,6 +21,11 @@ class RetainedEmbedError(RuntimeError):
     """The language-owned retained embedding boundary rejected a request."""
 
 
+# Retained sessions serve unbounded warm calls; keep only a recent latency
+# window instead of one entry per call for the life of the session.
+CALL_SECONDS_RETAINED = 1024
+
+
 class RetainedEmbedSession:
     """One verified artifact retained across typed named-entrypoint calls."""
 
@@ -171,8 +176,13 @@ class RetainedEmbedSession:
         if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
             raise RetainedEmbedError("mncs-embed returned an invalid call result")
         self.call_count += 1
-        self.call_seconds.append(elapsed)
+        self._record_call_seconds(elapsed)
         return value[0], elapsed
+
+    def _record_call_seconds(self, elapsed: float) -> None:
+        self.call_seconds.append(elapsed)
+        if len(self.call_seconds) > CALL_SECONDS_RETAINED:
+            del self.call_seconds[: len(self.call_seconds) - CALL_SECONDS_RETAINED]
 
     def close(self) -> None:
         if self.closed:

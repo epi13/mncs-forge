@@ -12,27 +12,29 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
+from typing import Any
 
-from .retained_embed import RetainedEmbedSession, RetainedEmbedError
+from .retained_embed import RetainedEmbedSession
 
 BUILD_SCHEMA = 'mncs.provider-build-receipt/1'
 EXECUTION_SCHEMA = 'mncs.provider-execution-provenance/1'
 
 
-def digest(value):
+def digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
 
 
-def byte_digest(path):
+def byte_digest(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def integer(value):
+def integer(value: int) -> dict[str, Any]:
     return {'integer': {'value': int(value), 'type': {'bits': 64, 'signed': False}}}
 
 
-def bytes_value(value):
+def bytes_value(value: str) -> dict[str, Any]:
     return {'sequence': {'values': [{'byte': {'value': b}} for b in bytes.fromhex(value)]}}
 
 
@@ -43,7 +45,8 @@ class ProviderArtifactError(RuntimeError):
 class ProviderArtifact:
     """One owner declaration, one confined output namespace, exact receipts."""
 
-    def __init__(self, specification, *, roots, compiler, embed, cache):
+    def __init__(self, specification: dict[str, Any], *, roots: dict[str, str | Path],
+                 compiler: str | Path, embed: str | Path, cache: str | Path) -> None:
         self.spec = specification
         self.roots = {key: Path(value).resolve() for key, value in roots.items()}
         self.compiler, self.embed = Path(compiler).resolve(), Path(embed).resolve()
@@ -54,18 +57,83 @@ class ProviderArtifact:
             raise ProviderArtifactError('artifact output cache overlaps selected provider source')
         self.cache = selected_cache / digest(specification['provider'])
         self.cache.mkdir(parents=True, exist_ok=True)
-        self.runtime = None
-        self.receipt = None
+        self.runtime: RetainedEmbedSession | None = None
+        self.receipt: dict[str, Any] | None = None
         self.rebuilds = 0
+        self._inputs_lock = threading.Lock()
+        self._inputs_signature: tuple[Any, ...] | None = None
+        self._inputs_cache: dict[str, Any] | None = None
 
-    def path(self, binding):
+    def path(self, binding: dict[str, Any]) -> Path:
         root = self.roots[binding['repository']]
-        path = (root / binding['path']).resolve()
+        raw: str = binding['path']
+        path = (root / raw).resolve()
         if not path.is_relative_to(root) or not path.is_file():
             raise ProviderArtifactError('declared provider input is missing or escapes selected root')
         return path
 
-    def inputs(self):
+    @staticmethod
+    def _stat_signature(path: Path) -> tuple[int, ...]:
+        """Cheap freshness tuple; ctime closes mtime-preserving rewrites."""
+        link = path.lstat()
+        target = path.stat()
+        return (link.st_mtime_ns, link.st_ctime_ns, link.st_size, link.st_ino,
+                target.st_mtime_ns, target.st_ctime_ns, target.st_size, target.st_ino)
+
+    def _material_signature(self) -> tuple[Any, ...] | None:
+        """Stat-only generation over exactly the files inputs() hashes.
+
+        Returns None when any material stat is unreadable so the caller falls
+        back to the exact path (which raises the canonical error).
+        """
+        try:
+            declaration = digest(self.spec)
+            sources = tuple(
+                (f"{item['repository']}:{item['path']}",
+                 self._stat_signature(self.path(item)))
+                for item in self.spec['inputs']
+            )
+            libraries = []
+            for binding in self.spec['dependency_roots']:
+                root = (self.roots[binding['repository']] / binding['path']).resolve()
+                if not root.is_relative_to(self.roots[binding['repository']]):
+                    raise ProviderArtifactError('declared library escapes selected root')
+                files = sorted(root.rglob('*.mncs'))
+                if len(files) > 2048:
+                    raise ProviderArtifactError('library input exceeds bounded provider capability')
+                entries = []
+                for path in files:
+                    # No resolve here: any add/remove/replace/content change
+                    # alters this list or a stat tuple, and the resulting
+                    # mismatch runs the exact inputs() path with its canonical
+                    # containment checks. A matching signature reuses a
+                    # generation whose containment is already established.
+                    entries.append((str(path.relative_to(root)), self._stat_signature(path)))
+                libraries.append((binding['repository'], binding['path'], tuple(entries)))
+            compiler = self._stat_signature(self.compiler)
+            transport = self._stat_signature(Path(__file__))
+        except OSError:
+            return None
+        return (declaration, sources, tuple(libraries), compiler, transport)
+
+    def expected_inputs(self) -> dict[str, Any]:
+        """Authoritative input identity, reusing it while the source generation is unchanged.
+
+        The stat signature is recomputed on every call (live across processes);
+        only the byte reads are skipped on a warm generation. Corruption and
+        movement checks below this layer keep reading artifact bytes.
+        """
+        with self._inputs_lock:
+            signature = self._material_signature()
+            if (signature is not None and signature == self._inputs_signature
+                    and self._inputs_cache is not None):
+                return self._inputs_cache
+            expected = self.inputs()
+            self._inputs_signature = signature
+            self._inputs_cache = expected
+            return expected
+
+    def inputs(self) -> dict[str, Any]:
         sources = {f"{item['repository']}:{item['path']}": byte_digest(self.path(item))
                    for item in self.spec['inputs']}
         libraries = []
@@ -89,7 +157,8 @@ class ProviderArtifact:
                 'dependency_roots': libraries,
                 'stdlib': self.spec['stdlib'], 'abi': self.spec['abi']}
 
-    def _native(self, binding, function, arguments):
+    def _native(self, binding: dict[str, Any], function: str,
+                arguments: list[dict[str, Any]]) -> tuple[int, dict[str, Any]]:
         roots = [str(self.roots[item['repository']] / item['path']) for item in self.spec['dependency_roots']]
         command = [str(self.compiler), 'call', str(self.path(binding)), '--module', binding['module'],
                    '--function', function, '--args-json', json.dumps(arguments),
@@ -106,22 +175,23 @@ class ProviderArtifact:
         except (ValueError, KeyError, TypeError) as error:
             raise ProviderArtifactError('owner admission unavailable: ' + result.stdout[:500] + result.stderr[-300:]) from error
 
-    def _load(self, expected):
+    def _load(self, expected: dict[str, Any]) -> dict[str, Any] | None:
         try:
-            receipt = json.loads((self.cache / 'current.json').read_text())
+            receipt: Any = json.loads((self.cache / 'current.json').read_text())
             if receipt['schema_version'] != BUILD_SCHEMA or digest(receipt['core']) != receipt['identity']:
                 return None
-            return receipt
+            return dict(receipt)
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
-    def _artifact(self, receipt):
-        path = (self.cache / receipt['core']['artifact']['address']).resolve()
+    def _artifact(self, receipt: dict[str, Any]) -> Path:
+        address: str = receipt['core']['artifact']['address']
+        path = (self.cache / address).resolve()
         if not path.is_relative_to(self.cache):
             raise ProviderArtifactError('artifact receipt escapes confined cache')
         return path
 
-    def _state(self, expected, receipt):
+    def _state(self, expected: dict[str, Any], receipt: dict[str, Any] | None) -> int:
         intact = False
         built = '00' * 32
         if receipt:
@@ -141,12 +211,12 @@ class ProviderArtifact:
                                  integer(receipt is not None), integer(intact)])
         return state
 
-    def ensure(self):
+    def ensure(self) -> dict[str, Any]:
         # Artifact publication is single-flight inside the selected bounded
         # cache. Shared source/outputs are never edited by this capability.
         with (self.cache / 'reconcile.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            expected = self.inputs()
+            expected = self.expected_inputs()
             receipt = self._load(expected)
             state = self._state(expected, receipt)
             decision, admission = self._native(self.spec['remediation'], 'repair_artifact',
@@ -158,12 +228,14 @@ class ProviderArtifact:
                 self.rebuilds += 1
             elif decision != 0:
                 raise ProviderArtifactError(f'provider artifact remediation blocked: {decision}')
-            if self.inputs() != expected:
+            if self.expected_inputs() != expected:
                 raise ProviderArtifactError('provider inputs moved during admission')
+            if receipt is None:
+                raise ProviderArtifactError('provider admission produced no receipt')
             self.receipt = receipt
             return receipt
 
-    def _build(self, expected, admission):
+    def _build(self, expected: dict[str, Any], admission: dict[str, Any]) -> dict[str, Any]:
         source = self.path(self.spec['source'])
         roots = [str(self.roots[item['repository']] / item['path']) for item in self.spec['dependency_roots']]
         env = dict(os.environ)
@@ -180,7 +252,7 @@ class ProviderArtifact:
             modules = sorted({name.rsplit('::', 1)[0] for name in artifact['function_value_contracts'] if '::' in name})
             if modules != sorted(self.spec['modules']) or artifact['unsupported'] or artifact['status'] != 'PASS' or artifact['schema_version'] != self.spec['abi']['backend_schema']:
                 raise ProviderArtifactError('compiler artifact closure differs from declared owner inputs')
-            if self.inputs() != expected:
+            if self.expected_inputs() != expected:
                 raise ProviderArtifactError('provider inputs moved during build')
             sha = hashlib.sha256(data).hexdigest()
             address = 'artifacts/' + sha + '.json'
@@ -204,15 +276,19 @@ class ProviderArtifact:
             os.replace(pending, self.cache / 'current.json')
             return receipt
 
-    def call(self, module, function, arguments, *, step_budget=100000):
-        expected = self.inputs()
+    def call(self, module: str, function: str, arguments: list[dict[str, Any]],
+             *, step_budget: int = 100000) -> tuple[dict[str, Any], dict[str, Any]]:
+        expected = self.expected_inputs()
         # A retained session is never called after input/artifact/runtime drift.
         # For a cold process, native admission runs once before opening it.
         if self.receipt is None or expected != self.receipt['core']['inputs']:
             self.close()
             self.ensure()
-        path = self._artifact(self.receipt)
-        if byte_digest(path) != self.receipt['core']['artifact']['sha256']:
+        receipt = self.receipt
+        if receipt is None:
+            raise ProviderArtifactError('provider admission produced no receipt')
+        path = self._artifact(receipt)
+        if byte_digest(path) != receipt['core']['artifact']['sha256']:
             self.close()
             raise ProviderArtifactError('admitted artifact bytes changed')
         runtime_sha = byte_digest(self.embed)
@@ -221,23 +297,23 @@ class ProviderArtifact:
         if self.runtime is None:
             self.runtime = RetainedEmbedSession(self.embed, path.read_bytes())
         info = self.runtime.info()
-        if info['artifact_identity'] != self.receipt['core']['artifact']['identity'] or info['artifact_sha256'] != self.receipt['core']['artifact']['payload_sha256']:
+        if info['artifact_identity'] != receipt['core']['artifact']['identity'] or info['artifact_sha256'] != receipt['core']['artifact']['payload_sha256']:
             raise ProviderArtifactError('executing artifact does not match build receipt')
-        result, elapsed = self.runtime.call(module, function, arguments, step_budget=step_budget)
-        if self.inputs() != expected or byte_digest(self.embed) != runtime_sha:
+        result, _elapsed = self.runtime.call(module, function, arguments, step_budget=step_budget)
+        if self.expected_inputs() != expected or byte_digest(self.embed) != runtime_sha:
             self.close()
             raise ProviderArtifactError('execution inputs moved; result cannot establish evidence')
-        core = {'provider': self.spec['provider'], 'build_receipt': self.receipt['identity'],
+        core = {'provider': self.spec['provider'], 'build_receipt': receipt['identity'],
                 'artifact_identity': info['artifact_identity'], 'artifact_sha256': info['artifact_sha256'],
                 'executor_sha256': runtime_sha, 'abi': self.spec['abi'],
                 'operation': module + '::' + function,
                 'subject_identity': 'mncs.native-decision-input:' + digest(arguments), 'input_identity': digest({'arguments': arguments, 'step_budget': step_budget, 'grants': []}),
-                'inventory_identity': self.receipt['core']['inventory_identity'], 'result_identity': digest(result)}
-        receipt = {'schema_version': EXECUTION_SCHEMA, 'identity': digest(core), 'core': core,
-                   'build': self.receipt}
-        return result, receipt
+                'inventory_identity': receipt['core']['inventory_identity'], 'result_identity': digest(result)}
+        execution = {'schema_version': EXECUTION_SCHEMA, 'identity': digest(core), 'core': core,
+                     'build': receipt}
+        return result, execution
 
-    def close(self):
+    def close(self) -> None:
         if self.runtime is not None:
             self.runtime.close()
             self.runtime = None
