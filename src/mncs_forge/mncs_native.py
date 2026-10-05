@@ -770,6 +770,7 @@ class NativeForgeAdapter:
         self._retained_call_mean_seconds = 0.0
         self._retained_call_max_seconds = 0.0
         self._execution_fallbacks: list[dict[str, object]] = []
+        self._artifact_cache_override: Path | None = None
         self._native_caches = {
             name: BoundedNativeCache(
                 max_bytes=(
@@ -1253,6 +1254,8 @@ class NativeForgeAdapter:
         return self._identity_value
 
     def _artifact_cache_path(self, identity: str) -> Path:
+        if self._artifact_cache_override is not None:
+            return self._artifact_cache_override / f"forge-core-{identity}.json"
         configured = os.environ.get("MNCS_NATIVE_APPLICATION_CACHE_DIR")
         if configured:
             root = Path(configured).expanduser()
@@ -1926,11 +1929,18 @@ class NativeForgeAdapter:
                 runtime = runtime if isinstance(runtime, dict) else {}
                 build_origin = runtime.get("build_origin")
                 build_origin = build_origin if isinstance(build_origin, dict) else {}
-                invocation = self._semantic_invocation(
-                    request,
-                    request_name="resource-budget-request.json",
-                    force_stage0_reference=True,
+                prior_cache_override = self._artifact_cache_override
+                self._artifact_cache_override = (
+                    self.forge_root / ".mncs/cache/resource-policy-stage0"
                 )
+                try:
+                    invocation = self._semantic_invocation(
+                        request,
+                        request_name="resource-budget-request.json",
+                        force_stage0_reference=True,
+                    )
+                finally:
+                    self._artifact_cache_override = prior_cache_override
                 self._execution_fallbacks.append(
                     {
                         "target": "forge/core.mncs::resource_budget_select",

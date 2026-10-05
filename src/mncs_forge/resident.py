@@ -13,8 +13,10 @@ import json
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -25,6 +27,7 @@ from filelock import FileLock, Timeout
 
 from .continuous import (
     _language_service_lease_path,
+    _language_service_socket,
     _lifecycle_dir,
     _probe_language_service,
     _read_json_path,
@@ -508,6 +511,103 @@ def resident_reconcile(
                         ],
                     },
                 }
+            elif (
+                stop
+                and include_language_service
+                and language.get("owned_by_continuous") is True
+                and type(language.get("pid")) is int
+                and language.get("pid") > 0
+                and process_identity(language["pid"]) is None
+            ):
+                if (
+                    language.get("selected_bindings") != language_bindings(identity)
+                    or language.get("workspace_root") != str(config.root.resolve())
+                    or "MNLS_SERVICE_SOCKET" in identity.get("runtime", {})
+                ):
+                    return {
+                        "schema_version": RECONCILE_SCHEMA,
+                        "operation": "blocked",
+                        "status": {
+                            **status,
+                            "diagnostics": [
+                                {
+                                    "code": "RESIDENT_LANGUAGE_LEASE_MISMATCH",
+                                    "message": "stale Language Service lease does not match the selected Forge-owned binding",
+                                }
+                            ],
+                        },
+                    }
+                socket_path = _language_service_socket(config)
+                private_short_socket = False
+                if socket_path.parent.exists() and not socket_path.parent.is_symlink():
+                    try:
+                        parent_stat = socket_path.parent.stat()
+                        private_short_socket = (
+                            socket_path.parent.parent == Path(tempfile.gettempdir())
+                            and socket_path.name == "language.sock"
+                            and socket_path.parent.name.startswith(
+                                f"mncs-forge-{os.getuid()}-"
+                            )
+                            and parent_stat.st_uid == os.getuid()
+                            and parent_stat.st_mode & 0o077 == 0
+                        )
+                    except OSError:
+                        private_short_socket = False
+                if (
+                    socket_path.is_symlink()
+                    or not socket_path.resolve().is_relative_to(config.root.resolve())
+                    and not private_short_socket
+                ):
+                    return {
+                        "schema_version": RECONCILE_SCHEMA,
+                        "operation": "blocked",
+                        "status": {
+                            **status,
+                            "diagnostics": [
+                                {
+                                    "code": "RESIDENT_LANGUAGE_SOCKET_MISMATCH",
+                                    "message": "stale Language Service socket is outside the selected project boundary",
+                                }
+                            ],
+                        },
+                    }
+                if socket_path.exists():
+                    socket_stat = socket_path.lstat()
+                    if not stat.S_ISSOCK(socket_stat.st_mode) or socket_stat.st_uid != os.getuid():
+                        return {
+                            "schema_version": RECONCILE_SCHEMA,
+                            "operation": "blocked",
+                            "status": {
+                                **status,
+                                "diagnostics": [
+                                    {
+                                        "code": "RESIDENT_LANGUAGE_SOCKET_OCCUPIED",
+                                        "message": "stale lease socket path is occupied by a non-owned file",
+                                    }
+                                ],
+                            },
+                        }
+                    try:
+                        _probe_language_service(config)
+                    except ForgeError as error:
+                        if error.code != "LANGUAGE_SERVICE_UNAVAILABLE":
+                            raise
+                    else:
+                        return {
+                            "schema_version": RECONCILE_SCHEMA,
+                            "operation": "blocked",
+                            "status": {
+                                **status,
+                                "diagnostics": [
+                                    {
+                                        "code": "RESIDENT_LANGUAGE_SOCKET_RESPONDS",
+                                        "message": "socket still responds after the owned process exited; preserve it for provider reconciliation",
+                                    }
+                                ],
+                            },
+                        }
+                    socket_path.unlink()
+                _language_service_lease_path(config).unlink(missing_ok=True)
             changed_runtime = prior_identity.get("runtime") != identity[
                 "runtime"
             ] or prior_identity.get("runtime_artifacts") != identity.get("runtime_artifacts")

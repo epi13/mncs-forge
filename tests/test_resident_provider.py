@@ -287,6 +287,72 @@ def test_orphaned_forge_owned_language_service_can_be_stopped(config, identity, 
     assert [item["pid"] for item in signalled] == [os.getpid()]
 
 
+def test_stale_orphan_lease_removes_only_its_dead_socket(config, identity, monkeypatch):
+    lease_path = continuous._language_service_lease_path(config)
+    socket_path = continuous._language_service_socket(config)
+    socket_path.parent.mkdir(mode=0o700, parents=True)
+    bound = socket.socket(socket.AF_UNIX)
+    try:
+        bound.bind(str(socket_path))
+    finally:
+        bound.close()
+    lease = {
+        "pid": 2**30,
+        "process_identity": {"boot": "old", "start_ticks": "old"},
+        "selected_bindings": resident.language_bindings(identity),
+        "owned_by_continuous": True,
+        "workspace_root": str(config.root.resolve()),
+    }
+    continuous._write_json_path(lease_path, lease)
+    monkeypatch.setattr(
+        resident,
+        "_probe_language_service",
+        lambda _c: (_ for _ in ()).throw(
+            ForgeError("LANGUAGE_SERVICE_UNAVAILABLE", "connection refused")
+        ),
+    )
+
+    result = resident.resident_reconcile(
+        config,
+        identity,
+        stop=True,
+        include_language_service=True,
+    )
+
+    assert result["operation"] == "stopped"
+    assert not lease_path.exists()
+    assert not socket_path.exists()
+
+
+def test_stale_orphan_lease_preserves_occupied_project_file(config, identity):
+    lease_path = continuous._language_service_lease_path(config)
+    socket_path = continuous._language_service_socket(config)
+    socket_path.parent.mkdir(mode=0o700, parents=True)
+    socket_path.write_text("authored file", encoding="utf-8")
+    continuous._write_json_path(
+        lease_path,
+        {
+            "pid": 2**30,
+            "process_identity": {"boot": "old", "start_ticks": "old"},
+            "selected_bindings": resident.language_bindings(identity),
+            "owned_by_continuous": True,
+            "workspace_root": str(config.root.resolve()),
+        },
+    )
+
+    result = resident.resident_reconcile(
+        config,
+        identity,
+        stop=True,
+        include_language_service=True,
+    )
+
+    assert result["operation"] == "blocked"
+    assert result["status"]["diagnostics"][0]["code"] == "RESIDENT_LANGUAGE_SOCKET_OCCUPIED"
+    assert socket_path.read_text(encoding="utf-8") == "authored file"
+    assert lease_path.exists()
+
+
 def test_reconcile_capability_exposes_owned_stop_flags(config, identity, monkeypatch, capsys):
     observed = {}
     monkeypatch.setattr(resident, "resolve_continuous_config", lambda **_kw: config)
