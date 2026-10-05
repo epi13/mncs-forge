@@ -55,7 +55,25 @@
           "path": "target/debug/mnls-language-service-host",
           "repository": "mncs-language-service"
         },
-        "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST"
+        "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST",
+        "toolchains": {
+          "MNCS_COMPILER_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_COMPILER_PROBE": {
+            "path": ".bootstrap/target/release/mncs-compiler-stage0-probe",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_VM_BIN": {
+            "path": "target/debug/mncs-vm",
+            "repository": "mncs-vm"
+          },
+          "MNCS_VM_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-vm"
+          }
+        }
       },
       "kind": "resident-provider-status",
       "stability": "experimental",
@@ -76,7 +94,25 @@
           "path": "target/debug/mnls-language-service-host",
           "repository": "mncs-language-service"
         },
-        "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST"
+        "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST",
+        "toolchains": {
+          "MNCS_COMPILER_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_COMPILER_PROBE": {
+            "path": ".bootstrap/target/release/mncs-compiler-stage0-probe",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_VM_BIN": {
+            "path": "target/debug/mncs-vm",
+            "repository": "mncs-vm"
+          },
+          "MNCS_VM_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-vm"
+          }
+        }
       },
       "kind": "resident-provider-reconcile",
       "stability": "experimental",
@@ -97,7 +133,25 @@
           "path": "target/debug/mnls-language-service-host",
           "repository": "mncs-language-service"
         },
-        "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST"
+        "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST",
+        "toolchains": {
+          "MNCS_COMPILER_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_COMPILER_PROBE": {
+            "path": ".bootstrap/target/release/mncs-compiler-stage0-probe",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_VM_BIN": {
+            "path": "target/debug/mncs-vm",
+            "repository": "mncs-vm"
+          },
+          "MNCS_VM_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-vm"
+          }
+        }
       },
       "kind": "resident-provider-stop",
       "stability": "experimental",
@@ -116,7 +170,25 @@
           "path": "target/debug/mnls-language-service-host",
           "repository": "mncs-language-service"
         },
-        "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST"
+        "toolchain_env": "MNCS_LANGUAGE_SERVICE_HOST",
+        "toolchains": {
+          "MNCS_COMPILER_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_COMPILER_PROBE": {
+            "path": ".bootstrap/target/release/mncs-compiler-stage0-probe",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_VM_BIN": {
+            "path": "target/debug/mncs-vm",
+            "repository": "mncs-vm"
+          },
+          "MNCS_VM_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-vm"
+          }
+        }
       },
       "kind": "selected-resident-workflow",
       "stability": "experimental",
@@ -133,6 +205,45 @@
         "src/mncs_forge/retained_embed.py"
       ],
       "kind": "bounded-provider-artifact-transport",
+      "stability": "experimental",
+      "version": "1"
+    },
+    {
+      "contract": "canonical-vm-work",
+      "effects": [
+        "execute"
+      ],
+      "fingerprint_sources": [
+        "scripts/compiler_vm.py"
+      ],
+      "invocation": {
+        "fixed_argv": [],
+        "kind": "python",
+        "path": "scripts/compiler_vm.py",
+        "toolchains": {
+          "MNCS_COMPILER_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_COMPILER_PROBE": {
+            "path": ".bootstrap/target/release/mncs-compiler-stage0-probe",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_REFERENCE_BIN": {
+            "path": "target/release/mncs",
+            "repository": "mncs-language"
+          },
+          "MNCS_VM_BIN": {
+            "path": "target/debug/mncs-vm",
+            "repository": "mncs-vm"
+          },
+          "MNCS_VM_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-vm"
+          }
+        }
+      },
+      "kind": "selected-compiler-runtime-consumer",
       "stability": "experimental",
       "version": "1"
     }
@@ -268,13 +379,33 @@
         "source": "src/mncs_forge/provider_artifacts.py"
       },
       "required": false
+    },
+    {
+      "contract": "canonical-vm-artifact",
+      "envelope": {
+        "op": "any"
+      },
+      "evidence_refs": [
+        "scripts/compiler_vm.py"
+      ],
+      "required": false
+    },
+    {
+      "contract": "vm-runtime",
+      "envelope": {
+        "op": "any"
+      },
+      "evidence_refs": [
+        "scripts/compiler_vm.py"
+      ],
+      "required": false
     }
   ],
   "entry": [],
   "purpose": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority.",
   "repository": "mncs-forge",
   "schema_version": "mncs.project-view/1",
-  "source_identity": "sha256:5d1998d214497b96e420edfd6c308980cb6602de6324c24dbcd093d0a952a501",
+  "source_identity": "sha256:59c6b2c9b5ba12064a228894b44b557a9b003c94eeef78015c660199974403db",
   "structure": {
     "layout": "mncs.repository-layout/1",
     "surfaces": [

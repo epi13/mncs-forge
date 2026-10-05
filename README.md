@@ -8,6 +8,7 @@ Forge owns controlled candidate/evidence workflow and assurance search; it does 
 Declared capabilities (declarations do not establish execution health):
 
 - `assurance-workflow/1` — candidate-evidence-workflow (experimental)
+- `canonical-vm-work/1` — selected-compiler-runtime-consumer (experimental)
 - `continuous-process-supervision/1` — generic-process-effect-supervision (experimental)
 - `continuous-trigger-routing/1` — native-event-routing-policy (experimental)
 - `mncs-forge.provider-artifact-execution/1` — bounded-provider-artifact-transport (experimental)
