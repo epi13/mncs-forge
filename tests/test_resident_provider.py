@@ -54,8 +54,12 @@ def write_lease(config, identity, **changes):
 
 
 def test_absent_status_is_read_only(config, identity):
-    assert resident.resident_status(config, identity)["state"] == "stopped"
+    status = resident.resident_status(config, identity)
+    assert status["state"] == "stopped"
     assert not config.state_dir.exists()
+    # Readiness predicates address the consumer position; a stopped
+    # resident reports it (never ready) so recovery stays admissible.
+    assert status["continuous_consumer"]["state"] != "ready"
 
 
 @pytest.mark.parametrize(

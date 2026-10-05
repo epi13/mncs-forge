@@ -438,7 +438,11 @@ def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
     }
     lease = _lease(config)
     if not lease:
-        return result
+        # A never-started resident still reports its (absent) consumer
+        # position so readiness predicates evaluate to not-ready instead
+        # of a schema-shaped hole that withholds recovery. Read-only: the
+        # consumer helper never creates state for a missing status file.
+        return {**result, "continuous_consumer": _continuous_consumer_status(config)}
     if not owns_process(lease):
         consumer = _continuous_consumer_status(config)
         diagnostics = [
