@@ -1200,6 +1200,60 @@ class ContinuousSupervisor:
             self.stream_identity = observed
         return poll
 
+    def _replay_new_epoch_from_zero(
+        self,
+        client: LanguageServiceSocket,
+        poll: dict[str, object],
+        *,
+        durable_cursor: int,
+        after_cursor: int,
+        max_events: int,
+    ) -> dict[str, object] | None:
+        """Adopt a changed stream only when its complete retained history replays.
+
+        Cursor zero means no work has been acknowledged.  Re-reading a new
+        epoch from zero is safe only while the provider still retains every
+        event from cursor one and returns a contiguous prefix of that history.
+        Nonzero cursors and expired rings require authoritative reconciliation.
+        """
+        observed_stream = poll.get("stream_identity")
+        if (
+            not isinstance(observed_stream, str)
+            or not observed_stream
+            or observed_stream == self.stream_identity
+            or durable_cursor != 0
+            or after_cursor != 0
+            or poll.get("oldest_cursor") != 1
+        ):
+            return None
+        prior_stream = self.stream_identity
+        self.stream_identity = observed_stream
+        replay = self._poll(client, after_cursor=0, max_events=max_events)
+        high_water = replay.get("current_cursor")
+        oldest = replay.get("oldest_cursor")
+        events = replay.get("events")
+        if (
+            replay.get("reset_required") is True
+            or replay.get("stream_identity") != observed_stream
+            or replay.get("after_cursor") != 0
+            or type(high_water) is not int
+            or high_water < 0
+            or oldest != 1
+            or not isinstance(events, list)
+            or len(events) != min(high_water, max_events)
+        ):
+            self.stream_identity = prior_stream
+            return None
+        for expected_cursor, event in enumerate(events, 1):
+            if (
+                not isinstance(event, dict)
+                or event.get("cursor") != expected_cursor
+                or event.get("stream_identity") != observed_stream
+            ):
+                self.stream_identity = prior_stream
+                return None
+        return replay
+
     def _write_status(self, status: dict[str, object]) -> None:
         path = self._status_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2562,10 +2616,13 @@ class ContinuousSupervisor:
         )
         if transition.disposition == "DiscardStale":
             self.stale_jobs = min(_COUNTER_MAX, self.stale_jobs + 1)
-            return {"status": "STALE", "reason": "event generation is older than current"}
+            return {
+                "status": "STALE",
+                "reason": "event generation is older than current",
+                "acknowledged": True,
+            }
         self._cancel_superseded_pending(event)
         self.current_source_identity = _mapping(event.get("current")).get("identity") or None
-        self.current_cursor = max(self.current_cursor, int(event.get("cursor", 0)))
         triggers = self.settings.get("triggers", [])
         try:
             matched = [
@@ -2576,7 +2633,12 @@ class ContinuousSupervisor:
         except ForgeError as error:
             self._attention(event, f"native trigger decision is unknown: {error}")
             self._record_status("UNKNOWN")
-            return {"generation": generation, "cursor": event.get("cursor"), "status": "UNKNOWN"}
+            return {
+                "generation": generation,
+                "cursor": event.get("cursor"),
+                "status": "UNKNOWN",
+                "acknowledged": False,
+            }
         action_results = []
         repaired = False
         for trigger in matched:
@@ -2594,6 +2656,7 @@ class ContinuousSupervisor:
                 "generation": generation,
                 "cursor": event.get("cursor"),
                 "status": "PASS",
+                "acknowledged": True,
                 "repair_pending_rebound": True,
                 "actions": action_results,
             }
@@ -2657,6 +2720,7 @@ class ContinuousSupervisor:
                 "generation": generation,
                 "cursor": event.get("cursor"),
                 "status": status_decision.status,
+                "acknowledged": status_decision.status != "UNKNOWN",
                 "actions": action_results,
             }
         try:
@@ -2668,6 +2732,7 @@ class ContinuousSupervisor:
                 "generation": generation,
                 "cursor": event.get("cursor"),
                 "status": "UNKNOWN",
+                "acknowledged": False,
                 "actions": action_results,
             }
         freshness = self._native_completed_freshness(
@@ -2687,6 +2752,7 @@ class ContinuousSupervisor:
                 "generation": generation,
                 "cursor": event.get("cursor"),
                 "status": "STALE",
+                "acknowledged": True,
                 "reason": "superseded while continuous work was running",
                 "actions": action_results,
             }
@@ -2694,6 +2760,7 @@ class ContinuousSupervisor:
             "generation": generation,
             "cursor": event.get("cursor"),
             "status": "PASS",
+            "acknowledged": True,
             "actions": action_results,
         }
 
@@ -2814,13 +2881,28 @@ class ContinuousSupervisor:
             prior_stream = prior.get("event_stream_identity")
             if self.stream_identity is None and isinstance(prior_stream, str) and prior_stream:
                 self.stream_identity = prior_stream
+            durable_cursor = prior.get("event_cursor", 0)
+            if type(durable_cursor) is not int or durable_cursor < 0:
+                durable_cursor = -1
+            else:
+                self.current_cursor = max(self.current_cursor, durable_cursor)
             if after_cursor is None:
-                after_cursor = int(prior.get("event_cursor", 0))
+                after_cursor = max(durable_cursor, 0)
             live_status = _mapping(client.request("workspace_status", {}))
             live_stream = live_status.get("stream_identity")
             if self.stream_identity is None and isinstance(live_stream, str) and live_stream:
                 self.stream_identity = live_stream
             poll = self._poll(client, after_cursor=after_cursor, max_events=limit)
+            if bool(poll.get("reset_required")):
+                replay = self._replay_new_epoch_from_zero(
+                    client,
+                    poll,
+                    durable_cursor=durable_cursor,
+                    after_cursor=int(after_cursor),
+                    max_events=limit,
+                )
+                if replay is not None:
+                    poll = replay
         except ForgeError as error:
             self._attention({"current_generation": 0}, str(error), tier="edit-time")
             self._record_status("UNKNOWN")
@@ -2879,6 +2961,31 @@ class ContinuousSupervisor:
                 debounced = _mapping(
                     self._poll(client, after_cursor=after_cursor, max_events=limit)
                 )
+                if bool(debounced.get("reset_required")):
+                    self._attention(
+                        {"current_generation": live_status.get("generation", 0)},
+                        "Language Service event cursor reset during debounce",
+                        tier="edit-time",
+                    )
+                    self._record_status("UNKNOWN")
+                    result = self.status()
+                    result["transport"] = "UNKNOWN"
+                    result["cursor_recovery"] = {
+                        "status": "required",
+                        "requested_stream_identity": self.stream_identity,
+                        "requested_cursor": self.current_cursor,
+                        "observed_stream_identity": debounced.get("stream_identity"),
+                        "oldest_cursor": debounced.get("oldest_cursor"),
+                        "current_cursor": debounced.get("current_cursor"),
+                        "limitations": [
+                            item
+                            for item in debounced.get("limitations", [])
+                            if isinstance(item, str)
+                        ][:8],
+                        "action": "reconcile authoritative semantic state before acknowledging this cursor",
+                    }
+                    self._write_status(result)
+                    return result
                 seen_cursors = {
                     int(event.get("cursor", -1))
                     for event in events
@@ -2904,8 +3011,36 @@ class ContinuousSupervisor:
                 int(event.get("current_generation", 0)) for event in events
             )
             self.current_generation = max(self.current_generation, observed_generation)
+        expected_cursor = self.current_cursor + 1
+        for event in events:
+            event_cursor = event.get("cursor")
+            if (
+                type(event_cursor) is not int
+                or event_cursor != expected_cursor
+                or event.get("stream_identity") != self.stream_identity
+            ):
+                self._attention(
+                    event,
+                    "Language Service event page is not contiguous with the durable acknowledgement",
+                    tier="edit-time",
+                )
+                self._record_status("UNKNOWN")
+                result = self.status()
+                result["transport"] = "UNKNOWN"
+                result["cursor_recovery"] = {
+                    "status": "required",
+                    "requested_stream_identity": self.stream_identity,
+                    "requested_cursor": self.current_cursor,
+                    "observed_stream_identity": event.get("stream_identity"),
+                    "observed_cursor": event_cursor,
+                    "action": "reconcile the event stream before dispatching this page",
+                }
+                self._write_status(result)
+                return result
+            expected_cursor += 1
         result_history: deque[dict[str, object]] = deque(maxlen=CONTINUOUS_RECENT_RESULTS)
         events_processed = 0
+        failed_event_cursor: int | None = None
 
         def record_result(value: dict[str, object]) -> None:
             nonlocal events_processed
@@ -2918,25 +3053,59 @@ class ContinuousSupervisor:
             runtime["event_results"] = list(result_history)
             self._write_status(runtime)
 
+        ingress_cursor = self.current_cursor
+        if events:
+            last_event_cursor = events[-1].get("cursor")
+            if type(last_event_cursor) is int:
+                ingress_cursor = max(ingress_cursor, last_event_cursor)
         ingress = _ContinuousEventIngress(
             self,
             client,
-            after_cursor=int(poll.get("current_cursor", self.current_cursor)),
+            after_cursor=ingress_cursor,
             max_events=limit,
             poll_interval=interval,
         )
         ingress_started = bool(events) or not once
         if ingress_started:
             ingress.start()
+
+        def dispatch_and_ack(event: dict[str, object]) -> bool:
+            nonlocal failed_event_cursor
+            try:
+                value = self._process_event(client, event)
+            except ForgeError as error:
+                self._attention(event, f"event owner failed: {error}")
+                self._record_status("UNKNOWN")
+                value = {"status": "UNKNOWN", "acknowledged": False, "reason": str(error)}
+            record_result(value)
+            cursor = event.get("cursor")
+            if (
+                value.get("acknowledged") is not True
+                or type(cursor) is not int
+                or cursor != self.current_cursor + 1
+                or event.get("stream_identity") != self.stream_identity
+            ):
+                failed_event_cursor = cursor if type(cursor) is int else None
+                reason = (
+                    "event owner handling did not complete; durable cursor remains before this event"
+                    if value.get("acknowledged") is not True
+                    else "event cursor or stream identity is not contiguous with the durable acknowledgement"
+                )
+                self._attention(event, reason, tier="edit-time")
+                return False
+            self.current_cursor = cursor
+            return True
+
+        dispatch_failed = False
         try:
             for event in events:
-                record_result(self._process_event(client, event))
-                self.current_cursor = max(self.current_cursor, int(event.get("cursor", 0)))
-            self.current_cursor = max(
-                self.current_cursor, int(poll.get("current_cursor", self.current_cursor))
-            )
+                if not dispatch_and_ack(event):
+                    dispatch_failed = True
+                    break
             persist_runtime_status()
-            if once:
+            if dispatch_failed:
+                ingress.stop_event.set()
+            elif once:
                 # The shared ingress stays attached while a verifier runs.
                 # Drain its bounded queue after each dispatch so edits that
                 # superseded the active generation are handled in this same
@@ -2960,15 +3129,15 @@ class ContinuousSupervisor:
                         except queue.Empty:
                             break
                     for event in batch:
-                        record_result(self._process_event(client, event))
-                        self.current_cursor = max(
-                            self.current_cursor, int(event.get("cursor", 0))
-                        )
+                        if not dispatch_and_ack(event):
+                            dispatch_failed = True
+                            ingress.stop_event.set()
+                            break
                     persist_runtime_status()
-                    if ingress.failure is not None:
+                    if dispatch_failed or ingress.failure is not None:
                         break
             else:
-                while not self._stop_requested:
+                while not self._stop_requested and not dispatch_failed:
                     if ingress.failure is not None:
                         self._attention(
                             {"current_generation": self.current_generation},
@@ -2988,10 +3157,10 @@ class ContinuousSupervisor:
                         except queue.Empty:
                             break
                     for event in batch:
-                        record_result(self._process_event(client, event))
-                        self.current_cursor = max(
-                            self.current_cursor, int(event.get("cursor", 0))
-                        )
+                        if not dispatch_and_ack(event):
+                            dispatch_failed = True
+                            ingress.stop_event.set()
+                            break
                     persist_runtime_status()
         except BaseException:
             if ingress_started:
@@ -3009,5 +3178,14 @@ class ContinuousSupervisor:
         result = self.status()
         result["events_processed"] = events_processed
         result["event_results"] = list(result_history)
+        if dispatch_failed:
+            result["transport"] = "UNKNOWN"
+            result["cursor_recovery"] = {
+                "status": "owner_retry_required",
+                "requested_stream_identity": self.stream_identity,
+                "requested_cursor": self.current_cursor,
+                "failed_event_cursor": failed_event_cursor,
+                "action": "retry the unacknowledged event after its owner is healthy",
+            }
         self._write_status(result)
         return result

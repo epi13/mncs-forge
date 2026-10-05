@@ -193,6 +193,119 @@ def test_cursor_reset_does_not_acknowledge_provider_high_water() -> None:
     assert supervisor.status_counts["UNKNOWN"] == 1
 
 
+def test_zero_cursor_new_epoch_adopts_only_a_complete_replay() -> None:
+    supervisor = _supervisor()
+    supervisor.stream_identity = "stream-before-restart"
+    events = [
+        {"stream_identity": "stream-after-restart", "cursor": cursor}
+        for cursor in range(1, 4)
+    ]
+
+    class ReplayClient:
+        def __init__(self, *, oldest_cursor: int = 1) -> None:
+            self.oldest_cursor = oldest_cursor
+
+        def request(self, method: str, params: dict[str, object] | None = None) -> object:
+            assert method == "poll_events"
+            assert params == {"after_cursor": 0, "max_events": 8, "stream_identity": "stream-after-restart"}
+            return {
+                "stream_identity": "stream-after-restart",
+                "after_cursor": 0,
+                "oldest_cursor": self.oldest_cursor,
+                "current_cursor": 3,
+                "reset_required": False,
+                "events": events if self.oldest_cursor == 1 else events[1:],
+            }
+
+    reset = {
+        "stream_identity": "stream-after-restart",
+        "oldest_cursor": 1,
+        "current_cursor": 3,
+        "reset_required": True,
+    }
+    replay = supervisor._replay_new_epoch_from_zero(
+        ReplayClient(), reset, durable_cursor=0, after_cursor=0, max_events=8
+    )
+    assert replay is not None
+    assert [event["cursor"] for event in replay["events"]] == [1, 2, 3]
+    assert supervisor.stream_identity == "stream-after-restart"
+
+    supervisor.stream_identity = "stream-before-restart"
+    expired = supervisor._replay_new_epoch_from_zero(
+        ReplayClient(oldest_cursor=2), reset, durable_cursor=0, after_cursor=0, max_events=8
+    )
+    assert expired is None
+    assert supervisor.stream_identity == "stream-before-restart"
+
+
+def test_failed_event_owner_retries_before_cursor_acknowledgement() -> None:
+    supervisor = _supervisor()
+    supervisor.settings = {"enabled": True, "poll_max_events": 8}
+    supervisor.config = SimpleNamespace(continuous_settings={})
+    supervisor.stream_identity = "stream-test"
+    supervisor.current_cursor = 0
+    supervisor.current_generation = 0
+    supervisor.attention = []
+    supervisor.status_counts = Counter()
+    supervisor._restore_pending = lambda _prior: None
+    supervisor._debounce_ms = lambda: 0
+    calls: list[int] = []
+    ack = [False]
+    supervisor._process_event = lambda _client, event: (
+        calls.append(int(event["cursor"]))
+        or {
+            "status": "PASS" if ack[0] else "UNKNOWN",
+            "acknowledged": ack[0],
+            "cursor": event["cursor"],
+        }
+    )
+    durable: dict[str, object] = {
+        "event_stream_identity": "stream-test",
+        "event_cursor": 0,
+    }
+    supervisor.read_status = lambda: dict(durable)
+    supervisor.status = lambda: {
+        "event_stream_identity": supervisor.stream_identity,
+        "event_cursor": supervisor.current_cursor,
+    }
+    supervisor._write_status = lambda value: durable.update(value)
+    event = {**_event(), "stream_identity": "stream-test", "cursor": 1}
+
+    class EventClient:
+        def request(self, method: str, params: dict[str, object] | None = None) -> object:
+            if method == "workspace_status":
+                return {"stream_identity": "stream-test", "generation": 7}
+            if method == "poll_events":
+                after_cursor = int((params or {}).get("after_cursor", 0))
+                return {
+                    "stream_identity": "stream-test",
+                    "after_cursor": after_cursor,
+                    "oldest_cursor": 1,
+                    "current_cursor": 1,
+                    "reset_required": False,
+                    "events": [event] if after_cursor == 0 else [],
+                }
+            return {}
+
+    supervisor._socket = lambda: EventClient()
+
+    failed = supervisor.run(once=True)
+    assert failed["cursor_recovery"]["status"] == "owner_retry_required"
+    assert failed["event_cursor"] == 0
+    assert durable["event_cursor"] == 0
+
+    retried = supervisor.run(once=True)
+    assert retried["event_cursor"] == 0
+    assert durable["event_cursor"] == 0
+    assert calls == [1, 1]
+
+    ack[0] = True
+    succeeded = supervisor.run(once=True)
+    assert succeeded["event_cursor"] == 1
+    assert durable["event_cursor"] == 1
+    assert calls == [1, 1, 1]
+
+
 def test_escalation_policy_controls_attention_without_changing_verdict() -> None:
     supervisor = _supervisor()
     event = _event()
