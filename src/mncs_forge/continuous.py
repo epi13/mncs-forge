@@ -1186,9 +1186,18 @@ class ContinuousSupervisor:
             params["stream_identity"] = self.stream_identity
         poll = _mapping(client.request("poll_events", params))
         observed = poll.get("stream_identity")
-        if isinstance(observed, str) and observed:
-            if self.stream_identity is None or bool(poll.get("reset_required")):
-                self.stream_identity = observed
+        # A reset response is evidence that this consumer cannot safely
+        # continue from its acknowledged cursor.  Keep the acknowledged
+        # stream identity until a reconciliation owner proves a replacement
+        # baseline; adopting the provider's stream here would make a later
+        # empty poll look like successful recovery.
+        if (
+            isinstance(observed, str)
+            and observed
+            and self.stream_identity is None
+            and not bool(poll.get("reset_required"))
+        ):
+            self.stream_identity = observed
         return poll
 
     def _write_status(self, status: dict[str, object]) -> None:
@@ -2820,12 +2829,32 @@ class ContinuousSupervisor:
             self._write_status(result)
             return result
         if bool(poll.get("reset_required")):
+            # Cursor and stream identity form one durable acknowledgement.
+            # A reset can mean either a new semantic epoch or expired event
+            # history, and neither permits advancing to current_cursor before
+            # authoritative reconciliation has completed.
             self._attention(
-                {"current_generation": 0},
+                {"current_generation": live_status.get("generation", 0)},
                 "Language Service event cursor reset required",
                 tier="edit-time",
             )
             self._record_status("UNKNOWN")
+            result = self.status()
+            result["transport"] = "UNKNOWN"
+            result["cursor_recovery"] = {
+                "status": "required",
+                "requested_stream_identity": self.stream_identity,
+                "requested_cursor": int(after_cursor),
+                "observed_stream_identity": poll.get("stream_identity"),
+                "oldest_cursor": poll.get("oldest_cursor"),
+                "current_cursor": poll.get("current_cursor"),
+                "limitations": [
+                    item for item in poll.get("limitations", []) if isinstance(item, str)
+                ][:8],
+                "action": "reconcile authoritative semantic state before acknowledging this cursor",
+            }
+            self._write_status(result)
+            return result
         events = [event for event in poll.get("events", []) if isinstance(event, dict)]
         try:
             debounce_ms = self._debounce_ms()

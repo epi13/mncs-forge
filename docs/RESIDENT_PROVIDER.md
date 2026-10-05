@@ -86,6 +86,13 @@ another binding's service. Long default Language socket paths
 use a stable short private directory derived from project identity; an explicit
 socket setting remains explicit. The supervisor uses the same resolved path.
 
+The continuous consumer treats `(stream identity, cursor)` as one
+acknowledgement. If Language Service reports a stream change or expired event
+window, Forge retains the previous acknowledged pair, records a
+`cursor_recovery` descriptor, and returns `UNKNOWN`; it does not advance to the
+provider high-water mark. The selected semantic owner must reconcile current
+state before that consumer adopts a replacement stream.
+
 ## Work and authority
 
 `resident-work` pins the selected runtime/package closure and exposes the

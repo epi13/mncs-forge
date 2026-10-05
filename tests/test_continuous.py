@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -140,6 +140,57 @@ def test_debounce_policy_is_bounded_and_trigger_declared() -> None:
         "triggers": [{"id": "burst", "debounce_ms": 9000}],
     }
     assert supervisor._debounce_ms() == 5000
+
+
+def test_cursor_reset_does_not_acknowledge_provider_high_water() -> None:
+    supervisor = _supervisor()
+    supervisor.settings = {"enabled": True, "poll_max_events": 8}
+    supervisor.config = SimpleNamespace(continuous_settings={})
+    supervisor.stream_identity = "stream-acknowledged"
+    supervisor.current_cursor = 2
+    supervisor.current_generation = 4
+    supervisor.attention = []
+    supervisor.status_counts = Counter()
+    supervisor.read_status = lambda: {
+        "event_stream_identity": "stream-acknowledged",
+        "event_cursor": 2,
+    }
+    supervisor._restore_pending = lambda _prior: None
+    written: list[dict[str, object]] = []
+    supervisor.status = lambda: {
+        "event_stream_identity": supervisor.stream_identity,
+        "event_cursor": supervisor.current_cursor,
+    }
+    supervisor._write_status = lambda value: written.append(dict(value))
+
+    class ResetClient:
+        def request(self, method: str, params: dict[str, object] | None = None) -> object:
+            if method == "workspace_status":
+                return {"stream_identity": "stream-restarted", "generation": 11}
+            if method == "poll_events":
+                return {
+                    "stream_identity": "stream-restarted",
+                    "after_cursor": 2,
+                    "oldest_cursor": 5,
+                    "current_cursor": 9,
+                    "reset_required": True,
+                    "events": [],
+                    "limitations": ["requested cursor belongs to a different stream"],
+                }
+            return {}
+
+    supervisor._socket = lambda: ResetClient()
+
+    result = supervisor.run(once=True)
+
+    assert result["transport"] == "UNKNOWN"
+    assert result["cursor_recovery"]["status"] == "required"
+    assert result["cursor_recovery"]["observed_stream_identity"] == "stream-restarted"
+    assert result["event_cursor"] == 2
+    assert result["event_stream_identity"] == "stream-acknowledged"
+    assert written[-1]["event_cursor"] == 2
+    assert written[-1]["event_stream_identity"] == "stream-acknowledged"
+    assert supervisor.status_counts["UNKNOWN"] == 1
 
 
 def test_escalation_policy_controls_attention_without_changing_verdict() -> None:
