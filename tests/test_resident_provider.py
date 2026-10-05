@@ -207,6 +207,109 @@ def test_live_ambient_language_service_is_not_attached(config, identity, monkeyp
         continuous.ensure_language_service(config, selected_bindings=identity["runtime"])
 
 
+def test_environment_selected_language_service_is_attached_without_launch(
+    config, identity, monkeypatch
+):
+    selected = {
+        "MNLS_SERVICE_SOCKET": "/selected/.mncs/mnls.sock",
+        "MNLS_SERVICE_STREAM_IDENTITY": "mnls-stream-selected",
+        "MNLS_SERVICE_WORKSPACE_ROOT": str(config.root.parent),
+        "MNLS_SERVICE_REPOSITORY_ROOTS_JSON": json.dumps([str(config.root)]),
+    }
+    for name, value in selected.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        continuous.LanguageServiceSocket,
+        "request",
+        lambda *_a, **_k: {
+            "workspace_root": str(config.root.parent),
+            "stream_identity": "mnls-stream-selected",
+        },
+    )
+    monkeypatch.setattr(
+        continuous.subprocess,
+        "Popen",
+        lambda *_a, **_k: pytest.fail("Environment-selected LS must not be duplicated"),
+    )
+
+    attached = continuous.ensure_language_service(
+        config, selected_bindings=resident.language_bindings(identity)
+    )
+    assert attached["state"] == "attached"
+    assert attached["ownership"] == "environment-selected"
+    assert continuous._language_service_socket(config) == Path(selected["MNLS_SERVICE_SOCKET"])
+
+
+def test_environment_selected_language_service_mismatch_fails_closed(
+    config, monkeypatch
+):
+    monkeypatch.setenv("MNLS_SERVICE_SOCKET", "/selected/.mncs/mnls.sock")
+    monkeypatch.setenv("MNLS_SERVICE_STREAM_IDENTITY", "mnls-stream-current")
+    monkeypatch.setenv("MNLS_SERVICE_WORKSPACE_ROOT", str(config.root.parent))
+    monkeypatch.setenv(
+        "MNLS_SERVICE_REPOSITORY_ROOTS_JSON", json.dumps([str(config.root)])
+    )
+    monkeypatch.setattr(
+        continuous.LanguageServiceSocket,
+        "request",
+        lambda *_a, **_k: {
+            "workspace_root": str(config.root.parent),
+            "stream_identity": "old-stream",
+        },
+    )
+    monkeypatch.setattr(
+        continuous.subprocess,
+        "Popen",
+        lambda *_a, **_k: pytest.fail("stale selected LS must not trigger a duplicate"),
+    )
+    with pytest.raises(ForgeError, match="does not match the Environment stream"):
+        continuous.ensure_language_service(config)
+
+
+def test_orphaned_forge_owned_language_service_can_be_stopped(config, identity, monkeypatch):
+    language = {
+        "pid": os.getpid(),
+        "process_identity": resident.process_identity(os.getpid()),
+        "selected_bindings": resident.language_bindings(identity),
+    }
+    continuous._write_json_path(continuous._language_service_lease_path(config), language)
+    signalled = []
+    monkeypatch.setattr(resident, "signal_owned", signalled.append)
+
+    result = resident.resident_reconcile(
+        config,
+        identity,
+        stop=True,
+        include_language_service=True,
+    )
+
+    assert result["operation"] == "stopping"
+    assert [item["pid"] for item in signalled] == [os.getpid()]
+
+
+def test_reconcile_capability_exposes_owned_stop_flags(config, identity, monkeypatch, capsys):
+    observed = {}
+    monkeypatch.setattr(resident, "resolve_continuous_config", lambda **_kw: config)
+    monkeypatch.setattr(resident, "selected_identity", lambda _c: identity)
+
+    def reconcile(_config, _identity, *, stop=False, include_language_service=False):
+        observed.update(stop=stop, include_language_service=include_language_service)
+        return {"schema_version": resident.RECONCILE_SCHEMA, "operation": "stopped"}
+
+    monkeypatch.setattr(resident, "resident_reconcile", reconcile)
+    assert resident.main(
+        [
+            "reconcile",
+            "--stop",
+            "--include-language-service",
+            "--workspace",
+            str(config.root),
+        ]
+    ) == 0
+    assert observed == {"stop": True, "include_language_service": True}
+    assert json.loads(capsys.readouterr().out)["operation"] == "stopped"
+
+
 @pytest.mark.parametrize("operation", ["status", "reconcile"])
 def test_provider_deadline_includes_configuration_and_artifact_reads(
     operation, monkeypatch, capsys

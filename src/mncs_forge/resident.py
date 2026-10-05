@@ -156,6 +156,50 @@ def selected_identity(config: Any) -> dict[str, Any]:
             path = Path(runtime[name]) / relative
             artifacts[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
         runtime["MNCS_VM_ARTIFACT_CACHE"] = str(Path(os.environ.get("MNCS_VM_ARTIFACT_CACHE", str(Path(config.root) / ".mncs/cache/compiler-vm"))).resolve())
+    service_selection = {
+        name: os.environ.get(name)
+        for name in (
+            "MNLS_SERVICE_SOCKET",
+            "MNLS_SERVICE_STREAM_IDENTITY",
+            "MNLS_SERVICE_WORKSPACE_ROOT",
+            "MNLS_SERVICE_REPOSITORY_ROOTS_JSON",
+        )
+    }
+    if any(service_selection.values()):
+        if not all(service_selection.values()):
+            raise ForgeError(
+                "RESIDENT_BINDING_MISSING",
+                "incomplete selected Language Service endpoint identity",
+            )
+        socket_path = Path(str(service_selection["MNLS_SERVICE_SOCKET"]))
+        workspace_root = Path(str(service_selection["MNLS_SERVICE_WORKSPACE_ROOT"]))
+        try:
+            repository_roots = json.loads(
+                str(service_selection["MNLS_SERVICE_REPOSITORY_ROOTS_JSON"])
+            )
+        except json.JSONDecodeError as error:
+            raise ForgeError(
+                "RESIDENT_BINDING_MISMATCH",
+                "selected Language Service repository roots are invalid",
+            ) from error
+        if (
+            not socket_path.is_absolute()
+            or not workspace_root.is_absolute()
+            or not isinstance(repository_roots, list)
+            or len(repository_roots) > 128
+            or any(not isinstance(root, str) or not Path(root).is_absolute() for root in repository_roots)
+            or str(config.root.resolve()) not in {str(Path(root).resolve()) for root in repository_roots}
+            or not str(service_selection["MNLS_SERVICE_STREAM_IDENTITY"]).strip()
+        ):
+            raise ForgeError(
+                "RESIDENT_BINDING_MISMATCH",
+                "selected Language Service endpoint does not include the Forge workspace",
+            )
+        if not socket_path.exists():
+            raise ForgeError(
+                "RESIDENT_BINDING_MISSING", "selected Language Service socket is absent"
+            )
+        runtime.update({name: str(value) for name, value in service_selection.items()})
     identity = {
         "checkout": str(checkout),
         "revision": revision,
@@ -354,13 +398,15 @@ def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
         ) >= float(config.continuous_settings.get("start_timeout_seconds", 60)):
             raise ValueError("resident initialization exceeded the configured startup deadline")
         if observed["state"] == "ready":
-            language_lease = _read_json_path(_language_service_lease_path(config)) or {}
-            if not owns_process(language_lease) or language_lease.get(
-                "selected_bindings"
-            ) != language_bindings(identity):
-                raise ValueError(
-                    "resident Language Service has no matching selected process binding"
-                )
+            external_service = "MNLS_SERVICE_SOCKET" in identity.get("runtime", {})
+            if not external_service:
+                language_lease = _read_json_path(_language_service_lease_path(config)) or {}
+                if not owns_process(language_lease) or language_lease.get(
+                    "selected_bindings"
+                ) != language_bindings(identity):
+                    raise ValueError(
+                        "resident Language Service has no matching selected process binding"
+                    )
             language = _probe_language_service(config)
             if not language.get("stream_identity") or language.get(
                 "stream_identity"
@@ -433,6 +479,35 @@ def resident_reconcile(
                 }
             prior_identity = lease.get("provider_identity") or {}
             language = _read_json_path(_language_service_lease_path(config)) or {}
+            language_stopping = False
+            if stop and include_language_service and owns_process(language):
+                if language.get("selected_bindings") != language_bindings(identity):
+                    raise ForgeError(
+                        "LANGUAGE_SERVICE_SELECTION_MISMATCH",
+                        "cannot stop a Language Service owned by another binding",
+                    )
+                signal_owned(language)
+                language_stopping = True
+            elif (
+                stop
+                and include_language_service
+                and type(language.get("pid")) is int
+                and language.get("pid") > 0
+                and process_identity(language["pid"]) is not None
+            ):
+                return {
+                    "schema_version": RECONCILE_SCHEMA,
+                    "operation": "blocked",
+                    "status": {
+                        **status,
+                        "diagnostics": [
+                            {
+                                "code": "RESIDENT_LANGUAGE_LEASE_UNVERIFIED",
+                                "message": "live Language Service lease lacks a matching birth identity",
+                            }
+                        ],
+                    },
+                }
             changed_runtime = prior_identity.get("runtime") != identity[
                 "runtime"
             ] or prior_identity.get("runtime_artifacts") != identity.get("runtime_artifacts")
@@ -456,15 +531,6 @@ def resident_reconcile(
                     "status": status,
                 }
             if owns_process(lease):
-                if stop and include_language_service:
-                    language = _read_json_path(_language_service_lease_path(config)) or {}
-                    if owns_process(language):
-                        if language.get("selected_bindings") != language_bindings(identity):
-                            raise ForgeError(
-                                "LANGUAGE_SERVICE_SELECTION_MISMATCH",
-                                "cannot stop a Language Service owned by another binding",
-                            )
-                        signal_owned(language)
                 # A nonresponding selected process must exit before a replacement
                 # is launched. Never control an incompatible/legacy PID lease.
                 signal_owned(lease)
@@ -476,7 +542,7 @@ def resident_reconcile(
             if stop:
                 return {
                     "schema_version": RECONCILE_SCHEMA,
-                    "operation": "stopped",
+                    "operation": "stopping" if language_stopping else "stopped",
                     "status": status,
                 }
             if not config.continuous_settings.get("enabled"):
@@ -549,6 +615,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--workspace", type=Path)
     parser.add_argument("--include-language-service", action="store_true")
+    parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="stop a selected resident through the reconcile capability",
+    )
     args = parser.parse_args(argv)
     if args.config is None and args.workspace is None:
         parser.error("supply the selected --workspace or an explicit --config")
@@ -570,7 +641,7 @@ def main(argv: list[str] | None = None) -> int:
             else resident_reconcile(
                 config,
                 identity,
-                stop=args.operation == "stop",
+                stop=args.operation == "stop" or args.stop,
                 include_language_service=args.include_language_service,
             )
         )

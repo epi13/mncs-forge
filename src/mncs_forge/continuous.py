@@ -353,6 +353,15 @@ def _supervisor_process_matches(pid: int, config: Any) -> bool:
 
 
 def _language_service_socket(config: Any) -> Path:
+    selected = os.environ.get("MNLS_SERVICE_SOCKET")
+    if selected:
+        path = Path(selected).expanduser()
+        if not path.is_absolute():
+            raise ForgeError(
+                "LANGUAGE_SERVICE_SELECTION",
+                "selected Language Service socket must be absolute",
+            )
+        return path.resolve()
     value = config.continuous_settings.get(
         "language_service_socket", ".mncs/mnls-language-service.sock"
     )
@@ -375,7 +384,40 @@ def _probe_language_service(config: Any) -> dict[str, object]:
         )
     )
     observed_root = result.get("workspace_root")
-    if not isinstance(observed_root, str) or Path(observed_root).resolve() != config.root.resolve():
+    selected_socket = os.environ.get("MNLS_SERVICE_SOCKET")
+    if selected_socket:
+        expected_root = os.environ.get("MNLS_SERVICE_WORKSPACE_ROOT")
+        expected_stream = os.environ.get("MNLS_SERVICE_STREAM_IDENTITY")
+        try:
+            repository_roots = json.loads(
+                os.environ.get("MNLS_SERVICE_REPOSITORY_ROOTS_JSON", "")
+            )
+        except json.JSONDecodeError as error:
+            raise ForgeError(
+                "LANGUAGE_SERVICE_SELECTION", "selected repository roots are malformed"
+            ) from error
+        if (
+            not isinstance(observed_root, str)
+            or not isinstance(expected_root, str)
+            or Path(observed_root).resolve() != Path(expected_root).resolve()
+            or not isinstance(repository_roots, list)
+            or str(config.root.resolve())
+            not in {
+                str(Path(root).resolve())
+                for root in repository_roots
+                if isinstance(root, str) and Path(root).is_absolute()
+            }
+            or not isinstance(result.get("stream_identity"), str)
+            or result.get("stream_identity") != expected_stream
+        ):
+            raise ForgeError(
+                "LANGUAGE_SERVICE_IDENTITY",
+                "selected Language Service does not match the Environment stream, root, and repository set",
+            )
+    elif (
+        not isinstance(observed_root, str)
+        or Path(observed_root).resolve() != config.root.resolve()
+    ):
         raise ForgeError(
             "LANGUAGE_SERVICE_IDENTITY",
             f"resident Language Service root is not {config.root}",
@@ -436,9 +478,10 @@ def _terminate_language_service_start(
 def ensure_language_service(
     config: Any, *, selected_bindings: dict[str, Any] | None = None
 ) -> dict[str, object]:
+    selected_external = bool(os.environ.get("MNLS_SERVICE_SOCKET"))
     try:
         status = _probe_language_service(config)
-        if selected_bindings is not None:
+        if selected_bindings is not None and not selected_external:
             from .resident import owns_process
 
             lease = _read_json_path(_language_service_lease_path(config)) or {}
@@ -448,9 +491,17 @@ def ensure_language_service(
                     "Language Service is not owned by the selected binding; "
                     "stop it through its owning provider",
                 )
-        return {"state": "attached", "pid": None, "status": status}
+        return {
+            "state": "attached",
+            "pid": None,
+            "status": status,
+            "ownership": "environment-selected" if selected_external else "forge-selected",
+        }
     except ForgeError as error:
-        if error.code in {"LANGUAGE_SERVICE_IDENTITY", "LANGUAGE_SERVICE_SELECTION_MISMATCH"}:
+        if selected_external or error.code in {
+            "LANGUAGE_SERVICE_IDENTITY",
+            "LANGUAGE_SERVICE_SELECTION_MISMATCH",
+        }:
             raise
     socket_path = _language_service_socket(config)
     if not socket_path.is_relative_to(config.root):

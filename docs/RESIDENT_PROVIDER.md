@@ -1,7 +1,7 @@
 # Resident provider contract
 
-Forge publishes `resident-status`, `resident-reconcile`, `resident-stop`, and
-`resident-work` in `.mncs/project.json`. Their invocation descriptors address
+Forge publishes `resident-status`, `resident-reconcile`, and `resident-work`
+in `.mncs/project.json`. Their invocation descriptors address
 checkout-owned Python entrypoints and the explicitly selected Language Service
 host. Source fingerprints remain evidence, never invocation addressing.
 
@@ -20,6 +20,16 @@ Environment supplies the Language/Store runtime and resolves the host through
 Forge's descriptor. Missing selections fail with `RESIDENT_BINDING_MISSING`.
 No PATH compiler, installed Forge package, sibling Store package, configured
 ambient Language Service command, or native-mode override substitutes for them.
+
+Environment can additionally pass `MNLS_SERVICE_SOCKET`,
+`MNLS_SERVICE_STREAM_IDENTITY`, `MNLS_SERVICE_WORKSPACE_ROOT`, and
+`MNLS_SERVICE_REPOSITORY_ROOTS_JSON` from a ready selected LS provider
+observation. Forge includes these values in its resident identity and verifies
+the live socket reports the same root and stream and that the selected
+repository set contains the Forge workspace. With this composition, Forge
+attaches to the Environment-owned stream and never starts a second LS. If the
+selected stream changes, Forge fails closed and must be reconciled against the
+new identity.
 
 The immutable startup identity contains Forge checkout and observed HEAD,
 project/configuration identity, runtime paths, and compiler/embed/host artifact
@@ -41,8 +51,9 @@ additionally enforces its three-second/16384-byte invocation budget.
 
 `ready` requires a Linux process birth identity, a live nonce challenge to the
 actual supervisor, matching provider/runtime/configuration/instance identity,
-an attached current Language Service event stream, and that service's owned
-selected process binding. File/executable/PID presence is insufficient.
+and an attached current Language Service event stream. Forge either verifies
+its own selected LS process lease or the exact externally selected Environment
+endpoint above. File/executable/PID presence is insufficient.
 The resident initializes the existing native Forge and real Store before it
 can become ready. Status also reports stopped, starting, stale, incompatible,
 degraded, failed, or blocked, with stable diagnostic codes and recovery context.
@@ -68,9 +79,10 @@ that descriptor. PID recycling between observation and signaling cannot target
 a replacement process. Linux `/proc`, abstract Unix sockets, and pidfds are the
 current platform boundary; unsupported control remains explicit.
 
-`resident-stop` stops the selected supervisor. `--include-language-service`
-also stops its owned selected service, useful for an isolated campaign's exit.
-It does not stop another binding's service. Long default Language socket paths
+`resident-reconcile --stop` stops the selected supervisor. Adding
+`--include-language-service` also stops its owned selected service, including
+an owned service left behind after the supervisor exited. It does not stop
+another binding's service. Long default Language socket paths
 use a stable short private directory derived from project identity; an explicit
 socket setting remains explicit. The supervisor uses the same resolved path.
 
@@ -87,6 +99,13 @@ and readiness projection. It contains no Forge commands or process rules.
 An unowned campaign checkout requires an explicit claim before startup; blocked
 authority never becomes implicit permission. Forge owns status/lifecycle and
 the surrounding native assurance and continuous supervision machinery.
+
+Pure Forge applications use the selected compiler and canonical VM. The
+resource-budget policy currently uses an explicit Stage-0/embed fallback only
+when the VM reports one of the known float instruction gaps; that fallback is
+recorded with the canonical artifact, producer/runtime receipt, Stage-0
+artifact identity, and selected target. Other VM `unsupported` outcomes remain
+errors and do not silently switch runtimes.
 
 ## Evidence
 

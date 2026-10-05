@@ -150,6 +150,7 @@ class ResourceBudget:
     runtime_max_seconds: float
     host_memory_total_bytes: int
     envelope_identity: str
+    policy_execution_backend: str
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -161,6 +162,7 @@ class ResourceBudget:
             "concurrency_max": self.concurrency_max,
             "runtime_max_seconds": self.runtime_max_seconds,
             "host_memory_total_bytes": self.host_memory_total_bytes,
+            "policy_execution_backend": self.policy_execution_backend,
             "mechanism": "systemd-user-service+cgroup-v2",
         }
 
@@ -242,6 +244,7 @@ class SystemdCgroupEnvelope:
                 envelope_identity=resource_semantics.resource_budget_identity(
                     self._budget_decision
                 ),
+                policy_execution_backend=self._budget_decision.execution_backend,
             )
         else:
             self.budget = None

@@ -46,6 +46,9 @@ NATIVE_ARTIFACT_CACHE_KEEP = 8
 # Explicit Stage-0 embedding lane for host-granted process/effect providers.
 # Pure applications use the selected compiler + canonical VM when composed.
 STAGE0_EMBED_BACKEND = "mncs-research-bytecode"
+RESOURCE_POLICY_VM_FLOAT_GAPS = frozenset(
+    {"float_constant", "float", "float_compare", "float_intrinsic"}
+)
 NATIVE_SOURCE_PROFILE = "0.10"
 _MNCS_TYPE_PREFIX = "mncs:0.2:finite-type:"
 _MNCS_VARIANT_PREFIX = "mncs:0.2:finite-variant:"
@@ -63,6 +66,12 @@ _LIFECYCLE_STAGES = {
     "EvaluationComplete": 8,
     "AmbiguousHistory": 9,
 }
+
+
+def _resource_policy_vm_float_gap(feature: object) -> bool:
+    if not isinstance(feature, str):
+        return False
+    return feature.removeprefix("instruction ") in RESOURCE_POLICY_VM_FLOAT_GAPS
 _LIFECYCLE_OPERATIONS = {
     "BeginEpoch": 0,
     "RegisterCandidate": 1,
@@ -360,6 +369,7 @@ class NativeResourceBudgetDecision:
     runtime_max_seconds: float
     effective_host_memory_bytes: int
     duration_seconds: float
+    execution_backend: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -759,6 +769,7 @@ class NativeForgeAdapter:
         self._retained_invocations = 0
         self._retained_call_mean_seconds = 0.0
         self._retained_call_max_seconds = 0.0
+        self._execution_fallbacks: list[dict[str, object]] = []
         self._native_caches = {
             name: BoundedNativeCache(
                 max_bytes=(
@@ -896,7 +907,21 @@ class NativeForgeAdapter:
                 "command": list(command),
                 "retained": embed_library is not None,
                 "embed_library": str(embed_library) if embed_library is not None else None,
-                "execution_composition": {"pure_applications":"canonical-vm" if self._canonical_selection() else "stage0-reference", "host_grants":"stage0-reference/embed", "stage0_backend":STAGE0_EMBED_BACKEND},
+                "execution_composition": {
+                    "pure_applications": "canonical-vm"
+                    if self._canonical_selection()
+                    else "stage0-reference",
+                    "resource_policy": (
+                        "stage0-reference-for-vm-float-gap"
+                        if self._execution_fallbacks
+                        else "canonical-vm"
+                        if self._canonical_selection()
+                        else "stage0-reference"
+                    ),
+                    "host_grants": "stage0-reference/embed",
+                    "stage0_backend": STAGE0_EMBED_BACKEND,
+                },
+                "execution_fallbacks": list(self._execution_fallbacks),
                 **self._selected_binary_observation(),
             }
         return {
@@ -1460,7 +1485,11 @@ class NativeForgeAdapter:
             duration_seconds=__import__("time").perf_counter()-started, transport="canonical-vm-retained")
 
     def _semantic_invocation(
-        self, request: Mapping[str, object], *, request_name: str
+        self,
+        request: Mapping[str, object],
+        *,
+        request_name: str,
+        force_stage0_reference: bool = False,
     ) -> NativeInvocation:
         """Call the retained core; use the old request-file path only for tests/oracles."""
 
@@ -1475,9 +1504,53 @@ class NativeForgeAdapter:
         grants = request.get("grants", [])
         if not isinstance(grants, list) or any(not isinstance(grant, Mapping) for grant in grants):
             raise ForgeError("NATIVE_REQUEST_INVALID", "native grants are not a list of objects")
-        if not grants and not self._execute_is_overridden() and self._canonical_selection() is not None:
+        if force_stage0_reference and self._embed_library() is None:
+            raise ForgeError(
+                "NATIVE_EMBED_UNAVAILABLE",
+                "explicit Stage-0 fallback requires the selected Language embed library",
+            )
+        if (
+            not force_stage0_reference
+            and not grants
+            and not self._execute_is_overridden()
+            and self._canonical_selection() is not None
+        ):
             assert self.library_root is not None
             return self.execute_canonical(self.native_source, request, libraries=(self.native_root, self.library_root))
+        if force_stage0_reference:
+            if grants:
+                raise ForgeError(
+                    "NATIVE_FALLBACK_GRANTS",
+                    "Stage-0 fallback is limited to pure policy calls",
+                )
+            session = self.ensure_session()
+            try:
+                payload, duration = session.call(
+                    module,
+                    function,
+                    arguments,
+                    step_budget=int(request.get("step_budget", 0)),
+                    grants=[],
+                )
+            except RetainedEmbedError as exc:
+                raise ForgeError("NATIVE_EXECUTION", str(exc)) from exc
+            prior_count = self._retained_invocations
+            self._retained_invocations = min(_COUNTER_MAX, prior_count + 1)
+            sample_count = max(self._retained_invocations, 1)
+            self._retained_call_mean_seconds += (
+                duration - self._retained_call_mean_seconds
+            ) / sample_count
+            self._retained_call_max_seconds = max(self._retained_call_max_seconds, duration)
+            encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            return NativeInvocation(
+                command=("mncs-embed", self._retained_artifact_identity or "unknown"),
+                returncode=0,
+                stdout=encoded,
+                stderr=b"",
+                payload=payload,
+                duration_seconds=duration,
+                transport="stage0-reference-fallback",
+            )
         if self._execute_is_overridden() or self._embed_library() is None:
             if grants:
                 raise ForgeError(
@@ -1727,11 +1800,6 @@ class NativeForgeAdapter:
         """Serialize host observations/configuration and execute native policy."""
 
         self.ensure_available()
-        if self._embed_library() is None:
-            raise ForgeError(
-                "NATIVE_EMBED_UNAVAILABLE",
-                "native resource policy requires a retained mncs-embed session",
-            )
         abi = self.language_owned_abi()
         function_contract = abi.functions.get("resource_budget_select")
         if function_contract is None:
@@ -1838,10 +1906,55 @@ class NativeForgeAdapter:
             "step_budget": 20_000,
         }
         invocation = self._semantic_invocation(request, request_name="resource-budget-request.json")
+        fallback_feature: str | None = None
+        if invocation.payload and invocation.payload.get("status") == "unsupported":
+            failure = invocation.payload.get("failure_reason")
+            feature = failure.get("feature") if isinstance(failure, dict) else None
+            if (
+                _resource_policy_vm_float_gap(feature)
+                and self._canonical_selection() is not None
+            ):
+                fallback_feature = str(feature)
+                selected_status = (
+                    self._canonical_application.status()
+                    if self._canonical_application is not None
+                    else {}
+                )
+                artifact = selected_status.get("artifact")
+                artifact = artifact if isinstance(artifact, dict) else {}
+                runtime = selected_status.get("runtime")
+                runtime = runtime if isinstance(runtime, dict) else {}
+                build_origin = runtime.get("build_origin")
+                build_origin = build_origin if isinstance(build_origin, dict) else {}
+                invocation = self._semantic_invocation(
+                    request,
+                    request_name="resource-budget-request.json",
+                    force_stage0_reference=True,
+                )
+                self._execution_fallbacks.append(
+                    {
+                        "target": "forge/core.mncs::resource_budget_select",
+                        "reason": f"canonical VM unsupported {fallback_feature}",
+                        "from": "canonical-vm",
+                        "to": "stage0-reference/embed",
+                        "artifact_identity": artifact.get("identity"),
+                        "producer": selected_status.get("producer"),
+                        "vm_executable_sha256": runtime.get("executable_sha256"),
+                        "vm_build_receipt_identity": build_origin.get("receipt_identity"),
+                        "stage0_artifact": self._retained_artifact_identity,
+                        "stage0_semantic_input_identity": self._retained_identity,
+                    }
+                )
+                self._execution_fallbacks = self._execution_fallbacks[-8:]
         if not invocation.ok or invocation.payload is None:
             raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource budget call failed")
         if invocation.payload.get("status") != "returned":
-            raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource budget did not return")
+            details = invocation.payload.get("failure_reason")
+            raise ForgeError(
+                "NATIVE_RESOURCE_UNKNOWN",
+                f"resource policy execution did not return through {invocation.transport}: "
+                f"{details if details is not None else invocation.payload.get('status')}",
+            )
         returned = invocation.payload.get("returned")
         if not isinstance(returned, list) or len(returned) != 1:
             raise ForgeError("NATIVE_ABI_MISMATCH", "resource budget result arity is invalid")
@@ -1879,6 +1992,7 @@ class NativeForgeAdapter:
                 context="resource budget effective host memory",
             ),
             duration_seconds=invocation.duration_seconds,
+            execution_backend=invocation.transport,
         )
 
     def resource_budget_identity(self, decision: NativeResourceBudgetDecision) -> str:
