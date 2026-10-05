@@ -5,9 +5,12 @@ Forge publishes `resident-status`, `resident-reconcile`, `resident-stop`, and
 checkout-owned Python entrypoints and the explicitly selected Language Service
 host. Source fingerprints remain evidence, never invocation addressing.
 
-The consumer supplies an explicit absolute `--config`. `--workspace`, when
-present, must agree with the configuration's authoritative project root.
-Environment resolves repository path references against its selected bindings.
+The consumer supplies the exact selected `--workspace` root, or an explicit
+absolute `--config`. When both are supplied, the workspace must agree with the
+configuration's authoritative project root. Workspace-only selection uses
+Forge's bounded, fail-closed configuration resolver and never falls back to the
+current directory. Environment resolves the workspace path against its
+selected repository bindings.
 
 ## Selection and observations
 

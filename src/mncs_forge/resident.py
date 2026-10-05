@@ -543,10 +543,15 @@ def resident_reconcile(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("status", "reconcile", "stop"))
-    parser.add_argument("--config", required=True, type=Path)
+    # Environment selects the exact workspace root and supplies it here.
+    # The provider then uses its bounded, fail-closed config resolver instead
+    # of requiring consumers to copy an ambient config path into their policy.
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--workspace", type=Path)
     parser.add_argument("--include-language-service", action="store_true")
     args = parser.parse_args(argv)
+    if args.config is None and args.workspace is None:
+        parser.error("supply the selected --workspace or an explicit --config")
 
     def deadline(_signal: int, _frame: Any) -> None:
         raise ForgeError("RESIDENT_DEADLINE", "resident operation exceeded its 2.5-second deadline")

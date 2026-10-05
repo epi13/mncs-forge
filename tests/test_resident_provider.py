@@ -231,3 +231,33 @@ def test_provider_result_output_has_a_total_bound(config, identity, monkeypatch,
     output = capsys.readouterr().out
     assert len(output.encode()) <= resident.MAX_BYTES
     assert json.loads(output)["diagnostics"][0]["code"] == "RESIDENT_OUTPUT_LIMIT"
+
+
+def test_provider_status_resolves_config_from_selected_workspace(
+    config, identity, monkeypatch, capsys
+):
+    observed = []
+
+    def resolve(*, workspace, explicit_config):
+        observed.append((workspace, explicit_config))
+        assert workspace == config.root
+        assert explicit_config is None
+        return config
+
+    monkeypatch.setattr(resident, "resolve_continuous_config", resolve)
+    monkeypatch.setattr(resident, "selected_identity", lambda _config: identity)
+    monkeypatch.setattr(
+        resident,
+        "resident_status",
+        lambda *_args: {"schema_version": resident.STATUS_SCHEMA, "state": "stopped"},
+    )
+
+    assert resident.main(["status", "--workspace", str(config.root)]) == 0
+    assert observed == [(config.root, None)]
+    assert json.loads(capsys.readouterr().out)["state"] == "stopped"
+
+
+def test_provider_refuses_ambient_configuration_fallback():
+    with pytest.raises(SystemExit) as result:
+        resident.main(["status"])
+    assert result.value.code == 2
