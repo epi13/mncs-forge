@@ -133,6 +133,29 @@ def selected_identity(config: Any) -> dict[str, Any]:
             )
     if not (Path(runtime["MNCS_STORE_ROOT"]) / "python/mncs_store").is_dir():
         raise ForgeError("RESIDENT_BINDING_MISSING", "selected Store package is unavailable")
+    # Optional provider composition is part of the resident identity, never
+    # an unrecorded ambient selector inherited by a long-lived process.
+    composition_keys = ("MNCS_COMPILER_CHECKOUT", "MNCS_COMPILER_PROBE", "MNCS_VM_CHECKOUT", "MNCS_VM_BIN")
+    selection = {name: os.environ.get(name) for name in composition_keys}
+    if any(selection.values()):
+        if not all(selection.values()):
+            raise ForgeError("RESIDENT_BINDING_MISSING", "incomplete compiler/VM provider composition")
+        for name, raw in selection.items():
+            path = Path(raw)
+            if not path.is_absolute() or not path.exists():
+                raise ForgeError("RESIDENT_BINDING_MISSING", f"selected {name} is unavailable")
+            runtime[name] = str(path.resolve())
+        for name, owner in (("MNCS_COMPILER_PROBE", "MNCS_COMPILER_CHECKOUT"), ("MNCS_VM_BIN", "MNCS_VM_CHECKOUT")):
+            path = Path(runtime[name])
+            if not path.is_relative_to(Path(runtime[owner])):
+                raise ForgeError("RESIDENT_BINDING_MISMATCH", f"{name} is outside its selected provider checkout")
+            if not path.is_file() or not os.access(path, os.X_OK):
+                raise ForgeError("RESIDENT_BINDING_MISSING", f"selected {name} is not executable")
+            artifacts[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, relative in (("MNCS_COMPILER_CHECKOUT", "tools/vm_provider.py"), ("MNCS_VM_CHECKOUT", "python/mncs_vm_client/__init__.py")):
+            path = Path(runtime[name]) / relative
+            artifacts[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+        runtime["MNCS_VM_ARTIFACT_CACHE"] = str(Path(os.environ.get("MNCS_VM_ARTIFACT_CACHE", str(Path(config.root) / ".mncs/cache/compiler-vm"))).resolve())
     identity = {
         "checkout": str(checkout),
         "revision": revision,
@@ -158,6 +181,8 @@ def language_bindings(identity: dict[str, Any]) -> dict[str, Any]:
 def selected_environment(identity: dict[str, Any]) -> dict[str, str]:
     """Pin child imports and all existing Forge runtime selectors."""
     environment = dict(os.environ)
+    for name in ("MNCS_COMPILER_CHECKOUT", "MNCS_COMPILER_PROBE", "MNCS_VM_CHECKOUT", "MNCS_VM_BIN", "MNCS_VM_ARTIFACT_CACHE"):
+        environment.pop(name, None)
     environment.update(identity["runtime"])
     environment.update(
         MNCS_CLI=environment["MNCS_BIN"],

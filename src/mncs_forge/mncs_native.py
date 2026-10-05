@@ -43,7 +43,9 @@ NATIVE_ABI_OUTPUT_BYTES = 8_000_000
 # Identity-addressed cache entries are immutable; pruning only loses a warm
 # hit, never correctness. Keep the newest generations across compiler churn.
 NATIVE_ARTIFACT_CACHE_KEEP = 8
-NATIVE_BACKEND = "mncs-research-bytecode"
+# Explicit Stage-0 embedding lane for host-granted process/effect providers.
+# Pure applications use the selected compiler + canonical VM when composed.
+STAGE0_EMBED_BACKEND = "mncs-research-bytecode"
 NATIVE_SOURCE_PROFILE = "0.10"
 _MNCS_TYPE_PREFIX = "mncs:0.2:finite-type:"
 _MNCS_VARIANT_PREFIX = "mncs:0.2:finite-variant:"
@@ -746,6 +748,7 @@ class NativeForgeAdapter:
         self.runner = runner
         self._assurance_cache_option_supported: bool | None = None
         self._session_lock = threading.RLock()
+        self._canonical_application = None
         self._retained_session: RetainedEmbedSession | None = None
         self._retained_identity: str | None = None
         self._retained_artifact_identity: str | None = None
@@ -802,6 +805,10 @@ class NativeForgeAdapter:
                 self._retained_session = None
                 self._retained_identity = None
                 self._retained_artifact_identity = None
+        canonical = getattr(self, "_canonical_application", None)
+        if canonical is not None:
+            canonical.close()
+            self._canonical_application = None
         for cache in getattr(self, "_native_caches", {}).values():
             cache.clear()
         # ``as_file`` normally resolves to the installed filesystem. This
@@ -889,6 +896,7 @@ class NativeForgeAdapter:
                 "command": list(command),
                 "retained": embed_library is not None,
                 "embed_library": str(embed_library) if embed_library is not None else None,
+                "execution_composition": {"pure_applications":"canonical-vm" if self._canonical_selection() else "stage0-reference", "host_grants":"stage0-reference/embed", "stage0_backend":STAGE0_EMBED_BACKEND},
                 **self._selected_binary_observation(),
             }
         return {
@@ -1147,6 +1155,17 @@ class NativeForgeAdapter:
                 for path in (self.language_root / "Cargo.toml", self.language_root / "Cargo.lock")
                 if path.is_file()
             )
+        canonical = self._canonical_selection()
+        if canonical is not None:
+            compiler_root = Path(canonical["MNCS_COMPILER_CHECKOUT"]).resolve()
+            probe = Path(os.environ.get("MNCS_COMPILER_PROBE", str(compiler_root / ".bootstrap/target/release/mncs-compiler-stage0-probe"))).resolve()
+            try:
+                info = json.loads(__import__("subprocess").run([str(probe), "--producer-info"], capture_output=True, text=True, timeout=10, check=True).stdout)
+            except (OSError, ValueError, __import__("subprocess").SubprocessError) as error:
+                raise ForgeError("NATIVE_COMPOSITION_INVALID", str(error)) from error
+            runtime_inputs.extend([probe, Path(canonical["MNCS_VM_BIN"]), compiler_root / "tools/vm_provider.py",
+                                   compiler_root / ".mncs/project.json", Path(canonical["MNCS_VM_CHECKOUT"]) / "python/mncs_vm_client/__init__.py"])
+            runtime_inputs.extend(compiler_root / name for name in info["receipt"]["source_inputs"])
         stdlib_bundle = os.environ.get("MNCS_STDLIB_BUNDLE")
         if stdlib_bundle:
             bundle_path = Path(stdlib_bundle).expanduser()
@@ -1174,6 +1193,7 @@ class NativeForgeAdapter:
                 "MNCS_STDLIB_BUNDLE",
                 "MNCS_BACKEND_CONFIG",
                 "MNCS_TARGET_PROFILE",
+                "MNCS_COMPILER_CHECKOUT", "MNCS_COMPILER_PROBE", "MNCS_VM_CHECKOUT", "MNCS_VM_BIN",
             )
         }
         environment_signature = tuple(sorted(runtime_configuration.items()))
@@ -1189,7 +1209,7 @@ class NativeForgeAdapter:
             "library_sources": self._content_identity(library_sources),
             "runtime_inputs": self._content_identity(runtime_inputs),
             "command": command,
-            "backend": NATIVE_BACKEND,
+            "backend": STAGE0_EMBED_BACKEND,
             "source_profile": NATIVE_SOURCE_PROFILE,
             "runtime_configuration": runtime_configuration,
             "library_path": str(self.library_root.resolve())
@@ -1241,7 +1261,7 @@ class NativeForgeAdapter:
                 "--output-dir",
                 str(output_dir),
                 "--target",
-                NATIVE_BACKEND,
+                STAGE0_EMBED_BACKEND,
             ]
             if self.runner is not None:
                 result = self.runner.execute(
@@ -1382,7 +1402,9 @@ class NativeForgeAdapter:
     def retained_status(self) -> dict[str, object]:
         session = self._retained_session
         return {
-            "active": session is not None and not session.closed,
+            "active": (session is not None and not session.closed) or (self._canonical_application is not None and self._canonical_application.session is not None),
+            "stage0_effect_runtime": "explicit Language embed",
+            "canonical_vm": self._canonical_application.status() if self._canonical_application else None,
             "semantic_input_identity": self._retained_identity,
             "artifact_identity": self._retained_artifact_identity,
             "call_count": self._retained_invocations,
@@ -1400,6 +1422,43 @@ class NativeForgeAdapter:
         bound = getattr(self.execute, "__func__", None)
         return bound is not NativeForgeAdapter.execute
 
+    def _canonical_selection(self) -> dict[str, str] | None:
+        selected = {key: os.environ.get(key, "") for key in
+                    ("MNCS_COMPILER_CHECKOUT", "MNCS_VM_CHECKOUT", "MNCS_VM_BIN", "MNCS_VM_ARTIFACT_CACHE")}
+        if not any(selected.values()):
+            return None
+        if not all(selected.values()):
+            raise ForgeError("NATIVE_COMPOSITION_INVALID", "canonical compiler/runtime selection is incomplete")
+        return selected
+
+    def execute_canonical(self, source: Path, request: Mapping[str, object], *, libraries: Sequence[Path] = ()) -> NativeInvocation:
+        """Retain admission/indexes for explicit canonical source/request work."""
+        selected = self._canonical_selection()
+        if selected is None:
+            raise ForgeError("NATIVE_COMPOSITION_UNAVAILABLE", "no canonical compiler/runtime providers selected")
+        from .compiler_vm import CanonicalVmApplication
+        started = __import__("time").perf_counter()
+        try:
+            selection_key = (tuple(sorted(selected.items())), os.environ.get("MNCS_COMPILER_PROBE"))
+            if self._canonical_application is not None and getattr(self, "_canonical_selection_key", None) != selection_key:
+                self._canonical_application.close()
+                self._canonical_application = None
+            if self._canonical_application is None:
+                self._canonical_selection_key = selection_key
+                self._canonical_application = CanonicalVmApplication(
+                    compiler_checkout=Path(selected["MNCS_COMPILER_CHECKOUT"]), vm_checkout=Path(selected["MNCS_VM_CHECKOUT"]),
+                    executable=Path(selected["MNCS_VM_BIN"]), cache=Path(selected["MNCS_VM_ARTIFACT_CACHE"]),
+                    compiler_executable=Path(os.environ["MNCS_COMPILER_PROBE"]) if os.environ.get("MNCS_COMPILER_PROBE") else None,
+                    timeout=self.timeout_seconds)
+            result = self._canonical_application.call(source, dict(request), libraries=libraries)
+        except (OSError, ValueError, RuntimeError) as error:
+            raise ForgeError("NATIVE_CANONICAL_REFUSED", str(error)) from error
+        payload = {**result["execution"], "vm_record":result["record"],
+                   "execution_provenance":result["execution_provenance"]}
+        return NativeInvocation(command=(selected["MNCS_VM_BIN"], "serve"), returncode=0,
+            stdout=json.dumps(payload).encode(), stderr=b"", payload=payload,
+            duration_seconds=__import__("time").perf_counter()-started, transport="canonical-vm-retained")
+
     def _semantic_invocation(
         self, request: Mapping[str, object], *, request_name: str
     ) -> NativeInvocation:
@@ -1416,6 +1475,9 @@ class NativeForgeAdapter:
         grants = request.get("grants", [])
         if not isinstance(grants, list) or any(not isinstance(grant, Mapping) for grant in grants):
             raise ForgeError("NATIVE_REQUEST_INVALID", "native grants are not a list of objects")
+        if not grants and not self._execute_is_overridden() and self._canonical_selection() is not None:
+            assert self.library_root is not None
+            return self.execute_canonical(self.native_source, request, libraries=(self.native_root, self.library_root))
         if self._execute_is_overridden() or self._embed_library() is None:
             if grants:
                 raise ForgeError(
