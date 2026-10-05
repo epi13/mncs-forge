@@ -125,6 +125,64 @@ def test_live_challenge_and_language_stream_are_required(config, identity, monke
         endpoint.close()
 
 
+def test_resident_health_exposes_and_preserves_cursor_recovery(config, identity, monkeypatch):
+    status_path = config.state_dir / "continuous" / "status.json"
+    continuous._write_json_path(
+        status_path,
+        {
+            "event_stream_identity": "old-stream",
+            "event_cursor": 2,
+            "cursor_recovery": {
+                "status": "required",
+                "requested_stream_identity": "old-stream",
+                "requested_cursor": 2,
+                "observed_stream_identity": "new-stream",
+                "current_cursor": 8,
+            },
+        },
+    )
+    write_lease(config, identity, instance="cursor-test")
+    endpoint = resident.ResidentEndpoint(config, identity, "cursor-test")
+    endpoint.supervisor = SimpleNamespace(
+        stream_identity="old-stream",
+        current_generation=9,
+        current_cursor=2,
+        _stop_requested=False,
+        _status_path=lambda: status_path,
+    )
+    monkeypatch.setattr(
+        resident,
+        "_probe_language_service",
+        lambda _c: pytest.fail("blocked cursor must not claim readiness"),
+    )
+    try:
+        health = resident.resident_status(config, identity)
+        assert health["state"] == "degraded"
+        assert health.get("continuous_consumer", {}).get("state") == "blocked", health
+        assert health["diagnostics"][0]["code"] == "RESIDENT_EVENT_CURSOR_RECOVERY"
+
+        monkeypatch.setattr(resident, "signal_owned", lambda *_args: pytest.fail("unsafe reset"))
+        result = resident.resident_reconcile(config, identity)
+        assert result["operation"] == "blocked"
+        assert result["status"]["continuous_consumer"]["state"] == "blocked"
+    finally:
+        endpoint.close()
+
+
+def test_resident_consumer_readiness_requires_matching_durable_pair(config):
+    status_path = config.state_dir / "continuous" / "status.json"
+    continuous._write_json_path(
+        status_path,
+        {"event_stream_identity": "selected-stream", "event_cursor": 3},
+    )
+    supervisor = SimpleNamespace(
+        stream_identity="selected-stream", current_cursor=3, _status_path=lambda: status_path
+    )
+    assert resident._continuous_consumer_status(config, supervisor)["state"] == "ready"
+    supervisor.current_cursor = 4
+    assert resident._continuous_consumer_status(config, supervisor)["state"] == "reconciling"
+
+
 def test_another_checkout_cannot_satisfy_or_be_controlled(config, identity, monkeypatch):
     write_lease(config, {**identity, "checkout": "other-checkout"})
     monkeypatch.setattr(resident, "signal_owned", lambda *_a: pytest.fail("foreign control"))
@@ -240,15 +298,11 @@ def test_environment_selected_language_service_is_attached_without_launch(
     assert continuous._language_service_socket(config) == Path(selected["MNLS_SERVICE_SOCKET"])
 
 
-def test_environment_selected_language_service_mismatch_fails_closed(
-    config, monkeypatch
-):
+def test_environment_selected_language_service_mismatch_fails_closed(config, monkeypatch):
     monkeypatch.setenv("MNLS_SERVICE_SOCKET", "/selected/.mncs/mnls.sock")
     monkeypatch.setenv("MNLS_SERVICE_STREAM_IDENTITY", "mnls-stream-current")
     monkeypatch.setenv("MNLS_SERVICE_WORKSPACE_ROOT", str(config.root.parent))
-    monkeypatch.setenv(
-        "MNLS_SERVICE_REPOSITORY_ROOTS_JSON", json.dumps([str(config.root)])
-    )
+    monkeypatch.setenv("MNLS_SERVICE_REPOSITORY_ROOTS_JSON", json.dumps([str(config.root)]))
     monkeypatch.setattr(
         continuous.LanguageServiceSocket,
         "request",
@@ -363,15 +417,18 @@ def test_reconcile_capability_exposes_owned_stop_flags(config, identity, monkeyp
         return {"schema_version": resident.RECONCILE_SCHEMA, "operation": "stopped"}
 
     monkeypatch.setattr(resident, "resident_reconcile", reconcile)
-    assert resident.main(
-        [
-            "reconcile",
-            "--stop",
-            "--include-language-service",
-            "--workspace",
-            str(config.root),
-        ]
-    ) == 0
+    assert (
+        resident.main(
+            [
+                "reconcile",
+                "--stop",
+                "--include-language-service",
+                "--workspace",
+                str(config.root),
+            ]
+        )
+        == 0
+    )
     assert observed == {"stop": True, "include_language_service": True}
     assert json.loads(capsys.readouterr().out)["operation"] == "stopped"
 

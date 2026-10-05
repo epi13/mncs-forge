@@ -116,10 +116,15 @@ def selected_identity(config: Any) -> dict[str, Any]:
     if library is None or not library.is_dir():
         raise ForgeError("RESIDENT_BINDING_MISSING", "selected stdlib library is unavailable")
     runtime["MNCS_LIBRARY_ROOT"] = str(library.resolve())
-    stdlib_identity = hashlib.sha256(json.dumps(
-        [[str(path.relative_to(library)), hashlib.sha256(path.read_bytes()).hexdigest()]
-         for path in sorted(library.rglob("*.mncs"))], separators=(",", ":")
-    ).encode()).hexdigest()
+    stdlib_identity = hashlib.sha256(
+        json.dumps(
+            [
+                [str(path.relative_to(library)), hashlib.sha256(path.read_bytes()).hexdigest()]
+                for path in sorted(library.rglob("*.mncs"))
+            ],
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     artifacts = {}
     for name in ("MNCS_BIN", "MNCS_EMBED_LIB", "MNCS_LANGUAGE_SERVICE_HOST"):
         path = Path(runtime[name])
@@ -138,27 +143,48 @@ def selected_identity(config: Any) -> dict[str, Any]:
         raise ForgeError("RESIDENT_BINDING_MISSING", "selected Store package is unavailable")
     # Optional provider composition is part of the resident identity, never
     # an unrecorded ambient selector inherited by a long-lived process.
-    composition_keys = ("MNCS_COMPILER_CHECKOUT", "MNCS_COMPILER_PROBE", "MNCS_VM_CHECKOUT", "MNCS_VM_BIN")
+    composition_keys = (
+        "MNCS_COMPILER_CHECKOUT",
+        "MNCS_COMPILER_PROBE",
+        "MNCS_VM_CHECKOUT",
+        "MNCS_VM_BIN",
+    )
     selection = {name: os.environ.get(name) for name in composition_keys}
     if any(selection.values()):
         if not all(selection.values()):
-            raise ForgeError("RESIDENT_BINDING_MISSING", "incomplete compiler/VM provider composition")
+            raise ForgeError(
+                "RESIDENT_BINDING_MISSING", "incomplete compiler/VM provider composition"
+            )
         for name, raw in selection.items():
             path = Path(raw)
             if not path.is_absolute() or not path.exists():
                 raise ForgeError("RESIDENT_BINDING_MISSING", f"selected {name} is unavailable")
             runtime[name] = str(path.resolve())
-        for name, owner in (("MNCS_COMPILER_PROBE", "MNCS_COMPILER_CHECKOUT"), ("MNCS_VM_BIN", "MNCS_VM_CHECKOUT")):
+        for name, owner in (
+            ("MNCS_COMPILER_PROBE", "MNCS_COMPILER_CHECKOUT"),
+            ("MNCS_VM_BIN", "MNCS_VM_CHECKOUT"),
+        ):
             path = Path(runtime[name])
             if not path.is_relative_to(Path(runtime[owner])):
-                raise ForgeError("RESIDENT_BINDING_MISMATCH", f"{name} is outside its selected provider checkout")
+                raise ForgeError(
+                    "RESIDENT_BINDING_MISMATCH", f"{name} is outside its selected provider checkout"
+                )
             if not path.is_file() or not os.access(path, os.X_OK):
                 raise ForgeError("RESIDENT_BINDING_MISSING", f"selected {name} is not executable")
             artifacts[name] = hashlib.sha256(path.read_bytes()).hexdigest()
-        for name, relative in (("MNCS_COMPILER_CHECKOUT", "tools/vm_provider.py"), ("MNCS_VM_CHECKOUT", "python/mncs_vm_client/__init__.py")):
+        for name, relative in (
+            ("MNCS_COMPILER_CHECKOUT", "tools/vm_provider.py"),
+            ("MNCS_VM_CHECKOUT", "python/mncs_vm_client/__init__.py"),
+        ):
             path = Path(runtime[name]) / relative
             artifacts[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-        runtime["MNCS_VM_ARTIFACT_CACHE"] = str(Path(os.environ.get("MNCS_VM_ARTIFACT_CACHE", str(Path(config.root) / ".mncs/cache/compiler-vm"))).resolve())
+        runtime["MNCS_VM_ARTIFACT_CACHE"] = str(
+            Path(
+                os.environ.get(
+                    "MNCS_VM_ARTIFACT_CACHE", str(Path(config.root) / ".mncs/cache/compiler-vm")
+                )
+            ).resolve()
+        )
     service_selection = {
         name: os.environ.get(name)
         for name in (
@@ -190,8 +216,12 @@ def selected_identity(config: Any) -> dict[str, Any]:
             or not workspace_root.is_absolute()
             or not isinstance(repository_roots, list)
             or len(repository_roots) > 128
-            or any(not isinstance(root, str) or not Path(root).is_absolute() for root in repository_roots)
-            or str(config.root.resolve()) not in {str(Path(root).resolve()) for root in repository_roots}
+            or any(
+                not isinstance(root, str) or not Path(root).is_absolute()
+                for root in repository_roots
+            )
+            or str(config.root.resolve())
+            not in {str(Path(root).resolve()) for root in repository_roots}
             or not str(service_selection["MNLS_SERVICE_STREAM_IDENTITY"]).strip()
         ):
             raise ForgeError(
@@ -228,7 +258,13 @@ def language_bindings(identity: dict[str, Any]) -> dict[str, Any]:
 def selected_environment(identity: dict[str, Any]) -> dict[str, str]:
     """Pin child imports and all existing Forge runtime selectors."""
     environment = dict(os.environ)
-    for name in ("MNCS_COMPILER_CHECKOUT", "MNCS_COMPILER_PROBE", "MNCS_VM_CHECKOUT", "MNCS_VM_BIN", "MNCS_VM_ARTIFACT_CACHE"):
+    for name in (
+        "MNCS_COMPILER_CHECKOUT",
+        "MNCS_COMPILER_PROBE",
+        "MNCS_VM_CHECKOUT",
+        "MNCS_VM_BIN",
+        "MNCS_VM_ARTIFACT_CACHE",
+    ):
         environment.pop(name, None)
     environment.update(identity["runtime"])
     environment.update(
@@ -295,6 +331,7 @@ class ResidentEndpoint:
     """Read-only challenge responder attached to the actual supervisor."""
 
     def __init__(self, config: Any, identity: dict[str, Any], instance: str):
+        self.config = config
         self.identity = identity
         self.instance = instance
         self.supervisor: Any = None
@@ -319,19 +356,29 @@ class ResidentEndpoint:
                 try:
                     request = _receive(connection)
                     supervisor = self.supervisor
+                    consumer = _continuous_consumer_status(self.config, supervisor)
+                    active = (
+                        supervisor is not None
+                        and supervisor.stream_identity
+                        and not supervisor._stop_requested
+                    )
+                    state = "starting"
+                    if active:
+                        state = {
+                            "ready": "ready",
+                            "blocked": "degraded",
+                            "retry_required": "degraded",
+                        }.get(str(consumer.get("state")), "starting")
                     response = {
                         "nonce": request.get("nonce"),
                         "identity": self.identity,
                         "instance": self.instance,
                         "pid": os.getpid(),
-                        "state": "ready"
-                        if supervisor is not None
-                        and supervisor.stream_identity
-                        and not supervisor._stop_requested
-                        else "starting",
+                        "state": state,
                         "stream_identity": supervisor.stream_identity if supervisor else None,
                         "generation": supervisor.current_generation if supervisor else None,
                         "cursor": supervisor.current_cursor if supervisor else None,
+                        "continuous_consumer": consumer,
                     }
                     connection.sendall(json.dumps(response, sort_keys=True).encode() + b"\n")
                 except (OSError, ValueError):
@@ -341,6 +388,43 @@ class ResidentEndpoint:
         self.stopping.set()
         self.socket.close()
         self.thread.join(timeout=0.5)
+
+
+def _continuous_consumer_status(config: Any, supervisor: Any | None = None) -> dict[str, Any]:
+    """Expose Forge's acknowledged Language Service position to Environment."""
+    status_path = config.state_dir / "continuous" / "status.json"
+    status = _read_json_path(status_path)
+    if status is None:
+        # Test doubles and a never-started service have no durable cursor yet.
+        if supervisor is not None and not callable(getattr(supervisor, "_status_path", None)):
+            return {
+                "state": "ready" if getattr(supervisor, "stream_identity", None) else "starting",
+                "stream_identity": getattr(supervisor, "stream_identity", None),
+                "cursor": getattr(supervisor, "current_cursor", None),
+            }
+        return {"state": "starting", "reason": "no durable continuous cursor exists"}
+    recovery = status.get("cursor_recovery")
+    recovery_status = recovery.get("status") if isinstance(recovery, dict) else None
+    if recovery_status == "required":
+        state = "blocked"
+    elif recovery_status == "owner_retry_required":
+        state = "retry_required"
+    elif supervisor is None:
+        state = "unknown"
+    elif (
+        status.get("event_stream_identity") == getattr(supervisor, "stream_identity", None)
+        and type(status.get("event_cursor")) is int
+        and status.get("event_cursor") == getattr(supervisor, "current_cursor", None)
+    ):
+        state = "ready"
+    else:
+        state = "reconciling"
+    return {
+        "state": state,
+        "stream_identity": status.get("event_stream_identity"),
+        "cursor": status.get("event_cursor"),
+        "cursor_recovery": recovery,
+    }
 
 
 def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
@@ -356,16 +440,28 @@ def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
     if not lease:
         return result
     if not owns_process(lease):
+        consumer = _continuous_consumer_status(config)
+        diagnostics = [
+            lease.get("error")
+            or {
+                "code": "RESIDENT_STALE_PROCESS",
+                "message": "lease has no matching Linux process birth identity",
+            }
+        ]
+        if consumer.get("state") in {"blocked", "retry_required"}:
+            diagnostics.append(
+                {
+                    "code": "RESIDENT_EVENT_CURSOR_RECOVERY",
+                    "message": "continuous owner did not acknowledge the durable event cursor",
+                    "recovery": consumer.get("cursor_recovery"),
+                }
+            )
         return {
             **result,
             "state": "failed" if lease.get("error") else "stale",
-            "diagnostics": [
-                lease.get("error")
-                or {
-                    "code": "RESIDENT_STALE_PROCESS",
-                    "message": "lease has no matching Linux process birth identity",
-                }
-            ],
+            "observed": {"continuous_consumer": consumer},
+            "continuous_consumer": consumer,
+            "diagnostics": diagnostics,
         }
     if lease.get("provider_identity") != identity:
         return {
@@ -396,6 +492,17 @@ def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("live resident challenge does not match the selected lease")
         result.update(state=observed["state"], observed=observed)
         observed.pop("nonce", None)
+        result["continuous_consumer"] = observed.get("continuous_consumer")
+        if observed["state"] == "degraded":
+            consumer = observed.get("continuous_consumer")
+            recovery = consumer.get("cursor_recovery") if isinstance(consumer, dict) else None
+            result["diagnostics"] = [
+                {
+                    "code": "RESIDENT_EVENT_CURSOR_RECOVERY",
+                    "message": "continuous owner did not acknowledge the durable event cursor",
+                    "recovery": recovery,
+                }
+            ]
         if observed["state"] == "starting" and time.monotonic() - float(
             lease.get("started_monotonic", 0)
         ) >= float(config.continuous_settings.get("start_timeout_seconds", 60)):
@@ -444,6 +551,27 @@ def resident_reconcile(
     try:
         with FileLock(str(lifecycle / "lifecycle.lock"), timeout=0):
             status = resident_status(config, identity)
+            observed = status.get("observed")
+            consumer = status.get("continuous_consumer")
+            if not isinstance(consumer, dict) and isinstance(observed, dict):
+                consumer = observed.get("continuous_consumer")
+            if isinstance(consumer, dict) and consumer.get("state") == "blocked":
+                return {
+                    "schema_version": RECONCILE_SCHEMA,
+                    "operation": "blocked",
+                    "status": {
+                        **status,
+                        "diagnostics": [
+                            *status.get("diagnostics", []),
+                            {
+                                "code": "RESIDENT_EVENT_CURSOR_RECONCILIATION_REQUIRED",
+                                "message": "preserve the acknowledged cursor until "
+                                "the semantic owner completes bounded reconciliation",
+                                "recovery": consumer.get("cursor_recovery"),
+                            },
+                        ],
+                    },
+                }
             if not stop and status["state"] in {"ready", "starting"}:
                 return {
                     "schema_version": RECONCILE_SCHEMA,
@@ -506,7 +634,8 @@ def resident_reconcile(
                         "diagnostics": [
                             {
                                 "code": "RESIDENT_LANGUAGE_LEASE_UNVERIFIED",
-                                "message": "live Language Service lease lacks a matching birth identity",
+                                "message": "live Language Service lease lacks a matching birth "
+                                "identity",
                             }
                         ],
                     },
@@ -532,7 +661,8 @@ def resident_reconcile(
                             "diagnostics": [
                                 {
                                     "code": "RESIDENT_LANGUAGE_LEASE_MISMATCH",
-                                    "message": "stale Language Service lease does not match the selected Forge-owned binding",
+                                    "message": "stale Language Service lease does not match the "
+                                    "selected Forge-owned binding",
                                 }
                             ],
                         },
@@ -545,17 +675,14 @@ def resident_reconcile(
                         private_short_socket = (
                             socket_path.parent.parent == Path(tempfile.gettempdir())
                             and socket_path.name == "language.sock"
-                            and socket_path.parent.name.startswith(
-                                f"mncs-forge-{os.getuid()}-"
-                            )
+                            and socket_path.parent.name.startswith(f"mncs-forge-{os.getuid()}-")
                             and parent_stat.st_uid == os.getuid()
                             and parent_stat.st_mode & 0o077 == 0
                         )
                     except OSError:
                         private_short_socket = False
-                if (
-                    socket_path.is_symlink()
-                    or not socket_path.resolve().is_relative_to(config.root.resolve())
+                if socket_path.is_symlink() or (
+                    not socket_path.resolve().is_relative_to(config.root.resolve())
                     and not private_short_socket
                 ):
                     return {
@@ -566,7 +693,8 @@ def resident_reconcile(
                             "diagnostics": [
                                 {
                                     "code": "RESIDENT_LANGUAGE_SOCKET_MISMATCH",
-                                    "message": "stale Language Service socket is outside the selected project boundary",
+                                    "message": "stale Language Service socket is outside the "
+                                    "selected project boundary",
                                 }
                             ],
                         },
@@ -582,7 +710,8 @@ def resident_reconcile(
                                 "diagnostics": [
                                     {
                                         "code": "RESIDENT_LANGUAGE_SOCKET_OCCUPIED",
-                                        "message": "stale lease socket path is occupied by a non-owned file",
+                                        "message": "stale lease socket path is occupied by a "
+                                        "non-owned file",
                                     }
                                 ],
                             },
@@ -601,7 +730,8 @@ def resident_reconcile(
                                 "diagnostics": [
                                     {
                                         "code": "RESIDENT_LANGUAGE_SOCKET_RESPONDS",
-                                        "message": "socket still responds after the owned process exited; preserve it for provider reconciliation",
+                                        "message": "socket still responds after the owned process "
+                                        "exited; preserve it for provider reconciliation",
                                     }
                                 ],
                             },
