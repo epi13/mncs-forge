@@ -435,6 +435,7 @@ def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
         "observed": None,
         "diagnostics": [],
         "recovery": "invoke resident-reconcile with the same selected bindings and configuration",
+        "continuous_consumer": _continuous_consumer_status(config),
     }
     lease = _lease(config)
     if not lease:

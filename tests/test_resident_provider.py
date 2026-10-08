@@ -198,6 +198,13 @@ def test_another_checkout_cannot_satisfy_or_be_controlled(config, identity, monk
     assert resident.resident_reconcile(config, identity)["operation"] == "blocked"
 
 
+def test_nonresponding_owned_lease_keeps_consumer_response_shape(config, identity):
+    write_lease(config, identity)
+    status = resident.resident_status(config, identity)
+    assert status["state"] == "degraded"
+    assert status["continuous_consumer"]["state"] == "starting"
+
+
 def test_revision_change_reconciles_only_the_owned_instance(config, identity, monkeypatch):
     lease = write_lease(config, {**identity, "revision": "old"})
     signalled = []
