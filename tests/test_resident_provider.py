@@ -190,7 +190,11 @@ def test_resident_consumer_readiness_requires_matching_durable_pair(config):
 def test_another_checkout_cannot_satisfy_or_be_controlled(config, identity, monkeypatch):
     write_lease(config, {**identity, "checkout": "other-checkout"})
     monkeypatch.setattr(resident, "signal_owned", lambda *_a: pytest.fail("foreign control"))
-    assert resident.resident_status(config, identity)["state"] == "incompatible"
+    status = resident.resident_status(config, identity)
+    assert status["state"] == "incompatible"
+    # Environment predicates need this field even for stale selections so
+    # the provider response remains schema-valid and recovery stays available.
+    assert status["continuous_consumer"]["state"] == "starting"
     assert resident.resident_reconcile(config, identity)["operation"] == "blocked"
 
 

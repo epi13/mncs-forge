@@ -468,10 +468,12 @@ def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
             "diagnostics": diagnostics,
         }
     if lease.get("provider_identity") != identity:
+        consumer = _continuous_consumer_status(config)
         return {
             **result,
             "state": "incompatible",
             "observed": lease.get("provider_identity"),
+            "continuous_consumer": consumer,
             "diagnostics": [
                 {
                     "code": "RESIDENT_SELECTION_MISMATCH",
