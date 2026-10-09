@@ -212,6 +212,8 @@ def test_receipt_carries_cgroup_limits_and_aggregate_resource_observations() -> 
                 "cgroup_memory_peak_bytes": 32 * 1024 * 1024,
                 "process_count_peak": 3,
                 "cpu_time_microseconds": 250_000,
+                "host_pid": 4242,
+                "host_start_marker": 991,
             }
         },
     )
@@ -233,6 +235,10 @@ def test_receipt_carries_cgroup_limits_and_aggregate_resource_observations() -> 
     assert metrics["host-memory-peak"]["value"] == 32 * 1024 * 1024
     assert metrics["process-count"]["value"] == 3
     assert metrics["cpu-time"]["value"] == 0.25
+    local = receipt["extensions"]["forge:local-process"]  # type: ignore[index]
+    observed_facts = local["resource_observations"]["resource_observations"]  # type: ignore[index]
+    assert observed_facts["host_pid"] == 4242  # type: ignore[index]
+    assert observed_facts["host_start_marker"] == 991  # type: ignore[index]
 
 
 def test_receipt_identity_changes_when_observed_command_changes() -> None:

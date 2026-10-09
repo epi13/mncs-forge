@@ -187,6 +187,7 @@ class SystemdCgroupEnvelope:
         control_runner: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
         host_memory_reader: Callable[[], tuple[int | None, int | None]] | None = None,
         cgroup_root: Path = Path("/sys/fs/cgroup"),
+        proc_root: Path = Path("/proc"),
         systemd_run: str | None = None,
         systemctl: str | None = None,
         runtime_dir: Path | None = None,
@@ -204,6 +205,7 @@ class SystemdCgroupEnvelope:
         )
         self._control = control_runner or subprocess.run
         self._cgroup_root = cgroup_root
+        self._proc_root = proc_root
         self.systemd_run = systemd_run if systemd_run is not None else shutil.which("systemd-run")
         self.systemctl = systemctl if systemctl is not None else shutil.which("systemctl")
         total, _host_available = self._host_memory_reader()
@@ -660,6 +662,8 @@ class SystemdCgroupEnvelope:
                 "tasks_max": budget.tasks_max,
                 "cgroup_group": None,
                 "next_cgroup_probe_monotonic": 0.0,
+                "next_process_identity_probe_monotonic": 0.0,
+                "process_identity_probe_attempts": 0,
                 "resource_observations": {},
                 "generation": None,
                 "source_identity": None,
@@ -764,9 +768,25 @@ class SystemdCgroupEnvelope:
                 return
             interval = 0.01 if not group else 0.05
             active["next_cgroup_probe_monotonic"] = now + interval
-        if not group:
+            observations = active.get("resource_observations", {})
+            identity_missing = not (
+                isinstance(observations, Mapping) and "host_pid" in observations
+            )
+            next_identity_probe = active.get("next_process_identity_probe_monotonic", 0.0)
+            identity_probe_attempts = active.get("process_identity_probe_attempts", 0)
+            probe_identity = (
+                identity_missing
+                and isinstance(identity_probe_attempts, int)
+                and identity_probe_attempts < 10
+                and isinstance(next_identity_probe, (int, float))
+                and now >= float(next_identity_probe)
+            )
+            if probe_identity:
+                active["next_process_identity_probe_monotonic"] = now + 0.2
+                active["process_identity_probe_attempts"] = identity_probe_attempts + 1
+        if not group or probe_identity:
             properties = self._unit_properties(prepared.unit_name)
-            group = properties.get("ControlGroup") or None
+            group = group or properties.get("ControlGroup") or None
             property_observations = self._systemd_observations(properties)
             if property_observations:
                 with self._active_lock:
@@ -774,6 +794,14 @@ class SystemdCgroupEnvelope:
                     if active is not None:
                         active["resource_observations"] = self._merge_observations(
                             active.get("resource_observations", {}), property_observations
+                        )
+            process_identity = self._process_identity_observations(group, properties)
+            if process_identity:
+                with self._active_lock:
+                    active = self._active.get(prepared.unit_name)
+                    if active is not None:
+                        active["resource_observations"] = self._merge_observations(
+                            active.get("resource_observations", {}), process_identity
                         )
             if group:
                 with self._active_lock:
@@ -796,6 +824,54 @@ class SystemdCgroupEnvelope:
             active["resource_observations"] = self._merge_observations(
                 active.get("resource_observations", {}), observed
             )
+
+    def _process_identity_observations(
+        self, group: str | None, properties: Mapping[str, str]
+    ) -> dict[str, int]:
+        """Return PID/start ticks only when /proc binds MainPID to this exact unit cgroup."""
+
+        if not group:
+            return {}
+        try:
+            pid = int(properties["MainPID"])
+        except (KeyError, ValueError):
+            return {}
+        if pid <= 0 or pid > 0xFFFFFFFF:
+            return {}
+        process = self._proc_root / str(pid)
+        try:
+            stat_before = (process / "stat").read_text(encoding="ascii")
+            cgroup = (process / "cgroup").read_text(encoding="ascii")
+            stat_after = (process / "stat").read_text(encoding="ascii")
+        except OSError:
+            return {}
+
+        def parse_start_marker(stat: str) -> int | None:
+            closing = stat.rfind(")")
+            opening = stat.find("(")
+            if opening <= 0 or closing <= opening:
+                return None
+            try:
+                stat_pid = int(stat[:opening].strip())
+                fields = stat[closing + 1 :].split()
+                start_marker = int(fields[19])
+            except (ValueError, IndexError):
+                return None
+            return start_marker if stat_pid == pid and start_marker > 0 else None
+
+        start_before = parse_start_marker(stat_before)
+        start_after = parse_start_marker(stat_after)
+        if start_before is None or start_before != start_after:
+            return {}
+        memberships = [
+            line.partition("::")[2]
+            for line in cgroup.splitlines()
+            if line.startswith("0::")
+        ]
+        expected_group = "/" + group.strip("/")
+        if len(memberships) != 1 or memberships[0] != expected_group:
+            return {}
+        return {"host_pid": pid, "host_start_marker": start_before}
 
     @staticmethod
     def _systemd_observations(properties: Mapping[str, str]) -> dict[str, int]:
@@ -844,6 +920,7 @@ class SystemdCgroupEnvelope:
                     "show",
                     unit,
                     "--property=ControlGroup",
+                    "--property=MainPID",
                     "--property=Result",
                     "--property=ActiveState",
                     "--property=MemoryPeak",

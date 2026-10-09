@@ -453,6 +453,7 @@ def _fake_systemd_manager(
     result: str = "success",
     main_code: int = 1,
     main_status: int = 0,
+    main_pid: int = 0,
     settings: dict[str, object] | None = None,
 ) -> tuple[SystemdCgroupEnvelope, list[list[str]], Path]:
     runtime = tmp_path / "runtime"
@@ -475,6 +476,8 @@ def _fake_systemd_manager(
     (job_group / "memory.events").write_text(memory_events, encoding="ascii")
     (job_group / "pids.events").write_text(process_events, encoding="ascii")
     (job_group / "cpu.stat").write_text("usage_usec 5000\n", encoding="ascii")
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
     commands: list[list[str]] = []
 
     def control(command, **_kwargs):
@@ -482,7 +485,8 @@ def _fake_systemd_manager(
         commands.append(argv)
         if "show" in argv:
             output = (
-                f"ControlGroup=/{group}\nResult={result}\nActiveState=inactive\n"
+                f"ControlGroup=/{group}\nMainPID={main_pid}\n"
+                f"Result={result}\nActiveState=inactive\n"
                 "SubState=dead\nMemoryPeak=134217728\nCPUUsageNSec=5000000\n"
                 f"ExecMainCode={main_code}\nExecMainStatus={main_status}\nTasksCurrent=0\n"
                 "LoadState=loaded\nMemoryAccounting=yes\nTasksAccounting=yes\n"
@@ -499,6 +503,7 @@ def _fake_systemd_manager(
         control_runner=control,
         host_memory_reader=lambda: (2 * 1024 * MIB, 1536 * MIB),
         cgroup_root=cgroup_root,
+        proc_root=proc_root,
         systemd_run="systemd-run",
         systemctl="systemctl",
         runtime_dir=runtime,
@@ -507,6 +512,45 @@ def _fake_systemd_manager(
     manager._lock_path = runtime / "test.lock"
     assert manager.available
     return manager, commands, job_group
+
+
+def _fake_proc_process(proc_root: Path, pid: int, start_marker: int, group: str) -> None:
+    process = proc_root / str(pid)
+    process.mkdir(parents=True, exist_ok=True)
+    fields = ["S", *(["0"] * 18), str(start_marker)]
+    (process / "stat").write_text(
+        f"{pid} (mncs fake process) {' '.join(fields)}\n", encoding="ascii"
+    )
+    (process / "cgroup").write_text(f"0::{group}\n", encoding="ascii")
+
+
+def test_execution_identity_requires_exact_cgroup_and_start_marker(tmp_path: Path) -> None:
+    manager, _commands, _group = _fake_systemd_manager(tmp_path, main_pid=4242)
+    proc_root = tmp_path / "proc"
+    _fake_proc_process(proc_root, 4242, 991, "/mncs-forge-verification.slice")
+    prepared = manager.prepare_execution(
+        ["/usr/bin/true"], cwd=tmp_path, environment={"PATH": "/usr/bin"}, timeout=3
+    )
+    assert prepared is not None
+
+    manager.observe_execution(prepared)
+    facts = manager.finish_execution(prepared)
+    assert facts["resource_observations"]["host_pid"] == 4242  # type: ignore[index]
+    assert facts["resource_observations"]["host_start_marker"] == 991  # type: ignore[index]
+
+    manager, _commands, _group = _fake_systemd_manager(
+        tmp_path / "mismatch", main_pid=4242
+    )
+    mismatch_root = tmp_path / "mismatch" / "proc"
+    _fake_proc_process(mismatch_root, 4242, 991, "/another.slice")
+    prepared = manager.prepare_execution(
+        ["/usr/bin/true"], cwd=tmp_path, environment={"PATH": "/usr/bin"}, timeout=3
+    )
+    assert prepared is not None
+    manager.observe_execution(prepared)
+    facts = manager.finish_execution(prepared)
+    assert "host_pid" not in facts["resource_observations"]  # type: ignore[operator]
+    assert "host_start_marker" not in facts["resource_observations"]  # type: ignore[operator]
 
 
 def test_inactive_verified_slice_reports_zero_current_processes_and_refreshes(
