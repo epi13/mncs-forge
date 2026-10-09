@@ -11,6 +11,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -275,6 +276,35 @@ class SystemdCgroupEnvelope:
             return Path(value)
         return Path(f"/run/user/{os.getuid()}")
 
+    @staticmethod
+    def _user_manager_environment(
+        environment: Mapping[str, str], runtime_directory: Path
+    ) -> dict[str, str]:
+        """Fill missing user-bus transport from this user's private runtime directory."""
+
+        result = dict(environment)
+        if not result.get("XDG_RUNTIME_DIR"):
+            result["XDG_RUNTIME_DIR"] = str(runtime_directory)
+        if result.get("DBUS_SESSION_BUS_ADDRESS") or result.get("SYSTEMD_BUS_ADDRESS"):
+            return result
+        bus = runtime_directory / "bus"
+        try:
+            runtime_stat = runtime_directory.stat()
+            bus_stat = bus.stat()
+        except OSError:
+            return result
+        if (
+            runtime_stat.st_uid == os.getuid()
+            and not runtime_stat.st_mode & 0o077
+            and bus_stat.st_uid == os.getuid()
+            and stat.S_ISSOCK(bus_stat.st_mode)
+        ):
+            result["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+        return result
+
+    def _control_environment(self) -> dict[str, str]:
+        return self._user_manager_environment(os.environ, self._runtime_directory)
+
     def _prepare(self) -> None:
         if self.budget is None:
             self._limitation = "host or cgroup memory capacity is unknown or below 256 MiB"
@@ -328,6 +358,7 @@ class SystemdCgroupEnvelope:
                 check=False,
                 capture_output=True,
                 timeout=3,
+                env=self._control_environment(),
             )
         except (OSError, subprocess.TimeoutExpired):
             result = None
@@ -414,9 +445,9 @@ class SystemdCgroupEnvelope:
         result["XDG_RUNTIME_DIR"] = str(self._runtime_directory)
         for key in ("DBUS_SESSION_BUS_ADDRESS", "SYSTEMD_BUS_ADDRESS"):
             value = os.environ.get(key)
-            if value is not None:
+            if value:
                 result[key] = value
-        return result
+        return self._user_manager_environment(result, self._runtime_directory)
 
     def _admission(
         self,
@@ -941,6 +972,7 @@ class SystemdCgroupEnvelope:
                 check=False,
                 capture_output=True,
                 timeout=1,
+                env=self._control_environment(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return {}
@@ -1162,7 +1194,13 @@ class SystemdCgroupEnvelope:
             with suppress(OSError, subprocess.TimeoutExpired):
                 # A completed transient service may already be inactive. The
                 # post-stop cgroup/process observation below is authoritative.
-                self._control(command, check=False, capture_output=True, timeout=2)
+                self._control(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    timeout=2,
+                    env=self._control_environment(),
+                )
         properties = self._unit_properties(unit)
         inactive = properties.get("ActiveState") in {"inactive", "failed"}
         dead = properties.get("SubState") in {"dead", "failed"}
@@ -1185,6 +1223,7 @@ class SystemdCgroupEnvelope:
                 check=False,
                 capture_output=True,
                 timeout=2,
+                env=self._control_environment(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return False

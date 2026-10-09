@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import os
+import socket
 import subprocess
 import time
 from collections import deque
@@ -710,6 +711,42 @@ def test_launcher_environment_adds_only_user_manager_transport(tmp_path: Path) -
     assert result["XDG_RUNTIME_DIR"] == str(tmp_path / "runtime")
     assert "HOME" not in result
     assert "MNCS_TEST_SECRET" not in result
+
+
+def test_user_manager_transport_uses_only_same_uid_private_bus_socket(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    runtime.chmod(0o700)
+    bus_path = runtime / "bus"
+    bus = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    bus.bind(str(bus_path))
+    try:
+        environment = SystemdCgroupEnvelope._user_manager_environment(
+            {"PATH": "/usr/bin"}, runtime
+        )
+    finally:
+        bus.close()
+
+    assert environment["XDG_RUNTIME_DIR"] == str(runtime)
+    assert environment["DBUS_SESSION_BUS_ADDRESS"] == f"unix:path={bus_path}"
+    assert environment["PATH"] == "/usr/bin"
+    assert "HOME" not in environment
+
+    untrusted_runtime = tmp_path / "untrusted-runtime"
+    untrusted_runtime.mkdir(mode=0o755)
+    untrusted_runtime.chmod(0o755)
+    untrusted_bus = untrusted_runtime / "bus"
+    bus = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    bus.bind(str(untrusted_bus))
+    try:
+        environment = SystemdCgroupEnvelope._user_manager_environment(
+            {"PATH": "/usr/bin"}, untrusted_runtime
+        )
+    finally:
+        bus.close()
+    assert "DBUS_SESSION_BUS_ADDRESS" not in environment
 
 
 def test_container_cgroup_parent_binds_to_the_current_service_only() -> None:
