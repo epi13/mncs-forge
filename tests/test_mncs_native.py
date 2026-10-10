@@ -71,6 +71,38 @@ def test_json_reader_rejects_duplicate_members_and_invalid_utf8(tmp_path: Path) 
         read_json(invalid_utf8)
 
 
+def test_fresh_backend_compile_uses_file_only_success_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = NativeForgeAdapter(ROOT)
+    adapter._artifact_cache_override = tmp_path / "cache"
+    monkeypatch.setenv("MNCS_CLI", "mncs")
+    monkeypatch.setattr(adapter, "_environment", lambda: {})
+    backend = b'{"status":"PASS"}'
+    observed_command: list[str] = []
+
+    def run_compile(command: list[str], **kwargs: object) -> ExecutionResult:
+        observed_command.extend(command)
+        output_dir = Path(command[command.index("--output-dir") + 1])
+        (output_dir / "backend.json").write_bytes(backend)
+        return ExecutionResult(
+            argv=command,
+            returncode=0,
+            stdout=b"",
+            stderr=b"",
+            duration_seconds=0.01,
+        )
+
+    monkeypatch.setattr(mncs_native, "run_bounded", run_compile)
+
+    result = adapter._compile_fresh_artifact("mncs:test:forge-compile-output")
+
+    assert result == backend
+    assert "--quiet" in observed_command
+    assert "--omit-result" in observed_command
+    assert "--output-dir" in observed_command
+
+
 def test_native_response_rejects_duplicate_members(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = NativeForgeAdapter(ROOT)
     adapter.ensure_available()

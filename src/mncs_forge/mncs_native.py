@@ -1286,6 +1286,8 @@ class NativeForgeAdapter:
                 str(self.native_source.resolve()),
                 "--emit",
                 "backend",
+                "--quiet",
+                "--omit-result",
                 "--output-dir",
                 str(output_dir),
                 "--target",
