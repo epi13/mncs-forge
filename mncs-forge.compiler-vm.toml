@@ -1,0 +1,60 @@
+version = 1
+environment_allowlist = [
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "MNCS_COMPILER_CHECKOUT",
+  "MNCS_COMPILER_PROBE",
+  "MNCS_VM_CHECKOUT",
+  "MNCS_VM_BIN",
+  "MNCS_LANGUAGE_CHECKOUT",
+  "MNCS_REFERENCE_BIN",
+  "MNCS_STDLIB_CHECKOUT",
+]
+
+[project]
+name = "MNCS Compiler VM integration"
+identity = "mncs-forge-compiler-vm-integration-v1"
+root = "."
+
+[paths]
+candidates = [".mncs/compiler-vm/candidates"]
+generated = [".mncs/compiler-vm/generated"]
+contracts = ["examples/compiler-vm"]
+references = []
+evaluators = []
+acceptance_policies = []
+development_evidence = [".mncs/compiler-vm/evidence"]
+protected = ["examples/compiler-vm"]
+outputs = [".mncs/compiler-vm/outputs"]
+
+[limits]
+timeout_seconds = 180
+output_bytes = 262144
+
+[authority.development]
+may_write_candidates = false
+may_write_generated = false
+may_run_providers = true
+
+[authority.evaluator]
+candidate_read_only = true
+authority_read_only = true
+require_frozen_identities = true
+withhold_repair_feedback = true
+
+[policies]
+selection = "examples/compiler-vm/calls.json"
+useful_benefit_objective = "examples/compiler-vm/steady_state.mncs"
+
+[native]
+mode = "off"
+
+[[workflows]]
+name = "compiler-vm-work"
+category = "resource_checks"
+mode = "development"
+command = ["python3", "scripts/compiler_vm_task.py"]
+provider_protocol = false
+subject = "project"
+disclosure = "compact"

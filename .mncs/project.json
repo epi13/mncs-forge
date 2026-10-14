@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-forge",
-  "revision": 12,
+  "revision": 16,
   "manifest_location": "in-repository",
   "authority": {
     "note": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority."
@@ -392,18 +392,75 @@
         "stability": "experimental"
       },
       {
-        "contract": "mncs-forge.provider-artifact-execution",
-        "version": "1",
-        "kind": "bounded-provider-artifact-transport",
+        "contract": "provider-artifact-execution",
+        "version": "2",
+        "kind": "bounded-compiler-vm-execution-with-shareable-forge-receipt",
         "fingerprint_sources": [
-          "src/mncs_forge/provider_artifacts.py",
-          "src/mncs_forge/retained_embed.py"
+          "scripts/forge_runtime.py",
+          "scripts/compiler_vm_forge_workflow.py",
+          "scripts/compiler_vm_task.py",
+          "examples/compiler-vm/",
+          "src/mncs_forge/compiler_vm.py",
+          "src/mncs_forge/mncs_native.py",
+          "src/mncs_forge/engine.py",
+          "src/mncs_forge/adapters.py",
+          "src/mncs_forge/resource_envelope.py",
+          "src/mncs_forge/execution.py",
+          "src/mncs_forge/execution_observations.py",
+          "src/mncs_forge/mncs_execution_receipt.py",
+          "mncs-forge.compiler-vm.toml",
+          "src/mncs_forge/resources/native/forge/",
+          "src/mncs_forge/records.py",
+          "src/mncs_forge/record_store.py",
+          "src/mncs_forge/ports.py",
+          "src/mncs_forge/config.py",
+          "src/mncs_forge/application/workflows.py",
+          "src/mncs_forge/application/execution_receipts.py"
         ],
         "effects": [
-          "read",
           "execute"
         ],
-        "stability": "experimental"
+        "stability": "experimental",
+        "shareable_artifacts": [
+          "forge-execution-receipt.json"
+        ],
+        "invocation": {
+          "kind": "python",
+          "path": "scripts/forge_runtime.py",
+          "fixed_argv": [],
+          "timeout_seconds": 300,
+          "toolchains": {
+            "MNCS_COMPILER_CHECKOUT": {
+              "repository": "mncs-compiler",
+              "path": "."
+            },
+            "MNCS_COMPILER_PROBE": {
+              "repository": "mncs-compiler",
+              "path": ".bootstrap/target/release/mncs-compiler-stage0-probe"
+            },
+            "MNCS_VM_CHECKOUT": {
+              "repository": "mncs-vm",
+              "path": "."
+            },
+            "MNCS_VM_BIN": {
+              "repository": "mncs-vm",
+              "path": "target/debug/mncs-vm"
+            },
+            "MNCS_LANGUAGE_CHECKOUT": {
+              "repository": "mncs-language",
+              "path": "."
+            },
+            "MNCS_REFERENCE_BIN": {
+              "repository": "mncs-language",
+              "path": "target/release/mncs"
+            },
+            "MNCS_STDLIB_CHECKOUT": {
+              "repository": "mncs-stdlib",
+              "path": "."
+            }
+          }
+        },
+        "output_limit_bytes": 524288
       },
       {
         "contract": "canonical-vm-work",
@@ -443,6 +500,79 @@
             }
           }
         }
+      },
+      {
+        "contract": "compiler-vm-scheduled-work",
+        "version": "1",
+        "kind": "automation-gated-compiler-vm-execution",
+        "stability": "experimental",
+        "fingerprint_sources": [
+          "scripts/forge_runtime.py",
+          "scripts/compiler_vm_forge_workflow.py",
+          "scripts/compiler_vm_task.py",
+          "examples/compiler-vm/",
+          "src/mncs_forge/compiler_vm.py",
+          "src/mncs_forge/mncs_native.py",
+          "src/mncs_forge/engine.py",
+          "src/mncs_forge/adapters.py",
+          "src/mncs_forge/resource_envelope.py",
+          "src/mncs_forge/execution.py",
+          "src/mncs_forge/execution_observations.py",
+          "src/mncs_forge/mncs_execution_receipt.py",
+          "mncs-forge.compiler-vm.toml",
+          "src/mncs_forge/resources/native/forge/",
+          "src/mncs_forge/records.py",
+          "src/mncs_forge/record_store.py",
+          "src/mncs_forge/ports.py",
+          "src/mncs_forge/config.py",
+          "src/mncs_forge/application/workflows.py",
+          "src/mncs_forge/application/execution_receipts.py"
+        ],
+        "effects": [
+          "execute"
+        ],
+        "invocation": {
+          "kind": "python",
+          "path": "scripts/forge_runtime.py",
+          "fixed_argv": [
+            "--scheduled"
+          ],
+          "timeout_seconds": 300,
+          "toolchains": {
+            "MNCS_COMPILER_CHECKOUT": {
+              "repository": "mncs-compiler",
+              "path": "."
+            },
+            "MNCS_COMPILER_PROBE": {
+              "repository": "mncs-compiler",
+              "path": ".bootstrap/target/release/mncs-compiler-stage0-probe"
+            },
+            "MNCS_VM_CHECKOUT": {
+              "repository": "mncs-vm",
+              "path": "."
+            },
+            "MNCS_VM_BIN": {
+              "repository": "mncs-vm",
+              "path": "target/debug/mncs-vm"
+            },
+            "MNCS_LANGUAGE_CHECKOUT": {
+              "repository": "mncs-language",
+              "path": "."
+            },
+            "MNCS_REFERENCE_BIN": {
+              "repository": "mncs-language",
+              "path": "target/release/mncs"
+            },
+            "MNCS_STDLIB_CHECKOUT": {
+              "repository": "mncs-stdlib",
+              "path": "."
+            }
+          }
+        },
+        "output_limit_bytes": 524288,
+        "shareable_artifacts": [
+          "forge-execution-receipt.json"
+        ]
       }
     ],
     "consumes": [

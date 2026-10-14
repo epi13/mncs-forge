@@ -192,6 +192,8 @@ class SystemdCgroupEnvelope:
         systemd_run: str | None = None,
         systemctl: str | None = None,
         runtime_dir: Path | None = None,
+        lock_path: Path | None = None,
+        environment_dir: Path | None = None,
         resource_semantics: ResourceSemantics | None = None,
         cgroup_memory_reader: Callable[[], int | None] | None = None,
         cgroup_memory_available_reader: Callable[[], int | None] | None = None,
@@ -253,6 +255,7 @@ class SystemdCgroupEnvelope:
             self.budget = None
         self.required = required
         self._runtime_directory = runtime_dir or self._runtime_dir()
+        self._environment_directory = environment_dir or self._runtime_directory
         self._available = False
         self._limitation: str | None = None
         self._active: dict[str, dict[str, object]] = {}
@@ -262,7 +265,7 @@ class SystemdCgroupEnvelope:
         self._resource_events = 0
         self._deferred = 0
         self._last_resource_event: dict[str, object] | None = None
-        self._lock_path = self._runtime_directory / "mncs-forge-verification.lock"
+        self._lock_path = lock_path or self._runtime_directory / "mncs-forge-verification.lock"
         self._prepare()
 
     @staticmethod
@@ -654,7 +657,7 @@ class SystemdCgroupEnvelope:
         started = time.monotonic()
         runtime = decision.runtime_seconds
         budget = self.budget
-        environment_path = self._runtime_directory / f"mncs-forge-env-{uuid.uuid4().hex}.json"
+        environment_path = self._environment_directory / f"mncs-forge-env-{uuid.uuid4().hex}.json"
         self._write_environment_file(environment_path, environment)
         helper = Path(__file__).with_name("resource_process.py").resolve()
         command = [

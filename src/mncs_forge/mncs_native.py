@@ -1487,6 +1487,87 @@ class NativeForgeAdapter:
             stdout=json.dumps(payload).encode(), stderr=b"", payload=payload,
             duration_seconds=__import__("time").perf_counter()-started, transport="canonical-vm-retained")
 
+    def _execute_stage0_reference_cli(
+        self, request: Mapping[str, object],
+    ) -> NativeInvocation:
+        """Run a pure compatibility policy through the selected Language CLI.
+
+        This path is used only when the canonical VM reports a known runtime
+        gap. The CLI and its compiler source identity are selected by the
+        existing Language checkout binding; no retained embed library is
+        loaded or substituted.
+        """
+        target = request.get("target")
+        arguments = request.get("arguments")
+        if not isinstance(target, Mapping) or not isinstance(arguments, list):
+            raise ForgeError("NATIVE_REQUEST_INVALID", "native request shape is invalid")
+        module = target.get("module")
+        function = target.get("function")
+        if not isinstance(module, str) or not isinstance(function, str):
+            raise ForgeError("NATIVE_REQUEST_INVALID", "native target is invalid")
+        try:
+            step_budget = int(request.get("step_budget", 0))
+        except (TypeError, ValueError) as exc:
+            raise ForgeError("NATIVE_REQUEST_INVALID", "native step budget is invalid") from exc
+        if not 0 < step_budget <= 10_000_000:
+            raise ForgeError("NATIVE_REQUEST_INVALID", "native step budget is outside its bound")
+        if self.library_root is None:
+            raise ForgeError("NATIVE_UNAVAILABLE", "selected Language library root is unavailable")
+        environment = self._environment()
+        host_arguments = [self._host_call_value(argument) for argument in arguments]
+        with tempfile.TemporaryDirectory(
+            prefix=".mncs-resource-policy-", dir=self.forge_root
+        ) as directory:
+            arguments_path = Path(directory) / "arguments.json"
+            arguments_path.write_text(
+                json.dumps(host_arguments, separators=(",", ":"), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            command = [
+                *self._command(),
+                "call",
+                str(self.native_source.resolve()),
+                "--module",
+                module,
+                "--function",
+                function,
+                "--args",
+                str(arguments_path),
+                "--step-budget",
+                str(step_budget),
+            ]
+            for library in (self.native_root, self.library_root):
+                command.extend(("--library", str(library)))
+            # Admission cannot invoke the runner whose resource gate it is
+            # currently deciding. This pure policy call still uses Forge's
+            # bounded subprocess transport, with a short fixed time ceiling.
+            result = run_bounded(
+                command,
+                cwd=self.forge_root,
+                timeout=min(self.timeout_seconds, 60.0),
+                output_cap=self.output_bytes,
+                stderr_cap=self.output_bytes,
+                environment=environment,
+            )
+        payload: dict[str, Any] | None = None
+        try:
+            document = json.loads(result.stdout)
+            call = document.get("call") if isinstance(document, dict) else None
+            if isinstance(document, dict) and isinstance(call, dict):
+                payload = dict(call)
+                payload["status"] = document.get("status")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = None
+        return NativeInvocation(
+            command=tuple(command),
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            payload=payload,
+            duration_seconds=result.duration_seconds,
+            transport="stage0-reference-cli",
+        )
+
     def _semantic_invocation(
         self,
         request: Mapping[str, object],
@@ -1507,11 +1588,6 @@ class NativeForgeAdapter:
         grants = request.get("grants", [])
         if not isinstance(grants, list) or any(not isinstance(grant, Mapping) for grant in grants):
             raise ForgeError("NATIVE_REQUEST_INVALID", "native grants are not a list of objects")
-        if force_stage0_reference and self._embed_library() is None:
-            raise ForgeError(
-                "NATIVE_EMBED_UNAVAILABLE",
-                "explicit Stage-0 fallback requires the selected Language embed library",
-            )
         if (
             not force_stage0_reference
             and not grants
@@ -1526,34 +1602,11 @@ class NativeForgeAdapter:
                     "NATIVE_FALLBACK_GRANTS",
                     "Stage-0 fallback is limited to pure policy calls",
                 )
-            session = self.ensure_session()
-            try:
-                payload, duration = session.call(
-                    module,
-                    function,
-                    arguments,
-                    step_budget=int(request.get("step_budget", 0)),
-                    grants=[],
-                )
-            except RetainedEmbedError as exc:
-                raise ForgeError("NATIVE_EXECUTION", str(exc)) from exc
-            prior_count = self._retained_invocations
-            self._retained_invocations = min(_COUNTER_MAX, prior_count + 1)
-            sample_count = max(self._retained_invocations, 1)
-            self._retained_call_mean_seconds += (
-                duration - self._retained_call_mean_seconds
-            ) / sample_count
-            self._retained_call_max_seconds = max(self._retained_call_max_seconds, duration)
-            encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            return NativeInvocation(
-                command=("mncs-embed", self._retained_artifact_identity or "unknown"),
-                returncode=0,
-                stdout=encoded,
-                stderr=b"",
-                payload=payload,
-                duration_seconds=duration,
-                transport="stage0-reference-fallback",
-            )
+            # The retained C ABI library can lag the selected Language CLI
+            # and reject current Forge source. Keep the pure compatibility
+            # path on the selected Stage-0 Language implementation instead
+            # of substituting stale embed bytes.
+            return self._execute_stage0_reference_cli(request)
         if self._execute_is_overridden() or self._embed_library() is None:
             if grants:
                 raise ForgeError(
@@ -1592,6 +1645,65 @@ class NativeForgeAdapter:
             duration_seconds=duration,
             transport="retained",
         )
+
+    def _resource_policy_invocation(
+        self, request: Mapping[str, object], *, request_name: str
+    ) -> NativeInvocation:
+        """Run pure resource policy through the selected fallback for VM float gaps."""
+
+        invocation = self._semantic_invocation(request, request_name=request_name)
+        payload = invocation.payload
+        failure = payload.get("failure_reason") if isinstance(payload, Mapping) else None
+        feature = failure.get("feature") if isinstance(failure, Mapping) else None
+        if (
+            not payload
+            or payload.get("status") != "unsupported"
+            or not _resource_policy_vm_float_gap(feature)
+            or self._canonical_selection() is None
+        ):
+            return invocation
+
+        selected_status = (
+            self._canonical_application.status()
+            if self._canonical_application is not None
+            else {}
+        )
+        artifact = selected_status.get("artifact")
+        artifact = artifact if isinstance(artifact, Mapping) else {}
+        runtime = selected_status.get("runtime")
+        runtime = runtime if isinstance(runtime, Mapping) else {}
+        build_origin = runtime.get("build_origin")
+        build_origin = build_origin if isinstance(build_origin, Mapping) else {}
+        prior_cache_override = self._artifact_cache_override
+        self._artifact_cache_override = (
+            self.forge_root / ".mncs/cache/resource-policy-stage0"
+        )
+        try:
+            invocation = self._semantic_invocation(
+                request,
+                request_name=request_name,
+                force_stage0_reference=True,
+            )
+        finally:
+            self._artifact_cache_override = prior_cache_override
+        target = request.get("target")
+        function = target.get("function") if isinstance(target, Mapping) else "unknown"
+        self._execution_fallbacks.append(
+            {
+                "target": f"forge/core.mncs::{function}",
+                "reason": f"canonical VM unsupported {feature}",
+                "from": "canonical-vm",
+                "to": "stage0-reference-cli",
+                "artifact_identity": artifact.get("identity"),
+                "producer": selected_status.get("producer"),
+                "vm_executable_sha256": runtime.get("executable_sha256"),
+                "vm_build_receipt_identity": build_origin.get("receipt_identity"),
+                "stage0_artifact": self._retained_artifact_identity,
+                "stage0_semantic_input_identity": self._retained_identity,
+            }
+        )
+        self._execution_fallbacks = self._execution_fallbacks[-8:]
+        return invocation
 
     def source_study(self, source: Path, *, node_id: str = "forge-native") -> NativeInvocation:
         return self.invoke(["source-study", str(source.resolve()), "--node-id", node_id])
@@ -1908,56 +2020,22 @@ class NativeForgeAdapter:
             "arguments": [observation_value, policy_value],
             "step_budget": 20_000,
         }
-        invocation = self._semantic_invocation(request, request_name="resource-budget-request.json")
-        fallback_feature: str | None = None
-        if invocation.payload and invocation.payload.get("status") == "unsupported":
-            failure = invocation.payload.get("failure_reason")
-            feature = failure.get("feature") if isinstance(failure, dict) else None
-            if (
-                _resource_policy_vm_float_gap(feature)
-                and self._canonical_selection() is not None
-            ):
-                fallback_feature = str(feature)
-                selected_status = (
-                    self._canonical_application.status()
-                    if self._canonical_application is not None
-                    else {}
-                )
-                artifact = selected_status.get("artifact")
-                artifact = artifact if isinstance(artifact, dict) else {}
-                runtime = selected_status.get("runtime")
-                runtime = runtime if isinstance(runtime, dict) else {}
-                build_origin = runtime.get("build_origin")
-                build_origin = build_origin if isinstance(build_origin, dict) else {}
-                prior_cache_override = self._artifact_cache_override
-                self._artifact_cache_override = (
-                    self.forge_root / ".mncs/cache/resource-policy-stage0"
-                )
-                try:
-                    invocation = self._semantic_invocation(
-                        request,
-                        request_name="resource-budget-request.json",
-                        force_stage0_reference=True,
-                    )
-                finally:
-                    self._artifact_cache_override = prior_cache_override
-                self._execution_fallbacks.append(
-                    {
-                        "target": "forge/core.mncs::resource_budget_select",
-                        "reason": f"canonical VM unsupported {fallback_feature}",
-                        "from": "canonical-vm",
-                        "to": "stage0-reference/embed",
-                        "artifact_identity": artifact.get("identity"),
-                        "producer": selected_status.get("producer"),
-                        "vm_executable_sha256": runtime.get("executable_sha256"),
-                        "vm_build_receipt_identity": build_origin.get("receipt_identity"),
-                        "stage0_artifact": self._retained_artifact_identity,
-                        "stage0_semantic_input_identity": self._retained_identity,
-                    }
-                )
-                self._execution_fallbacks = self._execution_fallbacks[-8:]
+        invocation = self._resource_policy_invocation(
+            request, request_name="resource-budget-request.json"
+        )
         if not invocation.ok or invocation.payload is None:
-            raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource budget call failed")
+            diagnostic = (invocation.stderr or invocation.stdout).decode(
+                "utf-8", errors="replace"
+            ).strip()[:512]
+            detail = (
+                f" (transport={invocation.transport}, returncode={invocation.returncode}"
+                + (f", diagnostic={diagnostic}" if diagnostic else ", no structured response")
+                + ")"
+            )
+            raise ForgeError(
+                "NATIVE_RESOURCE_UNKNOWN",
+                "native resource budget call failed" + detail,
+            )
         if invocation.payload.get("status") != "returned":
             details = invocation.payload.get("failure_reason")
             raise ForgeError(
@@ -2189,9 +2267,22 @@ class NativeForgeAdapter:
             "arguments": [observation_value, policy_value],
             "step_budget": 20_000,
         }
-        invocation = self._semantic_invocation(request, request_name="resource-admission.json")
+        invocation = self._resource_policy_invocation(
+            request, request_name="resource-admission.json"
+        )
         if not invocation.ok or invocation.payload is None:
-            raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource admission call failed")
+            diagnostic = (invocation.stderr or invocation.stdout).decode(
+                "utf-8", errors="replace"
+            ).strip()[:512]
+            detail = (
+                f" (transport={invocation.transport}, returncode={invocation.returncode}"
+                + (f", diagnostic={diagnostic}" if diagnostic else ", no structured response")
+                + ")"
+            )
+            raise ForgeError(
+                "NATIVE_RESOURCE_UNKNOWN",
+                "native resource admission call failed" + detail,
+            )
         if invocation.payload.get("status") != "returned":
             raise ForgeError("NATIVE_RESOURCE_UNKNOWN", "native resource admission did not return")
         returned = invocation.payload.get("returned")
@@ -3038,6 +3129,57 @@ class NativeForgeAdapter:
                 "fields": [[field_name, fields[field_name]] for field_name in sorted(fields)],
             }
         }
+
+    @classmethod
+    def _host_call_value(cls, value: object) -> dict[str, object]:
+        """Translate native typed values to Language CLI host-call JSON."""
+
+        if not isinstance(value, Mapping) or len(value) != 1:
+            raise ForgeError("NATIVE_REQUEST_INVALID", "native host argument is malformed")
+        kind, raw = next(iter(value.items()))
+        if not isinstance(raw, Mapping):
+            raise ForgeError("NATIVE_REQUEST_INVALID", "native host argument payload is malformed")
+        if kind in {"integer", "boolean", "byte"}:
+            return {str(kind): {"value": raw.get("value")}}
+        if kind == "float":
+            bits = raw.get("bits")
+            try:
+                number = (
+                    struct.unpack(">d", struct.pack(">Q", bits))[0]
+                    if isinstance(bits, int) and not isinstance(bits, bool)
+                    else float(raw["value"])
+                )
+            except (KeyError, OverflowError, TypeError, ValueError, struct.error) as error:
+                raise ForgeError(
+                    "NATIVE_REQUEST_INVALID", "native float host argument is malformed"
+                ) from error
+            return {"float": {"value": number}}
+        if kind == "record":
+            name = raw.get("name")
+            source_fields = raw.get("fields")
+            if not isinstance(name, str) or not isinstance(source_fields, list):
+                raise ForgeError(
+                    "NATIVE_REQUEST_INVALID", "native record host argument is malformed"
+                )
+            fields: dict[str, object] = {}
+            for item in source_fields:
+                if (not isinstance(item, list) or len(item) != 2
+                        or not isinstance(item[0], str) or item[0] in fields):
+                    raise ForgeError(
+                        "NATIVE_REQUEST_INVALID", "native record host fields are malformed"
+                    )
+                fields[item[0]] = cls._host_call_value(item[1])
+            return {"record": {"type": name, "fields": fields}}
+        if kind == "sequence":
+            values = raw.get("values")
+            if not isinstance(values, list):
+                raise ForgeError(
+                    "NATIVE_REQUEST_INVALID", "native sequence host argument is malformed"
+                )
+            return {"sequence": {"values": [cls._host_call_value(item) for item in values]}}
+        raise ForgeError(
+            "NATIVE_REQUEST_INVALID", f"unsupported native host argument kind: {kind}"
+        )
 
     @staticmethod
     def _mncs_integer(value: int) -> dict[str, object]:

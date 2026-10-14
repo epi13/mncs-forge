@@ -1,0 +1,11 @@
+[
+  {
+    "schema_version": "0.1",
+    "target": {
+      "module": "proof.integration.v1",
+      "function": "value"
+    },
+    "arguments": [],
+    "step_budget": 100
+  }
+]

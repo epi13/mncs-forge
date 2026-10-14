@@ -1,0 +1,6 @@
+mncs 0.18;
+module proof.integration.v1;
+
+fn value() -> (result: i64) {
+    return 7;
+}
