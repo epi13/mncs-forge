@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-forge",
-  "revision": 16,
+  "revision": 17,
   "manifest_location": "in-repository",
   "authority": {
     "note": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority."
@@ -422,6 +422,7 @@
         ],
         "stability": "experimental",
         "shareable_artifacts": [
+          "compiler-vm-task.json",
           "forge-execution-receipt.json"
         ],
         "invocation": {
@@ -571,6 +572,7 @@
         },
         "output_limit_bytes": 524288,
         "shareable_artifacts": [
+          "compiler-vm-task.json",
           "forge-execution-receipt.json"
         ]
       }
