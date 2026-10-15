@@ -53,8 +53,8 @@ schema = "mncs-forge.semantic-authority/1"
 
 [[capability]]
 identity = "forge.resource-budget.v1"
-semantic_owner = "mncs.forge.core.v1::resource_budget_select"
-native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+semantic_owner = "mncs.forge.resource_policy.v1::resource_budget_select"
+native_source = "src/mncs_forge/resources/native/forge/resource_policy.mncs"
 host_realization = "src/mncs_forge/resource_envelope.py::SystemdCgroupEnvelope"
 host_may = ["observe_host_and_cgroup_capacity", "materialize_selected_limits", "return_raw_counters"]
 host_must_not = ["select_memory_fraction", "select_memory_cap", "select_memory_high", "select_tasks_or_concurrency", "select_runtime_ceiling", "create_policy_identity"]
@@ -73,8 +73,8 @@ bootstrap_provisional = false
 
 [[capability]]
 identity = "forge.resource-admission.v1"
-semantic_owner = "mncs.forge.core.v1::resource_admission"
-native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+semantic_owner = "mncs.forge.resource_policy.v1::resource_admission"
+native_source = "src/mncs_forge/resources/native/forge/resource_policy.mncs"
 host_realization = "src/mncs_forge/resource_envelope.py::SystemdCgroupEnvelope"
 host_may = ["observe_raw_memory_and_process_count", "observe_lock_availability", "apply_admission_decision"]
 host_must_not = ["combine_headroom_policy", "choose_concurrency", "choose_deadline", "classify_defer_or_unavailable"]

@@ -12,6 +12,8 @@ from mncs_forge.mncs_native import (
     NativeResourceOutcomeDecision,
     NativeVerificationTransition,
 )
+from mncs_forge.errors import ForgeError
+from mncs_forge.ports import ExecutionResult
 
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024 * 1024
@@ -164,6 +166,86 @@ def test_process_resource_reproducer_exposes_current_native_gap(
     assert result.returncode != 0
     assert "MNP216" in diagnostics
     assert "process_run takes exactly one typed process-request argument" in diagnostics
+
+
+@pytest.mark.parametrize(
+    "function",
+    ["resource_budget_select", "resource_admission", "resource_budget_identity"],
+)
+def test_float_gap_fallback_uses_focused_resource_module(
+    function: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[list[str]] = []
+
+    def run_bounded(command: object, **kwargs: object) -> ExecutionResult:
+        argv = list(command)  # type: ignore[arg-type]
+        captured.append(argv)
+        return ExecutionResult(
+            argv=argv,
+            returncode=0,
+            stdout=b'{"status":"ok","call":{"status":"ok"}}',
+            stderr=b"",
+            duration_seconds=0.001,
+        )
+
+    monkeypatch.setattr("mncs_forge.mncs_native.run_bounded", run_bounded)
+    adapter = NativeForgeAdapter(ROOT)
+    adapter.library_root = ROOT
+    monkeypatch.setattr(adapter, "_command", lambda: ["mncs"])
+    monkeypatch.setattr(adapter, "_environment", lambda: {})
+    try:
+        request = {
+            "target": {"module": "mncs.forge.core.v1", "function": function},
+            "arguments": [],
+            "step_budget": 20_000,
+        }
+        if function == "resource_budget_identity":
+            request["grants"] = [{
+                "capability": "resource_budget_identity",
+                "locator": "forge-resource-budget-identity",
+                "bytes": [],
+            }]
+        invocation = adapter._semantic_invocation(
+            request,
+            request_name="resource-policy.json",
+            force_stage0_reference=function != "resource_budget_identity",
+        )
+    finally:
+        adapter.close()
+
+    assert invocation.ok
+    assert len(captured) == 1
+    command = captured[0]
+    assert str((ROOT / "src/mncs_forge/resources/native/forge/resource_policy.mncs").resolve()) in command
+    assert "mncs.forge.resource_policy.v1" in command
+    assert function in command
+    if function == "resource_budget_identity":
+        assert command[-2:] == ["--grant-structured", "resource_budget_identity"]
+
+
+def test_stage0_host_call_value_preserves_typed_finite_identity() -> None:
+    value = {
+        "finite": {
+            "type_identity": "mncs:0.2:finite-type:mncs.forge.resource_policy.v1::ResourceBudgetStatus",
+            "variant_identity": "mncs:0.2:finite-variant:mncs.forge.resource_policy.v1::ResourceBudgetStatus::Selected",
+            "discriminant": 0,
+        }
+    }
+    assert NativeForgeAdapter._host_call_value(value) == {
+        "finite": {
+            "type": "ResourceBudgetStatus",
+            "variant": "Selected",
+        }
+    }
+
+    mismatched = {
+        "finite": {
+            **value["finite"],
+            "variant_identity": "mncs:0.2:finite-variant:mncs.forge.other.v1::ResourceBudgetStatus::Selected",
+        }
+    }
+    with pytest.raises(ForgeError, match="does not match its type"):
+        NativeForgeAdapter._host_call_value(mismatched)
 
 
 def test_native_budget_identity_uses_structured_digest(native: NativeForgeAdapter) -> None:

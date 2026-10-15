@@ -1490,9 +1490,13 @@ class NativeForgeAdapter:
             duration_seconds=__import__("time").perf_counter()-started, transport="canonical-vm-retained")
 
     def _execute_stage0_reference_cli(
-        self, request: Mapping[str, object],
+        self,
+        request: Mapping[str, object],
+        *,
+        source: Path | None = None,
+        target_module: str | None = None,
     ) -> NativeInvocation:
-        """Run a pure compatibility policy through the selected Language CLI.
+        """Run bounded Stage-0 policy work through the selected Language CLI.
 
         This path is used only when the canonical VM reports a known runtime
         gap. The CLI and its compiler source identity are selected by the
@@ -1503,10 +1507,28 @@ class NativeForgeAdapter:
         arguments = request.get("arguments")
         if not isinstance(target, Mapping) or not isinstance(arguments, list):
             raise ForgeError("NATIVE_REQUEST_INVALID", "native request shape is invalid")
-        module = target.get("module")
+        module = target_module or target.get("module")
         function = target.get("function")
         if not isinstance(module, str) or not isinstance(function, str):
             raise ForgeError("NATIVE_REQUEST_INVALID", "native target is invalid")
+        grants = request.get("grants", [])
+        if not isinstance(grants, list) or any(not isinstance(grant, Mapping) for grant in grants):
+            raise ForgeError("NATIVE_FALLBACK_GRANTS", "Stage-0 fallback grant shape is invalid")
+        if grants and (
+            function != "resource_budget_identity"
+            or len(grants) != 1
+            or set(grants[0]) != {"capability", "locator", "bytes"}
+            or grants[0].get("capability") != "resource_budget_identity"
+            or grants[0].get("locator") != "forge-resource-budget-identity"
+            or grants[0].get("bytes") != []
+        ):
+            raise ForgeError(
+                "NATIVE_FALLBACK_GRANTS",
+                "Stage-0 fallback only admits the exact structured resource identity grant",
+            )
+        selected_source = (source or self.native_source).resolve()
+        if not selected_source.is_file():
+            raise ForgeError("NATIVE_UNAVAILABLE", "selected Stage-0 policy source is unavailable")
         try:
             step_budget = int(request.get("step_budget", 0))
         except (TypeError, ValueError) as exc:
@@ -1528,7 +1550,7 @@ class NativeForgeAdapter:
             command = [
                 *self._command(),
                 "call",
-                str(self.native_source.resolve()),
+                str(selected_source),
                 "--module",
                 module,
                 "--function",
@@ -1540,6 +1562,8 @@ class NativeForgeAdapter:
             ]
             for library in (self.native_root, self.library_root):
                 command.extend(("--library", str(library)))
+            for grant in grants:
+                command.extend(("--grant-structured", str(grant["capability"])))
             # Admission cannot invoke the runner whose resource gate it is
             # currently deciding. This pure policy call still uses Forge's
             # bounded subprocess transport, with a short fixed time ceiling.
@@ -1599,22 +1623,58 @@ class NativeForgeAdapter:
             assert self.library_root is not None
             return self.execute_canonical(self.native_source, request, libraries=(self.native_root, self.library_root))
         if force_stage0_reference:
-            if grants:
+            if grants and not (
+                function == "resource_budget_identity"
+                and len(grants) == 1
+                and set(grants[0]) == {"capability", "locator", "bytes"}
+                and grants[0].get("capability") == "resource_budget_identity"
+                and grants[0].get("locator") == "forge-resource-budget-identity"
+                and grants[0].get("bytes") == []
+            ):
                 raise ForgeError(
                     "NATIVE_FALLBACK_GRANTS",
-                    "Stage-0 fallback is limited to pure policy calls",
+                    "Stage-0 fallback grant is not the exact structured resource identity capability",
                 )
             # The retained C ABI library can lag the selected Language CLI
             # and reject current Forge source. Keep the pure compatibility
             # path on the selected Stage-0 Language implementation instead
-            # of substituting stale embed bytes.
-            return self._execute_stage0_reference_cli(request)
+            # of substituting stale embed bytes. Resource decisions have a
+            # focused source module so this bounded fallback does not compile
+            # the unrelated Forge core on every admission.
+            resource_policy_target = function in {
+                "resource_budget_select",
+                "resource_admission",
+                "resource_budget_identity",
+            }
+            return self._execute_stage0_reference_cli(
+                request,
+                source=(
+                    self.native_root / "resource_policy.mncs"
+                    if resource_policy_target
+                    else None
+                ),
+                target_module=(
+                    "mncs.forge.resource_policy.v1"
+                    if resource_policy_target
+                    else None
+                ),
+            )
         if self._execute_is_overridden() or self._embed_library() is None:
             if grants:
-                raise ForgeError(
-                    "NATIVE_EMBED_UNAVAILABLE",
-                    "native host-granted calls require the retained language embedding",
-                )
+                if (
+                    function == "resource_budget_identity"
+                    and len(grants) == 1
+                    and set(grants[0]) == {"capability", "locator", "bytes"}
+                    and grants[0].get("capability") == "resource_budget_identity"
+                    and grants[0].get("locator") == "forge-resource-budget-identity"
+                    and grants[0].get("bytes") == []
+                ):
+                    return self._execute_stage0_reference_cli(
+                        request,
+                        source=self.native_root / "resource_policy.mncs",
+                        target_module="mncs.forge.resource_policy.v1",
+                    )
+                raise ForgeError("NATIVE_EMBED_UNAVAILABLE", "native host-granted calls require the retained language embedding")
             with tempfile.TemporaryDirectory(prefix=".mncs-native-", dir=self.forge_root) as directory:
                 request_path = Path(directory) / request_name
                 request_path.write_text(json.dumps(request), encoding="utf-8")
@@ -1676,26 +1736,33 @@ class NativeForgeAdapter:
         runtime = runtime if isinstance(runtime, Mapping) else {}
         build_origin = runtime.get("build_origin")
         build_origin = build_origin if isinstance(build_origin, Mapping) else {}
-        prior_cache_override = self._artifact_cache_override
-        self._artifact_cache_override = (
-            self.forge_root / ".mncs/cache/resource-policy-stage0"
+        invocation = self._semantic_invocation(
+            request,
+            request_name=request_name,
+            force_stage0_reference=True,
         )
-        try:
-            invocation = self._semantic_invocation(
-                request,
-                request_name=request_name,
-                force_stage0_reference=True,
-            )
-        finally:
-            self._artifact_cache_override = prior_cache_override
         target = request.get("target")
         function = target.get("function") if isinstance(target, Mapping) else "unknown"
+        resource_policy_target = function in {
+            "resource_budget_select",
+            "resource_admission",
+        }
         self._execution_fallbacks.append(
             {
                 "target": f"forge/core.mncs::{function}",
                 "reason": f"canonical VM unsupported {feature}",
                 "from": "canonical-vm",
                 "to": "stage0-reference-cli",
+                "fallback_source": (
+                    "forge/resource_policy.mncs"
+                    if resource_policy_target
+                    else "forge/core.mncs"
+                ),
+                "fallback_target": (
+                    f"mncs.forge.resource_policy.v1::{function}"
+                    if resource_policy_target
+                    else f"mncs.forge.core.v1::{function}"
+                ),
                 "artifact_identity": artifact.get("identity"),
                 "producer": selected_status.get("producer"),
                 "vm_executable_sha256": runtime.get("executable_sha256"),
@@ -2159,11 +2226,6 @@ class NativeForgeAdapter:
         """Run native admission over raw containment, memory, process, and slot facts."""
 
         self.ensure_available()
-        if self._embed_library() is None:
-            raise ForgeError(
-                "NATIVE_EMBED_UNAVAILABLE",
-                "native resource admission requires a retained mncs-embed session",
-            )
         abi = self.language_owned_abi()
         function_contract = abi.functions.get("resource_admission")
         if function_contract is None:
@@ -2321,11 +2383,6 @@ class NativeForgeAdapter:
         """Classify an execution from bounded raw facts using Forge MNCS semantics."""
 
         self.ensure_available()
-        if self._embed_library() is None:
-            raise ForgeError(
-                "NATIVE_EMBED_UNAVAILABLE",
-                "native resource classification requires a retained mncs-embed session",
-            )
         abi = self.language_owned_abi()
         exit_status = observation.get("exit_status")
         has_exit_status = isinstance(exit_status, int) and not isinstance(exit_status, bool)
@@ -3172,6 +3229,56 @@ class NativeForgeAdapter:
                     )
                 fields[item[0]] = cls._host_call_value(item[1])
             return {"record": {"type": name, "fields": fields}}
+        if kind == "finite":
+            type_identity = raw.get("type_identity")
+            variant_identity = raw.get("variant_identity")
+            discriminant = raw.get("discriminant")
+            if (
+                not isinstance(type_identity, str)
+                or not type_identity.startswith(_MNCS_TYPE_PREFIX)
+                or not isinstance(variant_identity, str)
+                or not variant_identity.startswith("mncs:0.2:finite-variant:")
+                or not isinstance(discriminant, int)
+                or isinstance(discriminant, bool)
+                or discriminant < 0
+            ):
+                raise ForgeError(
+                    "NATIVE_REQUEST_INVALID", "native finite host argument is malformed"
+                )
+            type_component = type_identity.removeprefix(_MNCS_TYPE_PREFIX)
+            variant = variant_identity.removeprefix("mncs:0.2:finite-variant:")
+            type_variant_prefix = f"{type_component}::"
+            if not variant.startswith(type_variant_prefix):
+                raise ForgeError(
+                    "NATIVE_REQUEST_INVALID", "native finite variant does not match its type"
+                )
+            variant_name = variant.removeprefix(type_variant_prefix)
+            type_name = type_component.rsplit("::", 1)[-1]
+            if not type_name or not variant_name or "::" in variant_name:
+                raise ForgeError(
+                    "NATIVE_REQUEST_INVALID", "native finite variant name is malformed"
+                )
+            raw_payload = raw.get("payload", [])
+            if not isinstance(raw_payload, list):
+                raise ForgeError(
+                    "NATIVE_REQUEST_INVALID", "native finite payload is malformed"
+                )
+            payload: dict[str, object] = {}
+            for item in raw_payload:
+                if (
+                    not isinstance(item, list)
+                    or len(item) != 2
+                    or not isinstance(item[0], str)
+                    or item[0] in payload
+                ):
+                    raise ForgeError(
+                        "NATIVE_REQUEST_INVALID", "native finite payload fields are malformed"
+                    )
+                payload[item[0]] = cls._host_call_value(item[1])
+            finite: dict[str, object] = {"type": type_name, "variant": variant_name}
+            if payload:
+                finite["payload"] = payload
+            return {"finite": finite}
         if kind == "sequence":
             values = raw.get("values")
             if not isinstance(values, list):
