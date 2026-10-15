@@ -34,7 +34,7 @@ INPUT_SCHEMA = "mncs.environment.provider-input-artifacts/1"
 BUILD_SCHEMA = "mncs.compiler.application-build/4"
 VM_ARTIFACT_SCHEMA = "mncs.vm.artifact/1"
 CALL_LIMIT_BYTES = 32 * 1024
-BUILD_INPUT_LIMIT_BYTES = 1024 * 1024
+BUILD_INPUT_LIMIT_BYTES = 2 * 1024 * 1024
 RESOURCE_ENVELOPE = {
     "memory_max_bytes": 512 * 1024 * 1024,
     "memory_cap_bytes": 512 * 1024 * 1024,
@@ -121,7 +121,10 @@ def input_build() -> tuple[dict[str, Any], dict[str, Any]]:
     except OSError as error:
         raise ProviderError("Environment input artifact could not be read") from error
     if len(data) > BUILD_INPUT_LIMIT_BYTES:
-        raise ProviderError("Compiler build artifact exceeds the 1 MiB input bound")
+        limit_mib = BUILD_INPUT_LIMIT_BYTES // (1024 * 1024)
+        raise ProviderError(
+            f"Compiler build artifact exceeds the {limit_mib} MiB input bound"
+        )
     digest = hashlib.sha256(data).hexdigest()
     if (len(data) != row.get("byte_count") or digest != row.get("sha256")
             or not isinstance(row.get("store_reference"), str)

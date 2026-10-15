@@ -112,12 +112,26 @@ def test_store_build_input_bytes_are_bound_to_the_environment_manifest(
     with pytest.raises(provider.ProviderError, match="Store provenance"):
         provider.input_build()
 
+    large_content = json.dumps(
+        verified_build(), sort_keys=True, separators=(",", ":"),
+    ).encode()
+    assert len(large_content) < 1_071_468
+    large_content += b" " * (1_071_468 - len(large_content))
+    (input_root / "0000.artifact").write_bytes(large_content)
+    manifest["artifacts"][0]["byte_count"] = len(large_content)
+    manifest["artifacts"][0]["sha256"] = hashlib.sha256(large_content).hexdigest()
+    monkeypatch.setenv("MNCS_ENV_INPUT_ARTIFACTS_JSON", json.dumps(manifest))
+    build, identity = provider.input_build()
+    assert build["artifact"]["identity"] == IDENTITY
+    assert identity["byte_count"] == 1_071_468
+    assert identity["sha256"] == hashlib.sha256(large_content).hexdigest()
+
     oversized = b"x" * (provider.BUILD_INPUT_LIMIT_BYTES + 4096)
     (input_root / "0000.artifact").write_bytes(oversized)
     manifest["artifacts"][0]["byte_count"] = len(oversized)
     manifest["artifacts"][0]["sha256"] = hashlib.sha256(oversized).hexdigest()
     monkeypatch.setenv("MNCS_ENV_INPUT_ARTIFACTS_JSON", json.dumps(manifest))
-    with pytest.raises(provider.ProviderError, match="1 MiB"):
+    with pytest.raises(provider.ProviderError, match="2 MiB"):
         provider.input_build()
 
 
