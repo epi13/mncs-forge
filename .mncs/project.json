@@ -464,6 +464,56 @@
         "output_limit_bytes": 524288
       },
       {
+        "contract": "native-application-execution",
+        "version": "1",
+        "kind": "typed-compiler-artifact-through-canonical-vm-and-forge-envelope",
+        "fingerprint_sources": [
+          "scripts/native_application_execution_runtime.py",
+          "scripts/native_application_execution_provider.py",
+          "scripts/native_application_vm_task.py",
+          "mncs-forge.compiler-vm.toml",
+          "src/mncs_forge/application/workflows.py",
+          "src/mncs_forge/application/execution_receipts.py",
+          "src/mncs_forge/adapters.py",
+          "src/mncs_forge/resource_envelope.py",
+          "src/mncs_forge/records.py",
+          "src/mncs_forge/record_store.py"
+        ],
+        "effects": [
+          "execute"
+        ],
+        "stability": "experimental",
+        "shareable_artifacts": [
+          "native-application-execution.json",
+          "forge-execution-receipt.json"
+        ],
+        "invocation": {
+          "kind": "python",
+          "path": "scripts/native_application_execution_runtime.py",
+          "fixed_argv": [],
+          "timeout_seconds": 120,
+          "toolchains": {
+            "MNCS_COMPILER_CHECKOUT": {
+              "repository": "mncs-compiler",
+              "path": "."
+            },
+            "MNCS_COMPILER_PROBE": {
+              "repository": "mncs-compiler",
+              "path": ".bootstrap/target/release/mncs-compiler-stage0-probe"
+            },
+            "MNCS_VM_CHECKOUT": {
+              "repository": "mncs-vm",
+              "path": "."
+            },
+            "MNCS_VM_BIN": {
+              "repository": "mncs-vm",
+              "path": "target/debug/mncs-vm"
+            }
+          }
+        },
+        "output_limit_bytes": 524288
+      },
+      {
         "contract": "canonical-vm-work",
         "version": "1",
         "kind": "selected-compiler-runtime-consumer",
