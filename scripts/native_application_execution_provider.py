@@ -387,6 +387,13 @@ def main(argv: list[str] | None = None) -> int:
         cache_state = cache_root.stat()
         if cache_state.st_uid != os.getuid() or cache_state.st_mode & 0o077:
             raise ProviderError("Forge native-application execution cache is not private")
+        compiler_vm_cache = cache_root / "compiler-vm"
+        compiler_vm_cache.mkdir(mode=0o700, exist_ok=True)
+        compiler_vm_cache_state = compiler_vm_cache.stat()
+        if (compiler_vm_cache_state.st_uid != os.getuid()
+                or compiler_vm_cache_state.st_mode & 0o077):
+            raise ProviderError("Forge canonical compiler/VM cache is not private")
+        os.environ["MNCS_VM_ARTIFACT_CACHE"] = str(compiler_vm_cache)
         runtime_root = Path(tempfile.mkdtemp(prefix="execution-", dir=cache_root))
         config = load_config(ROOT / "mncs-forge.compiler-vm.toml")
         config.raw["project"]["identity"] = subject_identity
