@@ -1,6 +1,6 @@
 # Rights & Provenance in Forge
 
-Status: experimental integration of `mncs-rights-provenance` manifest contract `0.1.0`.
+Status: experimental integration of `mncs-rights-provenance` manifest contract `0.2.0`.
 
 Forge is the first operational consumer of the MNCS Rights & Provenance framework because Forge already owns candidate lineage, declared development/evidence workflows, selection boundaries, and evidence reconciliation. This integration deliberately does **not** move legal authority into Forge.
 
@@ -91,6 +91,29 @@ The bundled schema is an interoperability contract, not a fork of the specificat
 ## Fabric evidence
 
 When Forge derives a draft manifest it incorporates existing candidate-bound execution receipt identities as `fabric-receipt` process evidence. Fabric remains the authority for what execution occurred; Forge does not reinterpret a Fabric receipt as conformance, independence, protected custody, or legal provenance.
+
+## License evidence scan
+
+`rights.license-evidence.scan` emits the standalone `LicenseEvidence` record
+defined by `mncs-forge-license-evidence/0.3.0`. It inspects only bounded,
+project-root metadata and conventional license/notice filenames; it does not
+walk dependencies or claim that the inspected set is complete.
+
+Every inspected input appears in bounded `scan_inputs` as observed, absent,
+or unavailable. An observed input includes a project-relative path, byte
+length, and SHA-256. Declaration and notice observations also carry a
+repository-relative `source_ref` with a field selector. The stable
+`evidence_id` is derived from the subject and this scan state, so changing a
+file changes the identity even when a keyword heuristic still recognizes the
+same license label. Scan timestamps remain in the record's content digest but
+do not affect that stable source identity. Full source files and absolute
+checkout paths are not copied into the evidence record.
+
+Metadata values are retained as declarations, without SPDX syntax validation
+or authority claims. Text matching produces only a `heuristic` claim. Missing,
+malformed, oversized, unsafe, or unrecognized inputs remain unresolved and
+include actionable source references when bytes were available. The scan does
+not determine license compatibility, copyright ownership, or legal effect.
 
 ## Commons integration
 

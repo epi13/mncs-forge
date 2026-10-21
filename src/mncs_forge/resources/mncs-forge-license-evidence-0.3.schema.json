@@ -1,0 +1,342 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mncs-forge://schema/license-evidence/0.3.0",
+  "title": "MNCS Forge License Evidence 0.3.0",
+  "description": "Source-bound observations and non-authoritative claims about project license metadata.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_id",
+    "kind",
+    "producer",
+    "subject",
+    "scan_inputs",
+    "observations",
+    "claims",
+    "context",
+    "limitations",
+    "content_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.3.0"
+    },
+    "evidence_id": {
+      "type": "string",
+      "pattern": "^mncs-forge://license-evidence/[0-9a-f]{32}$"
+    },
+    "kind": {
+      "const": "forge-analysis"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "producer",
+        "recordKind",
+        "schemaVersion",
+        "stableId"
+      ],
+      "properties": {
+        "producer": {
+          "const": "mncs-forge"
+        },
+        "recordKind": {
+          "const": "LicenseEvidence"
+        },
+        "schemaVersion": {
+          "const": "0.3.0"
+        },
+        "stableId": {
+          "$ref": "#/properties/evidence_id"
+        }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_refs"
+      ],
+      "properties": {
+        "artifact_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "role"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "role": {
+                "const": "subject"
+              }
+            }
+          }
+        }
+      }
+    },
+    "scan_inputs": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "status"
+            ],
+            "properties": {
+              "path": {
+                "enum": [
+                  "pyproject.toml",
+                  "package.json",
+                  "LICENSE",
+                  "LICENSE.md",
+                  "LICENSE.txt",
+                  "COPYING",
+                  "COPYING.txt",
+                  "NOTICE"
+                ]
+              },
+              "status": {
+                "const": "absent"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "status",
+              "reason"
+            ],
+            "properties": {
+              "path": {
+                "enum": [
+                  "pyproject.toml",
+                  "package.json",
+                  "LICENSE",
+                  "LICENSE.md",
+                  "LICENSE.txt",
+                  "COPYING",
+                  "COPYING.txt",
+                  "NOTICE"
+                ]
+              },
+              "status": {
+                "const": "unavailable"
+              },
+              "reason": {
+                "enum": [
+                  "resolves outside the project root",
+                  "could not be resolved",
+                  "is not a regular file",
+                  "exceeds the bounded scan size",
+                  "could not be read safely"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "status",
+              "resolved_path",
+              "sha256",
+              "byte_length"
+            ],
+            "properties": {
+              "path": {
+                "enum": [
+                  "pyproject.toml",
+                  "package.json",
+                  "LICENSE",
+                  "LICENSE.md",
+                  "LICENSE.txt",
+                  "COPYING",
+                  "COPYING.txt",
+                  "NOTICE"
+                ]
+              },
+              "status": {
+                "const": "observed"
+              },
+              "resolved_path": {
+                "$ref": "#/$defs/projectRelativePath"
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "byte_length": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 524288
+              }
+            }
+          }
+        ]
+      }
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "value",
+          "source_ref",
+          "observed_at"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "value": {
+            "type": "object"
+          },
+          "source_ref": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "resolved_path",
+              "sha256",
+              "byte_length",
+              "selector"
+            ],
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/projectRelativePath"
+              },
+              "resolved_path": {
+                "$ref": "#/$defs/projectRelativePath"
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "byte_length": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 524288
+              },
+              "selector": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "claim_type",
+          "statement",
+          "confidence"
+        ],
+        "properties": {
+          "claim_type": {
+            "enum": [
+              "license-declaration",
+              "license-identification",
+              "unknown-license-state",
+              "declaration-parse-error",
+              "source-unavailable"
+            ]
+          },
+          "statement": {
+            "type": "string",
+            "minLength": 1
+          },
+          "confidence": {
+            "enum": [
+              "observed-declaration",
+              "heuristic",
+              "insufficient-evidence"
+            ]
+          },
+          "value": {
+            "type": "string"
+          },
+          "spdx_expression": {
+            "type": "string",
+            "minLength": 1
+          },
+          "supporting_observations": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "source_path": {
+            "$ref": "#/$defs/projectRelativePath"
+          }
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timestamp"
+      ],
+      "properties": {
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "content_digest": {
+      "$ref": "#/$defs/contentDigest"
+    }
+  },
+  "$defs": {
+    "projectRelativePath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "contentDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
