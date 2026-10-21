@@ -1,33 +1,43 @@
-# Native application execution through Forge
+# Native application execution
 
-`mncs-forge:native-application-execution` composes one exact
-`mncs-compiler:native-application-build` Store artifact with one bounded typed
-call. It accepts only a verified application-build/4 response whose selected
-entry, callable interface, type closure, capability dispatch, and canonical VM
-artifact are all resolved.
+The `native-application-execution` provider consumes one verified
+`mncs.compiler.application-build/4` artifact from Environment, admits its
+Compiler-generated VM artifact, runs one typed call through the canonical VM,
+and publishes a Forge receipt plus an Environment result artifact.
 
-Forge runs the selected canonical VM under its existing local-process runner
-and systemd cgroup-v2 resource envelope. The current envelope is 512 MiB, 64
-processes, concurrency one, and 45 seconds. VM admission and the application
-call happen inside that envelope. The provider records the complete VM result,
-Compiler source and dependency identities, selected Compiler and VM
-identities, exact input call, Forge execution receipt, and measured resource
-observations.
+## Bounded structured-file capability
 
-Environment passes the build artifact only through its private
-`provider-input-artifacts/1` workspace. The provider verifies the Store
-reference metadata, byte count, and SHA-256 before reading the application
-artifact. Calls use canonical JSON of the form `{"arguments": [...]}` and are
-limited to 32 KiB. The callable target comes from the verified Compiler entry;
-callers cannot choose another function or provide VM command arguments.
+A call may include one `capability_providers` entry using
+`mncs.forge.structured-file-capability/1`:
 
-Successful invocations publish `native-application-execution.json` and
-`forge-execution-receipt.json` as shareable capability artifacts. Failed,
-unsupported, timed out, or resource-limited runs publish a failure record and
-do not retain a prior successful result as the latest output. Environment
-persists the invocation artifact bundle through the canonical Store and its
-artifact-read operation verifies the exact capability binding and path.
+```json
+{
+  "arguments": ["... typed ApplicationContext value ..."],
+  "capability_providers": [{
+    "schema_version": "mncs.forge.structured-file-capability/1",
+    "capability_identity": "... exact identity from the admitted Compiler artifact ...",
+    "input_schema": "mncs.test-digest-request/1",
+    "input_value": {"record": {"...": "typed ExecutionValue fields"}},
+    "output_schema": "mncs.test-digest/1"
+  }]
+}
+```
 
-The host code owns only Store-byte validation, process dispatch, Forge
-admission, and receipt transport. Application decisions and returned values
-remain in MNCS code executed by the canonical VM.
+The callable must accept the verified `ApplicationContext` record and the
+selected Compiler dispatch must bind the exact capability identity to one
+source alias with `structured_read` and `structured_write`. Its two `argv`
+values must initially be safe, relative file names, and `argv_count` must be
+two. Forge stages the typed request in a private invocation directory and
+replaces those paths with the staged request and create-only result paths.
+The application receives no arbitrary host path from this adapter.
+
+The call envelope is limited to 32 KiB. The VM file adapter has a 2 MiB read
+ceiling; Forge currently admits no more than 256 KiB for the typed result so
+the wrapped Environment artifact remains under its 512 KiB publication limit.
+For calls that admit this provider, Forge emits
+`mncs.forge.native-application-execution/2`; the existing no-provider response
+keeps `/1`. The version 2 result includes the typed output, its schema, and its
+byte digest in `native-application-execution.json`. Forge also records the
+canonical VM execution witness and measured execution receipt. Application
+decisions stay in MNCS source; this provider only transports the declared typed
+value.

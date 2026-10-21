@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -35,6 +36,12 @@ BUILD_SCHEMA = "mncs.compiler.application-build/4"
 VM_ARTIFACT_SCHEMA = "mncs.vm.artifact/1"
 CALL_LIMIT_BYTES = 32 * 1024
 BUILD_INPUT_LIMIT_BYTES = 2 * 1024 * 1024
+VM_STRUCTURED_PROVIDER_SCHEMA = "mncs.vm.structured-file-provider/1"
+FORGE_STRUCTURED_PROVIDER_SCHEMA = "mncs.forge.structured-file-capability/1"
+MAX_CAPABILITY_PROVIDER_INPUT_BYTES = 2 * 1024 * 1024
+MAX_CAPABILITY_PROVIDER_OUTPUT_BYTES = 256 * 1024
+EXECUTION_SCHEMA = "mncs.forge.native-application-execution/1"
+EXECUTION_WITH_CAPABILITY_OUTPUTS_SCHEMA = "mncs.forge.native-application-execution/2"
 RESOURCE_ENVELOPE = {
     "memory_max_bytes": 512 * 1024 * 1024,
     "memory_cap_bytes": 512 * 1024 * 1024,
@@ -63,6 +70,36 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def read_bounded_regular_file(path: Path, *, byte_limit: int, label: str) -> bytes:
+    """Read one private provider file without following links or trusting a prior stat."""
+    if type(byte_limit) is not int or byte_limit < 0:
+        raise ProviderError(f"{label} byte bound is invalid")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ProviderError(f"{label} file is not a regular file")
+        if metadata.st_size > byte_limit:
+            raise ProviderError(f"{label} file exceeds its {byte_limit}-byte bound")
+        chunks = bytearray()
+        while len(chunks) <= byte_limit:
+            chunk = os.read(descriptor, min(64 * 1024, byte_limit + 1 - len(chunks)))
+            if not chunk:
+                break
+            chunks.extend(chunk)
+        if len(chunks) > byte_limit:
+            raise ProviderError(f"{label} file exceeds its {byte_limit}-byte bound")
+        return bytes(chunks)
+    except OSError as error:
+        raise ProviderError(f"{label} file is unavailable as a regular file") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def required_identity(value: Any, label: str) -> str:
@@ -212,12 +249,180 @@ def read_call(argv: list[str], build: dict[str, Any]) -> dict[str, Any]:
         raise ProviderError("typed application call is invalid JSON") from error
     arguments = call.get("arguments") if isinstance(call, dict) else None
     expected = build["entry"]["interface"]["signature"]["inputs"]
-    if (not isinstance(call, dict) or set(call) != {"arguments"}
+    if (not isinstance(call, dict)
+            or set(call) not in ({"arguments"}, {"arguments", "capability_providers"})
             or not isinstance(arguments, list) or len(arguments) != len(expected)):
         raise ProviderError("typed application call does not match the selected callable arity")
     if canonical != encoded:
         raise ProviderError("typed application call JSON is not canonical")
+    providers = call.get("capability_providers", [])
+    if not isinstance(providers, list) or len(providers) > 1:
+        raise ProviderError("native application execution accepts at most one bounded capability provider")
+    for provider in providers:
+        if (not isinstance(provider, dict)
+                or set(provider) != {
+                    "schema_version", "capability_identity", "input_schema",
+                    "input_value", "output_schema",
+                }
+                or provider.get("schema_version") != FORGE_STRUCTURED_PROVIDER_SCHEMA
+                or not isinstance(provider.get("capability_identity"), str)
+                or not provider["capability_identity"].strip()
+                or len(provider["capability_identity"]) > 1024
+                or not isinstance(provider.get("input_schema"), str)
+                or not provider["input_schema"].strip()
+                or len(provider["input_schema"]) > 128
+                or not isinstance(provider.get("output_schema"), str)
+                or not provider["output_schema"].strip()
+                or len(provider["output_schema"]) > 128
+                or not isinstance(provider.get("input_value"), dict)):
+            raise ProviderError("structured-file capability provider manifest is invalid")
+        if len(json_bytes(provider["input_value"])) > MAX_CAPABILITY_PROVIDER_INPUT_BYTES:
+            raise ProviderError("structured-file capability input exceeds its 2 MiB bound")
     return call
+
+
+def capability_provider_binding(
+    provider: dict[str, Any], build: dict[str, Any], invocation_root: Path,
+    arguments: list[Any],
+) -> tuple[list[Any], str, Path, dict[str, Any]]:
+    """Stage one typed request and bind it to the verified application capability."""
+    capability = provider["capability_identity"]
+    artifact = build["artifact"]["value"]
+    requirements = artifact.get("requirements")
+    required = requirements.get("capabilities") if isinstance(requirements, dict) else None
+    if not isinstance(required, list) or capability not in required:
+        raise ProviderError("structured-file provider identity is absent from the admitted artifact")
+    dispatch = build.get("capability_dispatch", {}).get("bindings", [])
+    rows = [row for row in dispatch if isinstance(row, dict)
+            and row.get("capability_identity") == capability]
+    aliases = {row.get("runtime_capability_key") for row in rows
+               if isinstance(row.get("runtime_capability_key"), str)}
+    operations = [row.get("operation") for row in rows]
+    if (len(rows) != 2 or len(aliases) != 1
+            or any(row.get("runtime_key_kind") != "source-alias" for row in rows)
+            or set(operations) != {"structured_read", "structured_write"}):
+        raise ProviderError("Compiler capability dispatch does not verify one read/write alias")
+    alias = next(iter(aliases))
+    if (not alias or len(alias) > 128
+            or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+                   for char in alias)):
+        raise ProviderError("Compiler capability dispatch alias is malformed")
+
+    interface = build["entry"]["interface"]
+    type_rows = interface.get("types", {}).get("records", [])
+    app_context = next((row for row in type_rows if isinstance(row, dict)
+                        and row.get("name") == "ApplicationContext"), None)
+    if not isinstance(app_context, dict) or not isinstance(app_context.get("identity"), str):
+        raise ProviderError("structured-file provider requires the verified ApplicationContext record")
+    signature_inputs = interface.get("signature", {}).get("inputs", [])
+    if (not isinstance(signature_inputs, list) or len(signature_inputs) != 1
+            or not isinstance(signature_inputs[0], dict)
+            or signature_inputs[0].get("type") != app_context["identity"]):
+        raise ProviderError("structured-file provider callable must accept verified ApplicationContext")
+    if len(arguments) != 1 or not isinstance(arguments[0], dict):
+        raise ProviderError("structured-file provider requires one typed ApplicationContext argument")
+    record = arguments[0].get("record")
+    if (not isinstance(record, dict) or record.get("name") != "ApplicationContext"
+            or record.get("type_identity") != app_context["identity"]
+            or not isinstance(record.get("fields"), list)):
+        raise ProviderError("typed call does not contain the verified ApplicationContext record")
+    fields: dict[str, Any] = {}
+    for row in record["fields"]:
+        if (not isinstance(row, list) or len(row) != 2 or not isinstance(row[0], str)
+                or row[0] in fields):
+            raise ProviderError("ApplicationContext fields are malformed or duplicated")
+        fields[row[0]] = row[1]
+    argv_value = fields.get("argv")
+    argv_entries = argv_value.get("sequence", {}).get("values") if isinstance(argv_value, dict) else None
+    if not isinstance(argv_entries, list) or len(argv_entries) != 2:
+        raise ProviderError("ApplicationContext argv must name one request and one result file")
+    argv_count_field = fields.get("argv_count")
+    argv_count = argv_count_field.get("integer") if isinstance(argv_count_field, dict) else None
+    if (not isinstance(argv_count, dict) or argv_count.get("value") != 2
+            or argv_count.get("type") != {"bits": 64, "signed": False}):
+        raise ProviderError("ApplicationContext argv_count must match its two provider paths")
+
+    names: list[str] = []
+    for value in argv_entries:
+        sequence = value.get("sequence", {}).get("values") if isinstance(value, dict) else None
+        if not isinstance(sequence, list):
+            raise ProviderError("ApplicationContext provider paths must be byte sequences")
+        try:
+            path_bytes: list[int] = []
+            for item in sequence:
+                byte_row = item.get("byte") if isinstance(item, dict) else None
+                byte = byte_row.get("value") if isinstance(byte_row, dict) else None
+                if type(byte) is not int or not 0 <= byte <= 255:
+                    raise ValueError("path contains a non-byte value")
+                path_bytes.append(byte)
+            path_text = bytes(path_bytes).decode("utf-8")
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError) as error:
+            raise ProviderError("ApplicationContext provider path is not valid UTF-8 bytes") from error
+        path = Path(path_text)
+        if (path.is_absolute() or len(path.parts) != 1 or path.name in {"", ".", ".."}
+                or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+                       for char in path.name)
+                or len(path.name) > 64):
+            raise ProviderError("ApplicationContext provider paths must be safe file names")
+        names.append(path.name)
+    if names[0] == names[1]:
+        raise ProviderError("ApplicationContext request and result paths must differ")
+
+    provider_root = invocation_root / "capability-0"
+    provider_root.mkdir(mode=0o700)
+    input_path = provider_root / names[0]
+    output_path = provider_root / names[1]
+    if any(len(str(path).encode("utf-8")) > 1024 for path in (input_path, output_path, provider_root)):
+        raise ProviderError("private capability paths exceed the verified ApplicationContext bounds")
+    input_bytes = json_bytes(provider["input_value"])
+    if len(input_bytes) > MAX_CAPABILITY_PROVIDER_INPUT_BYTES:
+        raise ProviderError("structured-file capability input exceeds its 2 MiB bound")
+    descriptor = os.open(
+        input_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600,
+    )
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(input_bytes)
+        stream.flush()
+        os.fsync(stream.fileno())
+    config_path = provider_root / "provider.json"
+    provider_config = {
+        "schema_version": VM_STRUCTURED_PROVIDER_SCHEMA,
+        "identity": "mncs-forge.native-application.structured-file/1",
+        "read": {"path": str(input_path), "schema": provider["input_schema"]},
+        "write": {"path": str(output_path), "schema": provider["output_schema"]},
+        "max_input_bytes": MAX_CAPABILITY_PROVIDER_INPUT_BYTES,
+        "max_output_bytes": MAX_CAPABILITY_PROVIDER_OUTPUT_BYTES,
+    }
+    config_bytes = json_bytes(provider_config)
+    descriptor = os.open(
+        config_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600,
+    )
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(config_bytes)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+    mapped = json.loads(json.dumps(arguments))
+    mapped_record = mapped[0]["record"]
+    new_argv = {"sequence": {"values": [
+        {"sequence": {"values": [{"byte": {"value": byte}} for byte in str(path).encode("utf-8")]}}
+        for path in (input_path, output_path)
+    ]}}
+    mapped_fields = {row[0]: row for row in mapped_record["fields"]}
+    mapped_fields["argv"][1] = new_argv
+    if "current_dir" in mapped_fields:
+        mapped_fields["current_dir"][1] = {
+            "sequence": {"values": [{"byte": {"value": byte}}
+                                      for byte in str(provider_root).encode("utf-8")]}
+        }
+    return mapped, alias, config_path, {
+        "capability_identity": capability,
+        "runtime_dispatch_alias": alias,
+        "input_schema": provider["input_schema"],
+        "output_schema": provider["output_schema"],
+        "input_sha256": hashlib.sha256(input_bytes).hexdigest(),
+        "output_path": output_path,
+    }
 
 
 def selected_runtime() -> dict[str, Any]:
@@ -375,10 +580,13 @@ def main(argv: list[str] | None = None) -> int:
             "interface_identity": build["entry"]["interface"]["identity"],
             "entry": {"module": entry["module"], "function": entry["function"]},
         }
-        call_identity = "sha256:" + canonical_sha256({
+        call_identity_payload = {
             "application": application_identity,
             "arguments": call["arguments"],
-        })
+        }
+        if call.get("capability_providers"):
+            call_identity_payload["capability_providers"] = call["capability_providers"]
+        call_identity = "sha256:" + canonical_sha256(call_identity_payload)
         subject_identity = "sha256:" + canonical_sha256({
             "schema_version": "mncs.forge.native-application-subject/1",
             "application": application_identity,
@@ -422,20 +630,32 @@ def main(argv: list[str] | None = None) -> int:
         arguments_path = invocation_root / "arguments.json"
         type_arguments_path = invocation_root / "type-arguments.json"
         artifact_path.write_bytes(json_bytes(artifact["value"]))
-        arguments_path.write_bytes(json_bytes(call["arguments"]))
+        execution_arguments = call["arguments"]
+        provider_bindings: list[str] = []
+        provider_outputs: list[dict[str, Any]] = []
+        for provider in call.get("capability_providers", []):
+            execution_arguments, alias, provider_path, output_binding = capability_provider_binding(
+                provider, build, invocation_root, execution_arguments,
+            )
+            provider_bindings.append(f"{alias}={provider_path}")
+            provider_outputs.append(output_binding)
+        arguments_path.write_bytes(json_bytes(execution_arguments))
         type_arguments_path.write_bytes(b"[]")
         callable_name = f"{entry['module']}::{entry['function']}"
         workflow = config.workflows["compiler-vm-work"]
         child_environment = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ}
+        vm_task_command = [
+            sys.executable, str(ROOT / "scripts" / "native_application_vm_task.py"),
+            "--vm", os.environ["MNCS_VM_BIN"], "--artifact", str(artifact_path),
+            "--arguments", str(arguments_path), "--type-arguments", str(type_arguments_path),
+            "--callable", callable_name,
+            "--expected-artifact-identity", artifact["identity"],
+        ]
+        for binding in provider_bindings:
+            vm_task_command.extend(["--provider", binding])
         config.workflows["compiler-vm-work"] = dataclasses.replace(
             workflow,
-            command=[
-                sys.executable, str(ROOT / "scripts" / "native_application_vm_task.py"),
-                "--vm", os.environ["MNCS_VM_BIN"], "--artifact", str(artifact_path),
-                "--arguments", str(arguments_path), "--type-arguments", str(type_arguments_path),
-                "--callable", callable_name,
-                "--expected-artifact-identity", artifact["identity"],
-            ],
+            command=vm_task_command,
             environment=child_environment,
         )
         run_result = forge.development_checks_run(["compiler-vm-work"])
@@ -466,6 +686,32 @@ def main(argv: list[str] | None = None) -> int:
                 or not isinstance(execution, dict)
                 or execution.get("record", {}).get("artifact_id") != artifact["identity"]):
             raise ProviderError("Forge witness does not match the selected app, call, and artifact")
+        if provider_outputs:
+            effect_rows = execution.get("record", {}).get("effects", [])
+            effect_operations = [row.get("request", {}).get("operation")
+                                 for row in effect_rows if isinstance(row, dict)]
+            effect_outcomes = [row.get("outcome_tag") for row in effect_rows
+                               if isinstance(row, dict)]
+            if (effect_operations != ["structured_read", "structured_write"]
+                    or effect_outcomes != ["completed", "completed"]):
+                raise ProviderError("Forge witness does not prove completed read/write capability effects")
+        completed_provider_outputs: list[dict[str, Any]] = []
+        for output_binding in provider_outputs:
+            output_path = output_binding.pop("output_path")
+            output_bytes = read_bounded_regular_file(
+                output_path,
+                byte_limit=MAX_CAPABILITY_PROVIDER_OUTPUT_BYTES,
+                label="structured-write output",
+            )
+            try:
+                typed_value = json.loads(output_bytes)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ProviderError("structured-write output is not typed ExecutionValue JSON") from error
+            if not isinstance(typed_value, dict):
+                raise ProviderError("structured-write output is not a typed value")
+            output_binding["value"] = typed_value
+            output_binding["output_sha256"] = hashlib.sha256(output_bytes).hexdigest()
+            completed_provider_outputs.append(output_binding)
         binding, receipt = receipt_from_forge(forge)
         receipt_subject = receipt.get("subject")
         if (not isinstance(receipt_subject, dict)
@@ -473,7 +719,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ProviderError("Forge execution receipt subject differs from the selected app call")
         local = receipt["extensions"]["forge:local-process"]
         result_document = {
-            "schema_version": "mncs.forge.native-application-execution/1",
+            "schema_version": (
+                EXECUTION_WITH_CAPABILITY_OUTPUTS_SCHEMA
+                if completed_provider_outputs else EXECUTION_SCHEMA
+            ),
             "capability": CAPABILITY,
             "status": "completed",
             "call_identity": call_identity,
@@ -490,6 +739,8 @@ def main(argv: list[str] | None = None) -> int:
             },
             "limitations": results[0].get("limitations", []),
         }
+        if completed_provider_outputs:
+            result_document["capability_outputs"] = completed_provider_outputs
         write_output(output, SUCCESS_FILES[0], result_document)
         write_output(output, SUCCESS_FILES[1], receipt)
         print(json.dumps({

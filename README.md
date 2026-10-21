@@ -78,6 +78,7 @@ minimal controlled workflow.
 - [CLI and MCP interfaces](docs/interfaces.md)
 - [Canonical operation registry](docs/operation-registry.md)
 - [Provider Protocol integration](docs/provider-protocol.md)
+- [Native application execution](docs/native-application-execution.md)
 - [Machine-native micro-verifiers](docs/micro-verifiers.md)
 - [Continuous development supervision](docs/continuous-development.md)
 - [Query-driven micro-debugging](docs/micro-debugging.md)

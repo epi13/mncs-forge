@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--type-arguments", required=True)
     parser.add_argument("--callable", required=True)
     parser.add_argument("--expected-artifact-identity", required=True)
+    parser.add_argument("--provider", action="append", default=[])
     args = parser.parse_args(argv)
     try:
         vm = Path(args.vm).resolve(strict=True)
@@ -54,14 +55,28 @@ def main(argv: list[str] | None = None) -> int:
         if (not vm.is_file() or not artifact.is_file() or not arguments.is_file()
                 or not type_arguments.is_file()):
             raise RuntimeError("selected VM, artifact, or typed arguments are unavailable")
+        providers: list[tuple[str, Path]] = []
+        seen: set[str] = set()
+        for binding in args.provider:
+            capability, separator, raw_path = binding.partition("=")
+            if (not separator or not capability or capability in seen or not raw_path):
+                raise RuntimeError("structured-file provider binding is malformed or duplicated")
+            provider_path = Path(raw_path).resolve(strict=True)
+            if not provider_path.is_file():
+                raise RuntimeError("structured-file provider configuration is unavailable")
+            seen.add(capability)
+            providers.append((capability, provider_path))
         admitted, _ = run([str(vm), "admit", "--artifact", str(artifact)], timeout=10)
         if (admitted.get("status") != "admitted"
                 or admitted.get("artifact_id") != args.expected_artifact_identity):
             raise RuntimeError("canonical VM refused or changed the Compiler artifact identity")
-        document, stderr = run([
+        vm_argv = [
             str(vm), "run", "--artifact", str(artifact), "--callable", args.callable,
             "--args", str(arguments), "--type-args", str(type_arguments),
-        ], timeout=40)
+        ]
+        for capability, provider_path in providers:
+            vm_argv.extend(["--provider", f"{capability}={provider_path}"])
+        document, stderr = run(vm_argv, timeout=40)
         outcome = document.get("outcome")
         record = document.get("record")
         returned = record.get("returned") if isinstance(record, dict) else None

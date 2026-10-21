@@ -81,6 +81,131 @@ def test_typed_call_is_canonical_bounded_and_matches_callable_arity() -> None:
         provider.read_call(["--call-json", "x" * (32 * 1024 + 1)], build)
 
 
+def test_structured_file_provider_is_bound_to_verified_application_capability(
+    tmp_path: Path,
+) -> None:
+    build = verified_build()
+    capability = "mncs:0.2:capability:mncs.test.digest::digest_app::test_artifact"
+    context_identity = "mncs:0.2:record-type:mncs.std.application.v1::ApplicationContext"
+    build["artifact"]["value"]["requirements"] = {"capabilities": [capability]}
+    build["capability_dispatch"]["bindings"] = [
+        {"capability_identity": capability, "runtime_key_kind": "source-alias",
+         "runtime_capability_key": "test_artifact", "operation": operation}
+        for operation in ("structured_read", "structured_write")
+    ]
+    build["entry"]["interface"]["types"]["records"] = [
+        {"name": "ApplicationContext", "identity": context_identity},
+    ]
+    build["entry"]["interface"]["signature"]["inputs"] = [
+        {"name": "context", "type": context_identity},
+    ]
+
+    def bytes_value(value: str) -> dict:
+        return {"sequence": {"values": [
+            {"byte": {"value": byte}} for byte in value.encode("utf-8")
+        ]}}
+
+    context = {"record": {
+        "name": "ApplicationContext", "type_identity": context_identity,
+        "fields": [
+            ["application_identity", bytes_value("x" * 32)],
+            ["argv", {"sequence": {"values": [
+                bytes_value("request.json"), bytes_value("result.json"),
+            ]}}],
+            ["argv_count", {"integer": {
+                "type": {"bits": 64, "signed": False}, "value": 2,
+            }}],
+            ["current_dir", bytes_value(".")],
+        ],
+    }}
+    input_value = {"record": {"name": "Request", "fields": []}}
+    provider_input = {
+        "schema_version": provider.FORGE_STRUCTURED_PROVIDER_SCHEMA,
+        "capability_identity": capability,
+        "input_schema": "mncs.test.request/1",
+        "input_value": input_value,
+        "output_schema": "mncs.test.result/1",
+    }
+    call = {"arguments": [context], "capability_providers": [provider_input]}
+    encoded = json.dumps(call, sort_keys=True, separators=(",", ":"))
+    parsed = provider.read_call(["--call-json", encoded], build)
+    mapped, alias, config_path, output = provider.capability_provider_binding(
+        parsed["capability_providers"][0], build, tmp_path, parsed["arguments"],
+    )
+    assert alias == "test_artifact"
+    assert json.loads(config_path.read_text()) == {
+        "schema_version": "mncs.vm.structured-file-provider/1",
+        "identity": "mncs-forge.native-application.structured-file/1",
+        "read": {"path": str(tmp_path / "capability-0" / "request.json"),
+                 "schema": "mncs.test.request/1"},
+        "write": {"path": str(tmp_path / "capability-0" / "result.json"),
+                  "schema": "mncs.test.result/1"},
+        "max_input_bytes": 2 * 1024 * 1024,
+        "max_output_bytes": 256 * 1024,
+    }
+    staged_input = tmp_path / "capability-0" / "request.json"
+    assert json.loads(staged_input.read_text()) == input_value
+    mapped_fields = {row[0]: row[1] for row in mapped[0]["record"]["fields"]}
+    assert mapped_fields["argv"]["sequence"]["values"] == [
+        bytes_value(str(staged_input)),
+        bytes_value(str(tmp_path / "capability-0" / "result.json")),
+    ]
+    assert output["capability_identity"] == capability
+    assert output["output_schema"] == "mncs.test.result/1"
+
+    duplicate_dispatch = json.loads(json.dumps(build))
+    duplicate_dispatch["capability_dispatch"]["bindings"].append(
+        duplicate_dispatch["capability_dispatch"]["bindings"][0]
+    )
+    with pytest.raises(provider.ProviderError, match="does not verify one read/write alias"):
+        provider.capability_provider_binding(
+            call["capability_providers"][0], duplicate_dispatch,
+            tmp_path / "duplicate-dispatch", parsed["arguments"],
+        )
+
+    provider_input["capability_identity"] += ":wrong"
+    mismatched = {"arguments": [context], "capability_providers": [provider_input]}
+    encoded = json.dumps(mismatched, sort_keys=True, separators=(",", ":"))
+    parsed = provider.read_call(["--call-json", encoded], build)
+    with pytest.raises(provider.ProviderError, match="absent from the admitted artifact"):
+        provider.capability_provider_binding(
+            parsed["capability_providers"][0], build, tmp_path / "mismatch", parsed["arguments"],
+        )
+
+
+def test_structured_provider_output_read_is_bounded_regular_and_no_follow(
+    tmp_path: Path,
+) -> None:
+    regular = tmp_path / "result.json"
+    regular.write_bytes(b'{"integer":{"value":1}}')
+    assert provider.read_bounded_regular_file(
+        regular, byte_limit=64, label="structured-write output",
+    ) == b'{"integer":{"value":1}}'
+
+    oversized = tmp_path / "oversized.json"
+    oversized.write_bytes(b"x" * 65)
+    with pytest.raises(provider.ProviderError, match="exceeds its 64-byte bound"):
+        provider.read_bounded_regular_file(
+            oversized, byte_limit=64, label="structured-write output",
+        )
+
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    with pytest.raises(provider.ProviderError, match="not a regular file"):
+        provider.read_bounded_regular_file(
+            directory, byte_limit=64, label="structured-write output",
+        )
+
+    target = tmp_path / "target.json"
+    target.write_bytes(b"{}")
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+    with pytest.raises(provider.ProviderError, match="unavailable as a regular file"):
+        provider.read_bounded_regular_file(
+            link, byte_limit=64, label="structured-write output",
+        )
+
+
 def test_store_build_input_bytes_are_bound_to_the_environment_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -173,6 +298,40 @@ def test_vm_task_preserves_structured_result_and_rejects_unsupported_outcome(
     ])
     assert task.main(task_args) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "FAIL"
+
+
+def test_vm_task_passes_explicit_provider_bindings_to_canonical_vm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    vm = tmp_path / "mncs-vm"
+    artifact = tmp_path / "artifact.json"
+    arguments = tmp_path / "arguments.json"
+    type_arguments = tmp_path / "type-arguments.json"
+    provider_config = tmp_path / "provider.json"
+    for path in (vm, artifact, arguments, type_arguments, provider_config):
+        path.write_text("{}")
+    commands: list[list[str]] = []
+    completed = {"outcome": {"kind": "completed"}, "record": {
+        "artifact_id": IDENTITY, "returned": [{"integer": {"value": 4}}],
+        "usage": {"steps": 12},
+    }}
+
+    def fake_run(argv, **_kwargs):
+        commands.append(argv)
+        document = {"status": "admitted", "artifact_id": IDENTITY} if argv[1] == "admit" else completed
+        return SimpleNamespace(returncode=0, stdout=json.dumps(document), stderr="")
+
+    monkeypatch.setattr(task.subprocess, "run", fake_run)
+    task_args = [
+        "--vm", str(vm), "--artifact", str(artifact), "--arguments", str(arguments),
+        "--type-arguments", str(type_arguments), "--callable", "tests.native_readiness::run",
+        "--expected-artifact-identity", IDENTITY,
+        "--provider", f"test_artifact={provider_config}",
+    ]
+    assert task.main(task_args) == 0
+    capsys.readouterr()
+    vm_run = commands[1]
+    assert vm_run[-2:] == ["--provider", f"test_artifact={provider_config.resolve()}"]
 
 
 def test_failed_reexecution_cannot_retain_an_old_success_artifact(tmp_path: Path) -> None:
