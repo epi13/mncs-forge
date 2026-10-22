@@ -14,7 +14,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import native_application_execution_provider as provider  # noqa: E402
 import native_application_vm_task as task  # noqa: E402
 
-
 IDENTITY = "sha256:" + "a" * 64
 
 
@@ -76,7 +75,10 @@ def test_typed_call_is_canonical_bounded_and_matches_callable_arity() -> None:
     with pytest.raises(provider.ProviderError, match="arity"):
         provider.read_call(["--call-json", '{"arguments":[]}'], build)
     with pytest.raises(provider.ProviderError, match="canonical"):
-        provider.read_call(["--call-json", '{ "arguments": [{"record": {"name":"Request","fields":[]}}] }'], build)
+        provider.read_call(
+            ["--call-json", '{ "arguments": [{"record": {"name":"Request","fields":[]}}] }'],
+            build,
+        )
     with pytest.raises(provider.ProviderError, match="32 KiB"):
         provider.read_call(["--call-json", "x" * (32 * 1024 + 1)], build)
 
@@ -288,7 +290,9 @@ def test_vm_task_preserves_structured_result_and_rejects_unsupported_outcome(
         "--expected-artifact-identity", artifact_id,
     ]
     assert task.main(task_args) == 0
-    assert json.loads(capsys.readouterr().out)["witnesses"][0]["execution"] == completed
+    success = capsys.readouterr()
+    assert json.loads(success.out)["witnesses"][0]["execution"] == completed
+    assert success.err == ""
 
     unsupported = {"outcome": {"kind": "unsupported"}, "record": {
         "artifact_id": artifact_id, "returned": [], "usage": {"steps": 1},
@@ -297,7 +301,10 @@ def test_vm_task_preserves_structured_result_and_rejects_unsupported_outcome(
         {"status": "admitted", "artifact_id": artifact_id}, unsupported,
     ])
     assert task.main(task_args) == 1
-    assert json.loads(capsys.readouterr().out)["status"] == "FAIL"
+    failure = capsys.readouterr()
+    assert json.loads(failure.out)["status"] == "FAIL"
+    diagnostic = json.loads(failure.err)
+    assert diagnostic["limitations"][0].startswith("native application did not complete")
 
 
 def test_vm_task_passes_explicit_provider_bindings_to_canonical_vm(
@@ -318,7 +325,11 @@ def test_vm_task_passes_explicit_provider_bindings_to_canonical_vm(
 
     def fake_run(argv, **_kwargs):
         commands.append(argv)
-        document = {"status": "admitted", "artifact_id": IDENTITY} if argv[1] == "admit" else completed
+        document = (
+            {"status": "admitted", "artifact_id": IDENTITY}
+            if argv[1] == "admit"
+            else completed
+        )
         return SimpleNamespace(returncode=0, stdout=json.dumps(document), stderr="")
 
     monkeypatch.setattr(task.subprocess, "run", fake_run)

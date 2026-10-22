@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -76,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         ]
         for capability, provider_path in providers:
             vm_argv.extend(["--provider", f"{capability}={provider_path}"])
-        document, stderr = run(vm_argv, timeout=40)
+        document, _stderr = run(vm_argv, timeout=40)
         outcome = document.get("outcome")
         record = document.get("record")
         returned = record.get("returned") if isinstance(record, dict) else None
@@ -89,7 +90,9 @@ def main(argv: list[str] | None = None) -> int:
                 or record.get("artifact_id") != args.expected_artifact_identity
                 or not isinstance(returned, list) or len(returned) != 1
                 or type(record.get("usage", {}).get("steps")) is not int):
-            raise RuntimeError("VM result did not preserve the selected artifact and one typed return")
+            raise RuntimeError(
+                "VM result did not preserve the selected artifact and one typed return"
+            )
         witness = {
             "schema_version": "mncs.forge.native-application-vm-witness/1",
             "callable": args.callable,
@@ -114,7 +117,11 @@ def main(argv: list[str] | None = None) -> int:
             "witnesses": [],
             "limitations": [str(error)[:1024]],
         }
-        print(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        encoded = json.dumps(
+            report, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        print(encoded)
+        print(encoded, file=sys.stderr)
         return 1
 
 
