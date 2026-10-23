@@ -32,16 +32,24 @@ from mncs_forge.resource_envelope import SystemdCgroupEnvelope  # noqa: E402
 
 CAPABILITY = "mncs-forge:native-application-execution"
 INPUT_SCHEMA = "mncs.environment.provider-input-artifacts/1"
-BUILD_SCHEMA = "mncs.compiler.application-build/4"
+BUILD_SCHEMAS = {
+    "mncs.compiler.application-build/4",
+    "mncs.compiler.application-build/11",
+}
 VM_ARTIFACT_SCHEMA = "mncs.vm.artifact/1"
 CALL_LIMIT_BYTES = 32 * 1024
 BUILD_INPUT_LIMIT_BYTES = 2 * 1024 * 1024
 VM_STRUCTURED_PROVIDER_SCHEMA = "mncs.vm.structured-file-provider/1"
+VM_STRUCTURED_PROVIDER_MULTI_OUTPUT_SCHEMA = "mncs.vm.structured-file-provider/2"
 FORGE_STRUCTURED_PROVIDER_SCHEMA = "mncs.forge.structured-file-capability/1"
+FORGE_STRUCTURED_PROVIDER_MULTI_OUTPUT_SCHEMA = "mncs.forge.structured-file-capability/2"
+VM_STRUCTURED_DIGEST_PROVIDER_SCHEMA = "mncs.vm.structured-digest-provider/1"
+FORGE_STRUCTURED_DIGEST_PROVIDER_SCHEMA = "mncs.forge.structured-digest-capability/1"
 MAX_CAPABILITY_PROVIDER_INPUT_BYTES = 2 * 1024 * 1024
 MAX_CAPABILITY_PROVIDER_OUTPUT_BYTES = 256 * 1024
 EXECUTION_SCHEMA = "mncs.forge.native-application-execution/1"
 EXECUTION_WITH_CAPABILITY_OUTPUTS_SCHEMA = "mncs.forge.native-application-execution/2"
+EXECUTION_WITH_CAPABILITY_EFFECTS_SCHEMA = "mncs.forge.native-application-execution/3"
 RESOURCE_ENVELOPE = {
     "memory_max_bytes": 512 * 1024 * 1024,
     "memory_cap_bytes": 512 * 1024 * 1024,
@@ -185,8 +193,8 @@ def input_build() -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def validate_build(build: dict[str, Any]) -> None:
-    if build.get("schema_version") != BUILD_SCHEMA or build.get("status") != "verified":
-        raise ProviderError("Compiler did not provide a verified application-build/4 result")
+    if build.get("schema_version") not in BUILD_SCHEMAS or build.get("status") != "verified":
+        raise ProviderError("Compiler did not provide a supported verified application-build result")
     entry = build.get("entry")
     interface = entry.get("interface") if isinstance(entry, dict) else None
     artifact = build.get("artifact")
@@ -256,28 +264,51 @@ def read_call(argv: list[str], build: dict[str, Any]) -> dict[str, Any]:
     if canonical != encoded:
         raise ProviderError("typed application call JSON is not canonical")
     providers = call.get("capability_providers", [])
-    if not isinstance(providers, list) or len(providers) > 1:
-        raise ProviderError("native application execution accepts at most one bounded capability provider")
+    if not isinstance(providers, list) or len(providers) > 2:
+        raise ProviderError("native application execution accepts at most two bounded capability providers")
+    provider_identities: set[str] = set()
     for provider in providers:
-        if (not isinstance(provider, dict)
-                or set(provider) != {
-                    "schema_version", "capability_identity", "input_schema",
-                    "input_value", "output_schema",
-                }
-                or provider.get("schema_version") != FORGE_STRUCTURED_PROVIDER_SCHEMA
-                or not isinstance(provider.get("capability_identity"), str)
-                or not provider["capability_identity"].strip()
-                or len(provider["capability_identity"]) > 1024
-                or not isinstance(provider.get("input_schema"), str)
-                or not provider["input_schema"].strip()
-                or len(provider["input_schema"]) > 128
-                or not isinstance(provider.get("output_schema"), str)
-                or not provider["output_schema"].strip()
-                or len(provider["output_schema"]) > 128
-                or not isinstance(provider.get("input_value"), dict)):
-            raise ProviderError("structured-file capability provider manifest is invalid")
-        if len(json_bytes(provider["input_value"])) > MAX_CAPABILITY_PROVIDER_INPUT_BYTES:
-            raise ProviderError("structured-file capability input exceeds its 2 MiB bound")
+        if not isinstance(provider, dict):
+            raise ProviderError("capability provider manifest is invalid")
+        schema = provider.get("schema_version")
+        capability = provider.get("capability_identity")
+        if (not isinstance(capability, str) or not capability.strip()
+                or len(capability) > 1024 or capability in provider_identities):
+            raise ProviderError("capability provider identity is invalid or duplicated")
+        provider_identities.add(capability)
+        if schema in {
+            FORGE_STRUCTURED_PROVIDER_SCHEMA,
+            FORGE_STRUCTURED_PROVIDER_MULTI_OUTPUT_SCHEMA,
+        }:
+            expected_fields = (
+                {"schema_version", "capability_identity", "input_schema", "input_value", "output_schema"}
+                if schema == FORGE_STRUCTURED_PROVIDER_SCHEMA
+                else {"schema_version", "capability_identity", "input_schema", "input_value", "output_schemas"}
+            )
+            if (set(provider) != expected_fields
+                    or not isinstance(provider.get("input_schema"), str)
+                    or not provider["input_schema"].strip()
+                    or len(provider["input_schema"]) > 128
+                    or not isinstance(provider.get("input_value"), dict)):
+                raise ProviderError("structured-file capability provider manifest is invalid")
+            output_schemas = (
+                [provider["output_schema"]]
+                if schema == FORGE_STRUCTURED_PROVIDER_SCHEMA
+                else provider["output_schemas"]
+            )
+            if (not isinstance(output_schemas, list)
+                    or not 1 <= len(output_schemas) <= 4
+                    or any(not isinstance(item, str) or not item.strip() or len(item) > 128
+                           for item in output_schemas)
+                    or len(set(output_schemas)) != len(output_schemas)):
+                raise ProviderError("structured-file capability output schemas are invalid or duplicated")
+            if len(json_bytes(provider["input_value"])) > MAX_CAPABILITY_PROVIDER_INPUT_BYTES:
+                raise ProviderError("structured-file capability input exceeds its 2 MiB bound")
+        elif schema == FORGE_STRUCTURED_DIGEST_PROVIDER_SCHEMA:
+            if set(provider) != {"schema_version", "capability_identity"}:
+                raise ProviderError("structured-digest capability provider manifest is invalid")
+        else:
+            raise ProviderError("capability provider schema is unsupported")
     return call
 
 
@@ -285,7 +316,14 @@ def capability_provider_binding(
     provider: dict[str, Any], build: dict[str, Any], invocation_root: Path,
     arguments: list[Any],
 ) -> tuple[list[Any], str, Path, dict[str, Any]]:
-    """Stage one typed request and bind it to the verified application capability."""
+    """Stage a bounded provider configuration after verifying Compiler dispatch."""
+    if provider.get("schema_version") == FORGE_STRUCTURED_DIGEST_PROVIDER_SCHEMA:
+        return structured_digest_provider_binding(provider, build, invocation_root, arguments)
+    if provider.get("schema_version") not in {
+        FORGE_STRUCTURED_PROVIDER_SCHEMA,
+        FORGE_STRUCTURED_PROVIDER_MULTI_OUTPUT_SCHEMA,
+    }:
+        raise ProviderError("capability provider schema is unsupported")
     capability = provider["capability_identity"]
     artifact = build["artifact"]["value"]
     requirements = artifact.get("requirements")
@@ -298,9 +336,10 @@ def capability_provider_binding(
     aliases = {row.get("runtime_capability_key") for row in rows
                if isinstance(row.get("runtime_capability_key"), str)}
     operations = [row.get("operation") for row in rows]
-    if (len(rows) != 2 or len(aliases) != 1
+    if (len(rows) < 2 or len(aliases) != 1
             or any(row.get("runtime_key_kind") != "source-alias" for row in rows)
-            or set(operations) != {"structured_read", "structured_write"}):
+            or set(operations) != {"structured_read", "structured_write"}
+            or len({json_bytes(row) for row in rows}) != len(rows)):
         raise ProviderError("Compiler capability dispatch does not verify one read/write alias")
     alias = next(iter(aliases))
     if (not alias or len(alias) > 128
@@ -334,13 +373,19 @@ def capability_provider_binding(
         fields[row[0]] = row[1]
     argv_value = fields.get("argv")
     argv_entries = argv_value.get("sequence", {}).get("values") if isinstance(argv_value, dict) else None
-    if not isinstance(argv_entries, list) or len(argv_entries) != 2:
-        raise ProviderError("ApplicationContext argv must name one request and one result file")
+    output_schemas = (
+        [provider["output_schema"]]
+        if provider["schema_version"] == FORGE_STRUCTURED_PROVIDER_SCHEMA
+        else provider["output_schemas"]
+    )
+    expected_path_count = len(output_schemas) + 1
+    if not isinstance(argv_entries, list) or len(argv_entries) != expected_path_count:
+        raise ProviderError("ApplicationContext argv must match the request and declared result files")
     argv_count_field = fields.get("argv_count")
     argv_count = argv_count_field.get("integer") if isinstance(argv_count_field, dict) else None
-    if (not isinstance(argv_count, dict) or argv_count.get("value") != 2
+    if (not isinstance(argv_count, dict) or argv_count.get("value") != expected_path_count
             or argv_count.get("type") != {"bits": 64, "signed": False}):
-        raise ProviderError("ApplicationContext argv_count must match its two provider paths")
+        raise ProviderError("ApplicationContext argv_count must match its provider paths")
 
     names: list[str] = []
     for value in argv_entries:
@@ -365,14 +410,15 @@ def capability_provider_binding(
                 or len(path.name) > 64):
             raise ProviderError("ApplicationContext provider paths must be safe file names")
         names.append(path.name)
-    if names[0] == names[1]:
-        raise ProviderError("ApplicationContext request and result paths must differ")
+    if len(set(names)) != len(names):
+        raise ProviderError("ApplicationContext provider paths must be distinct")
 
     provider_root = invocation_root / "capability-0"
     provider_root.mkdir(mode=0o700)
     input_path = provider_root / names[0]
-    output_path = provider_root / names[1]
-    if any(len(str(path).encode("utf-8")) > 1024 for path in (input_path, output_path, provider_root)):
+    output_paths = [provider_root / name for name in names[1:]]
+    if any(len(str(path).encode("utf-8")) > 1024
+           for path in (input_path, *output_paths, provider_root)):
         raise ProviderError("private capability paths exceed the verified ApplicationContext bounds")
     input_bytes = json_bytes(provider["input_value"])
     if len(input_bytes) > MAX_CAPABILITY_PROVIDER_INPUT_BYTES:
@@ -385,14 +431,27 @@ def capability_provider_binding(
         stream.flush()
         os.fsync(stream.fileno())
     config_path = provider_root / "provider.json"
-    provider_config = {
-        "schema_version": VM_STRUCTURED_PROVIDER_SCHEMA,
-        "identity": "mncs-forge.native-application.structured-file/1",
-        "read": {"path": str(input_path), "schema": provider["input_schema"]},
-        "write": {"path": str(output_path), "schema": provider["output_schema"]},
-        "max_input_bytes": MAX_CAPABILITY_PROVIDER_INPUT_BYTES,
-        "max_output_bytes": MAX_CAPABILITY_PROVIDER_OUTPUT_BYTES,
-    }
+    if provider["schema_version"] == FORGE_STRUCTURED_PROVIDER_SCHEMA:
+        provider_config = {
+            "schema_version": VM_STRUCTURED_PROVIDER_SCHEMA,
+            "identity": "mncs-forge.native-application.structured-file/1",
+            "read": {"path": str(input_path), "schema": provider["input_schema"]},
+            "write": {"path": str(output_paths[0]), "schema": output_schemas[0]},
+            "max_input_bytes": MAX_CAPABILITY_PROVIDER_INPUT_BYTES,
+            "max_output_bytes": MAX_CAPABILITY_PROVIDER_OUTPUT_BYTES,
+        }
+    else:
+        provider_config = {
+            "schema_version": VM_STRUCTURED_PROVIDER_MULTI_OUTPUT_SCHEMA,
+            "identity": "mncs-forge.native-application.structured-file/2",
+            "read": {"path": str(input_path), "schema": provider["input_schema"]},
+            "writes": [
+                {"path": str(path), "schema": schema}
+                for path, schema in zip(output_paths, output_schemas)
+            ],
+            "max_input_bytes": MAX_CAPABILITY_PROVIDER_INPUT_BYTES,
+            "max_output_bytes": MAX_CAPABILITY_PROVIDER_OUTPUT_BYTES,
+        }
     config_bytes = json_bytes(provider_config)
     descriptor = os.open(
         config_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600,
@@ -406,7 +465,7 @@ def capability_provider_binding(
     mapped_record = mapped[0]["record"]
     new_argv = {"sequence": {"values": [
         {"sequence": {"values": [{"byte": {"value": byte}} for byte in str(path).encode("utf-8")]}}
-        for path in (input_path, output_path)
+        for path in (input_path, *output_paths)
     ]}}
     mapped_fields = {row[0]: row for row in mapped_record["fields"]}
     mapped_fields["argv"][1] = new_argv
@@ -418,10 +477,64 @@ def capability_provider_binding(
     return mapped, alias, config_path, {
         "capability_identity": capability,
         "runtime_dispatch_alias": alias,
+        "operations": ["structured_read", "structured_write"],
         "input_schema": provider["input_schema"],
-        "output_schema": provider["output_schema"],
+        "output_schemas": output_schemas,
         "input_sha256": hashlib.sha256(input_bytes).hexdigest(),
-        "output_path": output_path,
+        **({"output_schema": output_schemas[0], "output_path": output_paths[0]}
+           if provider["schema_version"] == FORGE_STRUCTURED_PROVIDER_SCHEMA
+           else {"output_paths": output_paths}),
+    }
+
+
+def structured_digest_provider_binding(
+    provider: dict[str, Any], build: dict[str, Any], invocation_root: Path,
+    arguments: list[Any],
+) -> tuple[list[Any], str, Path, dict[str, Any]]:
+    """Bind one digest alias to the exact verified artifact capability."""
+    capability = provider["capability_identity"]
+    artifact = build["artifact"]["value"]
+    requirements = artifact.get("requirements")
+    required = requirements.get("capabilities") if isinstance(requirements, dict) else None
+    if not isinstance(required, list) or capability not in required:
+        raise ProviderError("structured-digest provider identity is absent from the admitted artifact")
+    dispatch = build.get("capability_dispatch", {}).get("bindings", [])
+    rows = [row for row in dispatch if isinstance(row, dict)
+            and row.get("capability_identity") == capability]
+    aliases = {row.get("runtime_capability_key") for row in rows
+               if isinstance(row.get("runtime_capability_key"), str)}
+    if (not rows or len(aliases) != 1
+            or any(row.get("runtime_key_kind") != "source-alias" for row in rows)
+            or any(row.get("operation") != "structured_digest" for row in rows)
+            or len({json_bytes(row) for row in rows}) != len(rows)):
+        raise ProviderError("Compiler capability dispatch does not verify one digest alias")
+    alias = next(iter(aliases))
+    if (not alias or len(alias) > 128
+            or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+                   for char in alias)):
+        raise ProviderError("Compiler capability dispatch alias is malformed")
+    artifact_identity = build["artifact"].get("identity")
+    required_identity(artifact_identity, "artifact identity")
+    provider_root = invocation_root / "capability-digest"
+    provider_root.mkdir(mode=0o700)
+    config_path = provider_root / "provider.json"
+    provider_config = {
+        "schema_version": VM_STRUCTURED_DIGEST_PROVIDER_SCHEMA,
+        "identity": "mncs-forge.native-application.structured-digest/1",
+        "artifact_identity": artifact_identity,
+        "capability_identity": capability,
+    }
+    descriptor = os.open(
+        config_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600,
+    )
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(json_bytes(provider_config))
+        stream.flush()
+        os.fsync(stream.fileno())
+    return arguments, alias, config_path, {
+        "capability_identity": capability,
+        "runtime_dispatch_alias": alias,
+        "operations": ["structured_digest"],
     }
 
 
@@ -633,12 +746,19 @@ def main(argv: list[str] | None = None) -> int:
         execution_arguments = call["arguments"]
         provider_bindings: list[str] = []
         provider_outputs: list[dict[str, Any]] = []
+        provider_effect_bindings: list[dict[str, Any]] = []
+        provider_aliases: set[str] = set()
         for provider in call.get("capability_providers", []):
             execution_arguments, alias, provider_path, output_binding = capability_provider_binding(
                 provider, build, invocation_root, execution_arguments,
             )
+            if alias in provider_aliases:
+                raise ProviderError("two capability providers resolve to the same runtime alias")
+            provider_aliases.add(alias)
             provider_bindings.append(f"{alias}={provider_path}")
-            provider_outputs.append(output_binding)
+            provider_effect_bindings.append(output_binding)
+            if "output_path" in output_binding:
+                provider_outputs.append(output_binding)
         arguments_path.write_bytes(json_bytes(execution_arguments))
         type_arguments_path.write_bytes(b"[]")
         callable_name = f"{entry['module']}::{entry['function']}"
@@ -686,32 +806,62 @@ def main(argv: list[str] | None = None) -> int:
                 or not isinstance(execution, dict)
                 or execution.get("record", {}).get("artifact_id") != artifact["identity"]):
             raise ProviderError("Forge witness does not match the selected app, call, and artifact")
-        if provider_outputs:
+        if provider_effect_bindings:
             effect_rows = execution.get("record", {}).get("effects", [])
-            effect_operations = [row.get("request", {}).get("operation")
-                                 for row in effect_rows if isinstance(row, dict)]
-            effect_outcomes = [row.get("outcome_tag") for row in effect_rows
-                               if isinstance(row, dict)]
-            if (effect_operations != ["structured_read", "structured_write"]
-                    or effect_outcomes != ["completed", "completed"]):
-                raise ProviderError("Forge witness does not prove completed read/write capability effects")
+            observed_capability_effects: list[dict[str, Any]] = []
+            for binding in provider_effect_bindings:
+                alias = binding["runtime_dispatch_alias"]
+                expected_operations = set(binding["operations"])
+                rows = [row for row in effect_rows if isinstance(row, dict)
+                        and isinstance(row.get("request"), dict)
+                        and row["request"].get("capability") == alias]
+                observed_operations = {row["request"].get("operation") for row in rows}
+                if (not rows
+                        or not expected_operations.issubset(observed_operations)
+                        or any(operation not in expected_operations
+                               for operation in observed_operations)
+                        or any(row.get("outcome_tag") != "completed" for row in rows)):
+                    raise ProviderError(
+                        f"Forge witness does not prove completed admitted effects for alias {alias!r}"
+                    )
+                observed_capability_effects.append({
+                    "capability_identity": binding["capability_identity"],
+                    "runtime_dispatch_alias": alias,
+                    "completed_effect_count": len(rows),
+                    "operations": sorted({row["request"]["operation"] for row in rows}),
+                })
+        else:
+            observed_capability_effects = []
         completed_provider_outputs: list[dict[str, Any]] = []
         for output_binding in provider_outputs:
-            output_path = output_binding.pop("output_path")
-            output_bytes = read_bounded_regular_file(
-                output_path,
-                byte_limit=MAX_CAPABILITY_PROVIDER_OUTPUT_BYTES,
-                label="structured-write output",
+            output_paths = (
+                [output_binding.pop("output_path")]
+                if "output_path" in output_binding
+                else output_binding.pop("output_paths")
             )
-            try:
-                typed_value = json.loads(output_bytes)
-            except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise ProviderError("structured-write output is not typed ExecutionValue JSON") from error
-            if not isinstance(typed_value, dict):
-                raise ProviderError("structured-write output is not a typed value")
-            output_binding["value"] = typed_value
-            output_binding["output_sha256"] = hashlib.sha256(output_bytes).hexdigest()
-            completed_provider_outputs.append(output_binding)
+            output_schemas = output_binding["output_schemas"]
+            output_metadata = {
+                key: value for key, value in output_binding.items()
+                if key not in {"output_schemas", "output_schema"}
+            }
+            for output_path, output_schema in zip(output_paths, output_schemas):
+                output_bytes = read_bounded_regular_file(
+                    output_path,
+                    byte_limit=MAX_CAPABILITY_PROVIDER_OUTPUT_BYTES,
+                    label="structured-write output",
+                )
+                try:
+                    typed_value = json.loads(output_bytes)
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ProviderError("structured-write output is not typed ExecutionValue JSON") from error
+                if not isinstance(typed_value, dict):
+                    raise ProviderError("structured-write output is not a typed value")
+                completed_provider_outputs.append({
+                    **output_metadata,
+                    "output_schema": output_schema,
+                    "value": typed_value,
+                    "output_sha256": hashlib.sha256(output_bytes).hexdigest(),
+                })
         binding, receipt = receipt_from_forge(forge)
         receipt_subject = receipt.get("subject")
         if (not isinstance(receipt_subject, dict)
@@ -720,7 +870,10 @@ def main(argv: list[str] | None = None) -> int:
         local = receipt["extensions"]["forge:local-process"]
         result_document = {
             "schema_version": (
-                EXECUTION_WITH_CAPABILITY_OUTPUTS_SCHEMA
+                EXECUTION_WITH_CAPABILITY_EFFECTS_SCHEMA
+                if any("structured_digest" in binding["operations"]
+                       for binding in provider_effect_bindings)
+                else EXECUTION_WITH_CAPABILITY_OUTPUTS_SCHEMA
                 if completed_provider_outputs else EXECUTION_SCHEMA
             ),
             "capability": CAPABILITY,
@@ -741,6 +894,10 @@ def main(argv: list[str] | None = None) -> int:
         }
         if completed_provider_outputs:
             result_document["capability_outputs"] = completed_provider_outputs
+        if observed_capability_effects and any(
+                "structured_digest" in binding["operations"]
+                for binding in provider_effect_bindings):
+            result_document["capability_effects"] = observed_capability_effects
         write_output(output, SUCCESS_FILES[0], result_document)
         write_output(output, SUCCESS_FILES[1], receipt)
         print(json.dumps({
