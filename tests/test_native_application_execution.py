@@ -50,6 +50,10 @@ def verified_build() -> dict:
 def test_verified_build_requires_closed_vm_artifact_and_typed_interface() -> None:
     provider.validate_build(verified_build())
 
+    current = verified_build()
+    current["schema_version"] = "mncs.compiler.application-build/11"
+    provider.validate_build(current)
+
     bad = verified_build()
     bad["entry"]["interface"]["types"]["unresolved_references"] = ["Missing"]
     with pytest.raises(provider.ProviderError, match="unresolved"):
@@ -81,6 +85,47 @@ def test_typed_call_is_canonical_bounded_and_matches_callable_arity() -> None:
         )
     with pytest.raises(provider.ProviderError, match="32 KiB"):
         provider.read_call(["--call-json", "x" * (32 * 1024 + 1)], build)
+
+
+def test_typed_call_accepts_two_distinct_verified_capability_providers() -> None:
+    build = verified_build()
+    call = {
+        "arguments": [{"record": {"name": "Request", "fields": []}}],
+        "capability_providers": [
+            {
+                "schema_version": provider.FORGE_STRUCTURED_PROVIDER_SCHEMA,
+                "capability_identity": "mncs:capability:file",
+                "input_schema": "mncs.request/1",
+                "input_value": {"integer": {"value": 7}},
+                "output_schema": "mncs.response/1",
+            },
+            {
+                "schema_version": provider.FORGE_STRUCTURED_DIGEST_PROVIDER_SCHEMA,
+                "capability_identity": "mncs:capability:digest",
+            },
+        ],
+    }
+    encoded = json.dumps(call, sort_keys=True, separators=(",", ":"))
+    assert provider.read_call(["--call-json", encoded], build) == call
+
+    duplicate = json.loads(json.dumps(call))
+    duplicate["capability_providers"][1]["capability_identity"] = "mncs:capability:file"
+    with pytest.raises(provider.ProviderError, match="duplicated"):
+        provider.read_call(
+            ["--call-json", json.dumps(duplicate, sort_keys=True, separators=(",", ":"))],
+            build,
+        )
+
+    too_many = json.loads(json.dumps(call))
+    too_many["capability_providers"].append({
+        "schema_version": provider.FORGE_STRUCTURED_DIGEST_PROVIDER_SCHEMA,
+        "capability_identity": "mncs:capability:third",
+    })
+    with pytest.raises(provider.ProviderError, match="at most two"):
+        provider.read_call(
+            ["--call-json", json.dumps(too_many, sort_keys=True, separators=(",", ":"))],
+            build,
+        )
 
 
 def test_structured_file_provider_is_bound_to_verified_application_capability(
@@ -173,6 +218,149 @@ def test_structured_file_provider_is_bound_to_verified_application_capability(
         provider.capability_provider_binding(
             parsed["capability_providers"][0], build, tmp_path / "mismatch", parsed["arguments"],
         )
+
+
+def test_structured_digest_provider_is_bound_to_exact_artifact_and_source_capability(
+    tmp_path: Path,
+) -> None:
+    build = verified_build()
+    capability = "mncs:0.2:capability:mncs.test.provider::run_selected_batch::provider_digest"
+    alias = "provider_digest"
+    build["artifact"]["value"]["requirements"] = {"capabilities": [capability]}
+    build["capability_dispatch"]["bindings"] = [
+        {
+            "capability_identity": capability,
+            "runtime_key_kind": "source-alias",
+            "runtime_capability_key": alias,
+            "operation": "structured_digest",
+            "host_call_identity": "mncs:host-call:digest-1",
+        },
+        {
+            "capability_identity": capability,
+            "runtime_key_kind": "source-alias",
+            "runtime_capability_key": alias,
+            "operation": "structured_digest",
+            "host_call_identity": "mncs:host-call:digest-2",
+        },
+    ]
+    digest_input = {
+        "schema_version": provider.FORGE_STRUCTURED_DIGEST_PROVIDER_SCHEMA,
+        "capability_identity": capability,
+    }
+    arguments = [{"record": {"name": "Request", "fields": []}}]
+    mapped, bound_alias, config_path, binding = provider.capability_provider_binding(
+        digest_input, build, tmp_path, arguments,
+    )
+    assert mapped == arguments
+    assert bound_alias == alias
+    assert json.loads(config_path.read_text()) == {
+        "schema_version": "mncs.vm.structured-digest-provider/1",
+        "identity": "mncs-forge.native-application.structured-digest/1",
+        "artifact_identity": IDENTITY,
+        "capability_identity": capability,
+    }
+    assert binding["operations"] == ["structured_digest"]
+
+    wrong_operation = json.loads(json.dumps(build))
+    wrong_operation["capability_dispatch"]["bindings"][0]["operation"] = "structured_write"
+    with pytest.raises(provider.ProviderError, match="one digest alias"):
+        provider.capability_provider_binding(
+            digest_input, wrong_operation, tmp_path / "wrong-operation", arguments,
+        )
+
+    wrong_capability = dict(digest_input, capability_identity=capability + ":wrong")
+    with pytest.raises(provider.ProviderError, match="absent from the admitted artifact"):
+        provider.capability_provider_binding(
+            wrong_capability, build, tmp_path / "wrong-capability", arguments,
+        )
+
+
+def test_multi_output_structured_file_provider_binds_each_application_path(
+    tmp_path: Path,
+) -> None:
+    build = verified_build()
+    capability = "mncs:0.2:capability:mncs.test.provider::provider_batch_app::provider_artifact"
+    context_identity = "mncs:0.2:record-type:mncs.std.application.v1::ApplicationContext"
+    build["artifact"]["value"]["requirements"] = {"capabilities": [capability]}
+    build["capability_dispatch"]["bindings"] = [
+        {
+            "capability_identity": capability,
+            "runtime_key_kind": "source-alias",
+            "runtime_capability_key": "provider_artifact",
+            "operation": operation,
+            "host_call_identity": f"mncs:host-call:{index}",
+        }
+        for index, operation in enumerate((
+            "structured_read", "structured_write", "structured_write",
+        ))
+    ]
+    build["entry"]["interface"]["types"]["records"] = [
+        {"name": "ApplicationContext", "identity": context_identity},
+    ]
+    build["entry"]["interface"]["signature"]["inputs"] = [
+        {"name": "context", "type": context_identity},
+    ]
+
+    def bytes_value(value: str) -> dict:
+        return {"sequence": {"values": [
+            {"byte": {"value": byte}} for byte in value.encode("utf-8")
+        ]}}
+
+    names = ["request.json", "result.json", "check.json"]
+    context = {"record": {
+        "name": "ApplicationContext", "type_identity": context_identity,
+        "fields": [
+            ["application_identity", {"sequence": {"values": [
+                {"byte": {"value": 0}} for _ in range(32)
+            ]}}],
+            ["argv", {"sequence": {"values": [bytes_value(name) for name in names]}}],
+            ["argv_count", {"integer": {
+                "type": {"bits": 64, "signed": False}, "value": 3,
+            }}],
+            ["current_dir", bytes_value(".")],
+        ],
+    }}
+    provider_input = {
+        "schema_version": provider.FORGE_STRUCTURED_PROVIDER_MULTI_OUTPUT_SCHEMA,
+        "capability_identity": capability,
+        "input_schema": "mncs.test.provider-request/1",
+        "input_value": {"record": {"name": "ProviderRequest", "fields": []}},
+        "output_schemas": ["mncs.test.provider-result/1", "mncs.test.provider-check/1"],
+    }
+    arguments = [context]
+    mapped, alias, config_path, binding = provider.capability_provider_binding(
+        provider_input, build, tmp_path, arguments,
+    )
+    assert alias == "provider_artifact"
+    assert json.loads(config_path.read_text()) == {
+        "schema_version": "mncs.vm.structured-file-provider/2",
+        "identity": "mncs-forge.native-application.structured-file/2",
+        "read": {
+            "path": str(tmp_path / "capability-0" / "request.json"),
+            "schema": "mncs.test.provider-request/1",
+        },
+        "writes": [
+            {
+                "path": str(tmp_path / "capability-0" / "result.json"),
+                "schema": "mncs.test.provider-result/1",
+            },
+            {
+                "path": str(tmp_path / "capability-0" / "check.json"),
+                "schema": "mncs.test.provider-check/1",
+            },
+        ],
+        "max_input_bytes": 2 * 1024 * 1024,
+        "max_output_bytes": 256 * 1024,
+    }
+    mapped_fields = {row[0]: row[1] for row in mapped[0]["record"]["fields"]}
+    assert mapped_fields["argv"]["sequence"]["values"] == [
+        bytes_value(str(tmp_path / "capability-0" / name)) for name in names
+    ]
+    assert binding["operations"] == ["structured_read", "structured_write"]
+    assert binding["output_paths"] == [
+        tmp_path / "capability-0" / "result.json",
+        tmp_path / "capability-0" / "check.json",
+    ]
 
 
 def test_structured_provider_output_read_is_bounded_regular_and_no_follow(
