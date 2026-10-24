@@ -35,6 +35,7 @@ INPUT_SCHEMA = "mncs.environment.provider-input-artifacts/1"
 BUILD_SCHEMAS = {
     "mncs.compiler.application-build/4",
     "mncs.compiler.application-build/11",
+    "mncs.compiler.application-build/16",
 }
 VM_ARTIFACT_SCHEMA = "mncs.vm.artifact/1"
 CALL_LIMIT_BYTES = 32 * 1024

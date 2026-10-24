@@ -1,9 +1,9 @@
 # Native application execution
 
 The `native-application-execution` provider consumes a verified
-`mncs.compiler.application-build/4` or `/11` artifact from Environment, admits its
-Compiler-generated VM artifact, runs one typed call through the canonical VM,
-and publishes a Forge receipt plus an Environment result artifact.
+`mncs.compiler.application-build/4`, `/11`, or `/16` artifact from Environment,
+admits its Compiler-generated VM artifact, runs one typed call through the
+canonical VM, and publishes a Forge receipt plus an Environment result artifact.
 
 ## Bounded structured-file capability
 

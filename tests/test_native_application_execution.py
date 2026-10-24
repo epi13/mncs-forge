@@ -54,6 +54,15 @@ def test_verified_build_requires_closed_vm_artifact_and_typed_interface() -> Non
     current["schema_version"] = "mncs.compiler.application-build/11"
     provider.validate_build(current)
 
+    current = verified_build()
+    current["schema_version"] = "mncs.compiler.application-build/16"
+    provider.validate_build(current)
+
+    unsupported = verified_build()
+    unsupported["schema_version"] = "mncs.compiler.application-build/17"
+    with pytest.raises(provider.ProviderError, match="supported verified"):
+        provider.validate_build(unsupported)
+
     bad = verified_build()
     bad["entry"]["interface"]["types"]["unresolved_references"] = ["Missing"]
     with pytest.raises(provider.ProviderError, match="unresolved"):
