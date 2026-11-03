@@ -876,7 +876,9 @@ class NativeForgeAdapter:
             candidates.append(Path(configured))
         if explicit is not None:
             candidates.append(explicit)
-        candidates.append(Path(__file__).resolve().parents[3] / "mncs-language")
+        candidates.extend(
+            ancestor / "mncs-language" for ancestor in Path(__file__).resolve().parents
+        )
         for candidate in candidates:
             root = candidate.resolve()
             if (root / "Cargo.toml").is_file():

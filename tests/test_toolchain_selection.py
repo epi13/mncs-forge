@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from mncs_forge import mncs_native
 from mncs_forge.errors import ForgeError
 from mncs_forge.mncs_native import NativeForgeAdapter
 
@@ -52,6 +53,29 @@ def _adapter(
     forge_root = tmp_path / "forge"
     forge_root.mkdir(exist_ok=True)
     return NativeForgeAdapter(forge_root, language_root=language_root)
+
+
+def test_language_discovery_reaches_workspace_sibling_from_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "Projects"
+    source = (
+        workspace
+        / "mncs-forge"
+        / ".worktrees"
+        / "campaign"
+        / "src"
+        / "mncs_forge"
+        / "mncs_native.py"
+    )
+    source.parent.mkdir(parents=True)
+    language_root = _fake_language_root(
+        workspace / "mncs-language", release_ns=None, debug_ns=None
+    )
+    monkeypatch.setattr(mncs_native, "__file__", str(source))
+    monkeypatch.delenv("MNCS_LANGUAGE_ROOT", raising=False)
+
+    assert NativeForgeAdapter._discover_language_root(None) == language_root.resolve()
 
 
 def test_newer_debug_binary_wins_over_stale_release(
