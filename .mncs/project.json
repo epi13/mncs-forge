@@ -808,7 +808,10 @@
             "tests",
             "-q",
             "--ignore=tests/test_mncs_assurance.py"
-          ]
+          ],
+          "environment": {
+            "UV_CACHE_DIR": ".mncs/cache/uv"
+          }
         }
       },
       {
@@ -829,7 +832,10 @@
             "pytest",
             "tests/test_mncs_assurance.py",
             "-q"
-          ]
+          ],
+          "environment": {
+            "UV_CACHE_DIR": ".mncs/cache/uv"
+          }
         }
       },
       {
@@ -855,7 +861,10 @@
             "pytest",
             "tests/test_store_backed_record_store.py",
             "-q"
-          ]
+          ],
+          "environment": {
+            "UV_CACHE_DIR": ".mncs/cache/uv"
+          }
         }
       },
       {
@@ -876,7 +885,10 @@
             "pytest",
             "tests/test_continuous.py::test_superseding_generation_cancels_generic_process_tree",
             "-q"
-          ]
+          ],
+          "environment": {
+            "UV_CACHE_DIR": ".mncs/cache/uv"
+          }
         }
       },
       {
@@ -898,7 +910,10 @@
             "tests/test_continuous.py::test_trigger_matching_is_explicit_and_compact",
             "tests/test_continuous.py::test_debounce_policy_is_bounded_and_trigger_declared",
             "-q"
-          ]
+          ],
+          "environment": {
+            "UV_CACHE_DIR": ".mncs/cache/uv"
+          }
         }
       },
       {
@@ -919,7 +934,10 @@
             "pytest",
             "tests/test_workspace_binding.py",
             "-q"
-          ]
+          ],
+          "environment": {
+            "UV_CACHE_DIR": ".mncs/cache/uv"
+          }
         }
       }
     ]
