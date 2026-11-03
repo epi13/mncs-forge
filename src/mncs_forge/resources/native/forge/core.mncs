@@ -516,6 +516,53 @@ record VerificationStatusSet {
     unresolved_count: i64
 }
 
+// Forge provider inventory also uses the shared three-valued status lattice.
+// Keep a separate fold from verification escalation so provider discovery
+// cannot inherit verification-specific policy. The count distinguishes an
+// empty fold from its first observation; UNKNOWN is not used as an identity.
+record ForgeStatusSet {
+    statuses: [statlib.Status; 16],
+    status_count: byte
+}
+
+record ForgeStatusFold {
+    status: statlib.Status,
+    count: i64
+}
+
+fn forge_status_step(
+    current: ForgeStatusFold,
+    observed: statlib.Status,
+    include: bool
+) -> (result: ForgeStatusFold) {
+    if !include { return current; }
+    if current.count == 0 {
+        return ForgeStatusFold { status: observed, count: 1 };
+    }
+    return ForgeStatusFold {
+        status: statlib.dominate(current.status, observed),
+        count: current.count +% 1
+    };
+}
+
+fn status_aggregate(input: ForgeStatusSet) -> (result: statlib.Status) {
+    if (input.status_count as i64) > 16 {
+        return statlib.Status.UNKNOWN;
+    }
+    let initial: ForgeStatusFold = ForgeStatusFold {
+        status: statlib.Status.UNKNOWN,
+        count: 0
+    };
+    iterate i over input.statuses carrying current: ForgeStatusFold = initial {
+        let include: bool = (i as i64) < (input.status_count as i64);
+        next current = forge_status_step(current, input.statuses[i], include);
+    }
+    if current.count == 0 {
+        return statlib.Status.UNKNOWN;
+    }
+    return current.status;
+}
+
 record VerificationStatusFold {
     status: statlib.Status,
     count: u64

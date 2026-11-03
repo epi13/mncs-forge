@@ -151,6 +151,9 @@ class Forge:
             record_store=self.record_store,
             executor=self._executor,
             observer=self._observer,
+            native_status_aggregate=(
+                self._native.status_aggregate if self._native is not None else None
+            ),
         )
         self._verifier_service = MicroVerifierService(
             config=config,

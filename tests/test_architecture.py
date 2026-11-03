@@ -345,6 +345,7 @@ def test_resource_semantics_have_identity_bound_native_authority() -> None:
         "forge.verification-cost-admission.v1": "verification_cost_admit",
         "forge.verification-status-decision.v1": "verification_status_decide",
         "forge.inflight-process-cancellation.v1": "verification_resource_transition",
+        "forge.provider-status-aggregation.v1": "status_aggregate",
     }
     assert required.keys() <= by_identity.keys()
     for identity, function in required.items():

@@ -3150,6 +3150,80 @@ class NativeForgeAdapter:
             duration_seconds=invocation.duration_seconds,
         )
 
+    def status_aggregate(self, statuses: Sequence[str]) -> str:
+        """Fold provider-facing status values through the shared MNCS lattice.
+
+        Each native call is bounded to sixteen observations. Larger inputs are
+        carried forward as one native aggregate plus the next fifteen
+        observations, so Python only batches transport values.
+        """
+
+        if isinstance(statuses, (str, bytes)):
+            raise ForgeError("NATIVE_PROVIDER_STATUS_INPUT", "status values must be a sequence")
+        normalized = [status for status in statuses if status in _STATUS_VARIANTS]
+        self.ensure_available()
+        abi = self.language_owned_abi()
+        status_set_type = self._abi_record_type(abi, "ForgeStatusSet", context="ForgeStatusSet")
+
+        aggregate: str | None = None
+        offset = 0
+        first = True
+        while first or offset < len(normalized):
+            first = False
+            capacity = 16 if aggregate is None else 15
+            chunk = normalized[offset : offset + capacity]
+            offset += len(chunk)
+            active = ([aggregate] if aggregate is not None else []) + chunk
+            status_values = [
+                self._abi_finite_value(abi, "Status", status, context="provider status")
+                for status in active
+            ]
+            status_values.extend(
+                self._abi_finite_value(abi, "Status", "PASS", context="unused provider status")
+                for _ in range(16 - len(status_values))
+            )
+            record = self._record_value(
+                status_set_type,
+                "ForgeStatusSet",
+                {
+                    "statuses": self._sequence_value(status_values),
+                    "status_count": {"byte": {"value": len(active)}},
+                },
+            )
+            request = {
+                "schema_version": NATIVE_SCHEMA_VERSION,
+                "target": {"module": _CORE_MODULE, "function": "status_aggregate"},
+                "arguments": [record],
+                "step_budget": 20_000,
+            }
+            invocation = self._semantic_invocation(
+                request, request_name="provider-status-aggregate.json"
+            )
+            if not invocation.ok or invocation.payload is None:
+                raise ForgeError(
+                    "NATIVE_PROVIDER_STATUS_UNKNOWN", "native provider status aggregation failed"
+                )
+            if invocation.payload.get("status") != "returned":
+                raise ForgeError(
+                    "NATIVE_PROVIDER_STATUS_UNKNOWN",
+                    "native provider status aggregation did not return",
+                )
+            returned = invocation.payload.get("returned")
+            if not isinstance(returned, list) or len(returned) != 1:
+                raise ForgeError(
+                    "NATIVE_ABI_MISMATCH", "provider status aggregate result arity is invalid"
+                )
+            aggregate = self._finite_variant(
+                returned[0], _STATUS_TYPE, context="provider aggregate status"
+            )
+            if not chunk:
+                break
+        if aggregate is None:
+            raise ForgeError(
+                "NATIVE_ABI_MISMATCH", "provider status aggregation returned no status"
+            )
+        return aggregate
+
     @staticmethod
     def _abi_shape(abi: NativeAbi, kind: str, name: str, *, context: str) -> Mapping[str, object]:
         for key, contract in abi.composites.items():

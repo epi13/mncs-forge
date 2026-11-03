@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from ..config import ForgeConfig, Provider
 from ..errors import ForgeError
-from ..execution import parse_provider_capabilities
+from ..execution import STATUSES, parse_provider_capabilities
 from ..ports import ProjectObserver, RecordCommitter, RecordReader, Runner
 from ..records import ForgeRecord, RecordType, new_record
 from ..serialization import canonical_bytes, local_json_identity
@@ -25,6 +26,7 @@ class ProviderService:
         record_store: RecordCommitter,
         executor: Runner,
         observer: ProjectObserver,
+        native_status_aggregate: Callable[[list[str]], str] | None = None,
     ) -> None:
         self.config = config
         self.mode = mode
@@ -32,6 +34,20 @@ class ProviderService:
         self.record_store = record_store
         self.executor = executor
         self.observer = observer
+        self.native_status_aggregate = native_status_aggregate
+
+    def _aggregate_status(self, statuses: Iterable[str]) -> str:
+        # Preserve the compatibility helper's treatment of non-status values
+        # at this internal boundary; native code owns the status fold itself.
+        values = [status for status in statuses if status in STATUSES]
+        if self.native_status_aggregate is None:
+            return aggregate_status(values)
+        result = self.native_status_aggregate(values)
+        if result not in STATUSES:
+            raise ForgeError(
+                "NATIVE_PROVIDER_STATUS_UNKNOWN", "native provider status is not recognized"
+            )
+        return result
 
     def _require_development(self) -> None:
         if self.mode != "development":
@@ -124,7 +140,7 @@ class ProviderService:
             "providers": providers,
             "configured_count": len(providers),
             "required_capabilities": self.config.required_capabilities,
-            "status": aggregate_status(str(item["status"]) for item in providers),
+            "status": self._aggregate_status(str(item["status"]) for item in providers),
             "limitations": (
                 [
                     "no providers are configured; Forge does not infer structural capability "
@@ -371,7 +387,7 @@ class ProviderService:
             "informational_limitations": informational,
             "blocked": bool(blockers),
             "status": (
-                aggregate_status(str(item["status"]) for item in [*satisfied, *blockers])
+                self._aggregate_status(str(item["status"]) for item in [*satisfied, *blockers])
                 if required or blockers
                 else "PASS"
             ),

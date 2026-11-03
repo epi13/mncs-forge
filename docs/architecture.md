@@ -162,6 +162,16 @@ bootstrap_provisional = false
 pressure_ids = ["MNCS-LANG-64AD712CD2DE"]
 
 [[capability]]
+identity = "forge.provider-status-aggregation.v1"
+semantic_owner = "mncs.forge.core.v1::status_aggregate"
+native_source = "src/mncs_forge/resources/native/forge/core.mncs"
+host_realization = "src/mncs_forge/application/providers.py::ProviderService"
+host_may = ["filter_non-status_values", "batch_inputs_to_the_fixed_native_envelope", "retain_explicit_compatibility_mode"]
+host_must_not = ["aggregate_provider_inventory_status", "aggregate_capability_blocker_status"]
+status = "NATIVE_AUTHORITY"
+bootstrap_provisional = false
+
+[[capability]]
 identity = "mncs.process-resource-envelope.v1"
 semantic_owner = "mncs.std.process.v1::process_run"
 native_source = ""
