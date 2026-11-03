@@ -1,0 +1,20 @@
+{
+  "name": "mncs-forge-local-development",
+  "working_checkout": "current",
+  "workspace_scope": {
+    "kind": "workspace",
+    "repositories": [
+      "mncs-forge"
+    ]
+  },
+  "intent": {
+    "goal": "Develop and verify Forge provider and execution integration within the selected checkout.",
+    "repositories": [
+      "mncs-forge"
+    ],
+    "constraints": [
+      "Keep changes in the selected Forge checkout; treat external compilers, runtimes and Stdlib as read-only declared inputs.",
+      "Preserve foreign claims and unrelated dirty work."
+    ]
+  }
+}

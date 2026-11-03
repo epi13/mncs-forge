@@ -508,6 +508,14 @@
             "MNCS_VM_BIN": {
               "repository": "mncs-vm",
               "path": "target/debug/mncs-vm"
+            },
+            "MNCS_LANGUAGE_ROOT": {
+              "repository": "mncs-language",
+              "path": "."
+            },
+            "MNCS_STDLIB_ROOT": {
+              "repository": "mncs-stdlib",
+              "path": "."
             }
           }
         },
