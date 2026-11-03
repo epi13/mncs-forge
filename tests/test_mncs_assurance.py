@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from mncs_forge.mncs_native import NativeAssuranceInput, NativeForgeAdapter
+from mncs_forge.mncs_native import (
+    NativeAssuranceInput,
+    NativeExecutionAssuranceInput,
+    NativeForgeAdapter,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.native
@@ -232,3 +236,126 @@ def test_native_assurance_decisions_match_differential_vectors(
     del name  # The parameter names the differential fixture for failure output.
     result = NativeForgeAdapter(ROOT).assurance_loop(facts)
     assert (result.status, result.decision, result.stop_reason) == (status, decision, reason)
+
+
+def _execution_assurance_input(**changes: object) -> NativeExecutionAssuranceInput:
+    value = NativeExecutionAssuranceInput(
+        local_process_runner=False,
+        property_map_complete=True,
+        complete_receipt_missing=False,
+        receipt_complete=True,
+        requested_runner_capability=True,
+        runner_capability_state="Established",
+        requested_filesystem_isolation=False,
+        filesystem_isolation_state="NotEstablished",
+        requested_network_isolation=False,
+        network_isolation_state="NotEstablished",
+        requested_containerization=False,
+        containerization_state="NotEstablished",
+        requested_same_operator_execution=False,
+        same_operator_execution_state="NotEstablished",
+    )
+    return replace(value, **changes)
+
+
+@pytest.mark.parametrize(
+    ("name", "facts", "status", "conflict", "runner", "network", "receipt_incomplete"),
+    [
+        (
+            "complete-established-request",
+            _execution_assurance_input(),
+            "PASS",
+            "None",
+            "Satisfied",
+            "NotRequested",
+            False,
+        ),
+        (
+            "requested-property-not-established",
+            _execution_assurance_input(
+                runner_capability_state="NotEstablished",
+            ),
+            "UNKNOWN",
+            "None",
+            "NotEstablished",
+            "NotRequested",
+            False,
+        ),
+        (
+            "requested-property-unobservable",
+            _execution_assurance_input(
+                requested_runner_capability=False,
+                requested_network_isolation=True,
+                network_isolation_state="Unknown",
+            ),
+            "UNKNOWN",
+            "None",
+            "NotRequested",
+            "Unknown",
+            False,
+        ),
+        (
+            "local-runner-isolation-contradiction",
+            _execution_assurance_input(
+                local_process_runner=True,
+                requested_runner_capability=False,
+                requested_same_operator_execution=True,
+                same_operator_execution_state="Established",
+                network_isolation_state="Established",
+            ),
+            "FAIL",
+            "NetworkIsolation",
+            "NotRequested",
+            "NotRequested",
+            False,
+        ),
+        (
+            "incomplete-receipt",
+            _execution_assurance_input(receipt_complete=False),
+            "UNKNOWN",
+            "None",
+            "Satisfied",
+            "NotRequested",
+            True,
+        ),
+        (
+            "incomplete-property-map",
+            _execution_assurance_input(
+                property_map_complete=False,
+                requested_runner_capability=False,
+                requested_network_isolation=True,
+                network_isolation_state="Unreadable",
+            ),
+            "UNKNOWN",
+            "None",
+            "NotRequested",
+            "Unreadable",
+            False,
+        ),
+        (
+            "missing-complete-receipt-envelope",
+            _execution_assurance_input(complete_receipt_missing=True),
+            "UNKNOWN",
+            "None",
+            "Satisfied",
+            "NotRequested",
+            False,
+        ),
+    ],
+)
+def test_native_execution_assurance_matches_independent_vectors(
+    name: str,
+    facts: NativeExecutionAssuranceInput,
+    status: str,
+    conflict: str,
+    runner: str,
+    network: str,
+    receipt_incomplete: bool,
+) -> None:
+    result = NativeForgeAdapter(ROOT).execution_assurance_assess(facts)
+    assert result.valid, name
+    assert result.status == status, name
+    assert result.isolation_conflict == conflict, name
+    assert result.runner_capability == runner, name
+    assert result.network_isolation == network, name
+    assert result.receipt_incomplete is receipt_incomplete, name

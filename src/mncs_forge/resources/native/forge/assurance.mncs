@@ -58,6 +58,10 @@ enum StopReason {
     InvalidInput
 }
 
+enum ExecutionPropertyState { Established, NotEstablished, Unknown, Unreadable }
+enum ExecutionPropertyFinding { NotRequested, Satisfied, NotEstablished, Unknown, Unreadable }
+enum IsolationConflict { None, FilesystemIsolation, NetworkIsolation, Containerization }
+
 // Facts have already crossed the provider membranes. A status field is a
 // provider-owned verdict/sufficiency projection; booleans describe only
 // presence, freshness, and identity binding at the Forge boundary.
@@ -107,6 +111,37 @@ record ForgeLoopDecision {
     stop_reason: StopReason,
     terminal: bool,
     valid: bool
+}
+
+record ExecutionAssuranceInput {
+    local_process_runner: bool,
+    property_map_complete: bool,
+    complete_receipt_missing: bool,
+    receipt_complete: bool,
+    requested_runner_capability: bool,
+    runner_capability_state: ExecutionPropertyState,
+    requested_filesystem_isolation: bool,
+    filesystem_isolation_state: ExecutionPropertyState,
+    requested_network_isolation: bool,
+    network_isolation_state: ExecutionPropertyState,
+    requested_containerization: bool,
+    containerization_state: ExecutionPropertyState,
+    requested_same_operator_execution: bool,
+    same_operator_execution_state: ExecutionPropertyState
+}
+
+record ExecutionAssuranceDecision {
+    status: statlib.Status,
+    valid: bool,
+    property_map_incomplete: bool,
+    complete_receipt_missing: bool,
+    receipt_incomplete: bool,
+    isolation_conflict: IsolationConflict,
+    runner_capability: ExecutionPropertyFinding,
+    filesystem_isolation: ExecutionPropertyFinding,
+    network_isolation: ExecutionPropertyFinding,
+    containerization: ExecutionPropertyFinding,
+    same_operator_execution: ExecutionPropertyFinding
 }
 
 // The wire envelope is deliberately not the semantic API. It is only the
@@ -200,6 +235,123 @@ fn evidence_status(input: ForgeLoopInput) -> (result: statlib.Status) {
         statlib.dominate(proof, plan_status),
         rebound_status
     );
+}
+
+// Classify each requested execution property. Forge still supplies only
+// normalized evidence facts; the authority for turning those facts into
+// assurance findings and a tri-state verdict lives in MNCS.
+fn execution_property_finding(
+    requested: bool,
+    state: ExecutionPropertyState
+) -> (result: ExecutionPropertyFinding) {
+    if !requested { return ExecutionPropertyFinding.NotRequested; }
+    return match state {
+        Established => ExecutionPropertyFinding.Satisfied,
+        NotEstablished => ExecutionPropertyFinding.NotEstablished,
+        Unknown => ExecutionPropertyFinding.Unknown,
+        Unreadable => ExecutionPropertyFinding.Unreadable,
+    };
+}
+
+fn execution_property_unmet(value: ExecutionPropertyFinding) -> (result: bool) {
+    return match value {
+        NotRequested => false,
+        Satisfied => false,
+        NotEstablished => true,
+        Unknown => true,
+        Unreadable => true,
+    };
+}
+
+fn execution_property_established(value: ExecutionPropertyState) -> (result: bool) {
+    return match value {
+        Established => true,
+        NotEstablished => false,
+        Unknown => false,
+        Unreadable => false,
+    };
+}
+
+fn has_isolation_conflict(value: IsolationConflict) -> (result: bool) {
+    return match value {
+        None => false,
+        FilesystemIsolation => true,
+        NetworkIsolation => true,
+        Containerization => true,
+    };
+}
+
+fn local_isolation_conflict(input: ExecutionAssuranceInput) -> (result: IsolationConflict) {
+    if !input.local_process_runner { return IsolationConflict.None; }
+    if execution_property_established(input.filesystem_isolation_state) {
+        return IsolationConflict.FilesystemIsolation;
+    }
+    if execution_property_established(input.network_isolation_state) {
+        return IsolationConflict.NetworkIsolation;
+    }
+    if execution_property_established(input.containerization_state) {
+        return IsolationConflict.Containerization;
+    }
+    return IsolationConflict.None;
+}
+
+fn execution_assurance_assess(input: ExecutionAssuranceInput) -> (result: ExecutionAssuranceDecision) {
+    let runner_capability: ExecutionPropertyFinding = execution_property_finding(
+        input.requested_runner_capability,
+        input.runner_capability_state
+    );
+    let filesystem_isolation: ExecutionPropertyFinding = execution_property_finding(
+        input.requested_filesystem_isolation,
+        input.filesystem_isolation_state
+    );
+    let network_isolation: ExecutionPropertyFinding = execution_property_finding(
+        input.requested_network_isolation,
+        input.network_isolation_state
+    );
+    let containerization: ExecutionPropertyFinding = execution_property_finding(
+        input.requested_containerization,
+        input.containerization_state
+    );
+    let same_operator_execution: ExecutionPropertyFinding = execution_property_finding(
+        input.requested_same_operator_execution,
+        input.same_operator_execution_state
+    );
+    let isolation_conflict: IsolationConflict = local_isolation_conflict(input);
+    let valid: bool = input.requested_runner_capability
+        || input.requested_filesystem_isolation
+        || input.requested_network_isolation
+        || input.requested_containerization
+        || input.requested_same_operator_execution;
+    let incomplete: bool = !input.property_map_complete
+        || input.complete_receipt_missing
+        || !input.receipt_complete
+        || execution_property_unmet(runner_capability)
+        || execution_property_unmet(filesystem_isolation)
+        || execution_property_unmet(network_isolation)
+        || execution_property_unmet(containerization)
+        || execution_property_unmet(same_operator_execution);
+    let verdict: statlib.Status = select(
+        !valid,
+        statlib.Status.UNKNOWN,
+        select(
+            has_isolation_conflict(isolation_conflict),
+            statlib.Status.FAIL,
+            select(incomplete, statlib.Status.UNKNOWN, statlib.Status.PASS)
+        )
+    );
+    return ExecutionAssuranceDecision {
+        status: verdict,
+        valid: valid,
+        property_map_incomplete: !input.property_map_complete,
+        complete_receipt_missing: input.complete_receipt_missing,
+        receipt_incomplete: !input.receipt_complete,
+        isolation_conflict: isolation_conflict,
+        runner_capability: runner_capability,
+        filesystem_isolation: filesystem_isolation,
+        network_isolation: network_isolation,
+        containerization: containerization,
+        same_operator_execution: same_operator_execution
+    };
 }
 
 fn terminal(

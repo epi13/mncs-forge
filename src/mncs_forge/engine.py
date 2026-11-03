@@ -685,6 +685,7 @@ class Forge:
             config=self.config,
             records=self.ledger,
             record_store=self.record_store,
+            native=self._resource_semantics,
             binding_id=binding_id,
             requested_properties=requested_properties,
             policy_identity=policy_identity,

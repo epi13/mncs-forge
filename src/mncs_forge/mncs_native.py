@@ -357,6 +357,44 @@ class NativeAssuranceDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeExecutionAssuranceInput:
+    """Validated receipt facts crossing into Forge's execution assurance policy."""
+
+    local_process_runner: bool
+    property_map_complete: bool
+    complete_receipt_missing: bool
+    receipt_complete: bool
+    requested_runner_capability: bool
+    runner_capability_state: str
+    requested_filesystem_isolation: bool
+    filesystem_isolation_state: str
+    requested_network_isolation: bool
+    network_isolation_state: str
+    requested_containerization: bool
+    containerization_state: str
+    requested_same_operator_execution: bool
+    same_operator_execution_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class NativeExecutionAssuranceDecision:
+    """Typed execution assurance verdict and per-property findings from MNCS."""
+
+    status: str
+    valid: bool
+    property_map_incomplete: bool
+    complete_receipt_missing: bool
+    receipt_incomplete: bool
+    isolation_conflict: str
+    runner_capability: str
+    filesystem_isolation: str
+    network_isolation: str
+    containerization: str
+    same_operator_execution: str
+    duration_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class NativeResourceBudgetDecision:
     """Typed result of Forge's canonical native resource-budget policy."""
 
@@ -1973,6 +2011,192 @@ class NativeForgeAdapter:
             phase=str(phase),
             terminal=terminal,
             valid=valid,
+            duration_seconds=invocation.duration_seconds,
+        )
+
+    def execution_assurance_assess(
+        self, value: NativeExecutionAssuranceInput
+    ) -> NativeExecutionAssuranceDecision:
+        """Classify normalized execution receipt facts through Forge's MNCS policy."""
+
+        if not isinstance(value, NativeExecutionAssuranceInput):
+            raise ForgeError("NATIVE_ASSURANCE_INPUT", "execution assurance input is not typed")
+        boolean_fields = (
+            value.local_process_runner,
+            value.property_map_complete,
+            value.complete_receipt_missing,
+            value.receipt_complete,
+            value.requested_runner_capability,
+            value.requested_filesystem_isolation,
+            value.requested_network_isolation,
+            value.requested_containerization,
+            value.requested_same_operator_execution,
+        )
+        property_states = (
+            value.runner_capability_state,
+            value.filesystem_isolation_state,
+            value.network_isolation_state,
+            value.containerization_state,
+            value.same_operator_execution_state,
+        )
+        if not all(isinstance(flag, bool) for flag in boolean_fields):
+            raise ForgeError("NATIVE_ASSURANCE_INPUT", "execution assurance flags are malformed")
+        if any(
+            state not in {"Established", "NotEstablished", "Unknown", "Unreadable"}
+            for state in property_states
+        ):
+            raise ForgeError("NATIVE_ASSURANCE_INPUT", "execution property state is invalid")
+
+        self.ensure_available()
+        abi = self.language_owned_abi()
+        function_contract = abi.functions.get("execution_assurance_assess")
+        if function_contract is None:
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "execution assurance policy is absent")
+        declaring_module = function_contract.get("declaring_module")
+        if not isinstance(declaring_module, str) or not declaring_module:
+            raise ForgeError(
+                "NATIVE_ABI_UNKNOWN", "execution assurance function has no declaring module"
+            )
+        inputs = function_contract.get("inputs")
+        outputs = function_contract.get("outputs")
+        if (
+            not isinstance(inputs, list)
+            or len(inputs) != 1
+            or not isinstance(outputs, list)
+            or len(outputs) != 1
+        ):
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "execution assurance ABI has invalid arity")
+        input_contract = inputs[0].get("record") if isinstance(inputs[0], Mapping) else None
+        output_contract = outputs[0].get("record") if isinstance(outputs[0], Mapping) else None
+        if not isinstance(input_contract, Mapping) or not isinstance(output_contract, Mapping):
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "execution assurance ABI is not record-based")
+        input_type = input_contract.get("type_identity")
+        output_type = output_contract.get("type_identity")
+        if not isinstance(input_type, str) or not isinstance(output_type, str):
+            raise ForgeError(
+                "NATIVE_ABI_UNKNOWN", "execution assurance ABI identities are malformed"
+            )
+
+        fields: dict[str, object] = {
+            "local_process_runner": {"boolean": {"value": value.local_process_runner}},
+            "property_map_complete": {"boolean": {"value": value.property_map_complete}},
+            "complete_receipt_missing": {"boolean": {"value": value.complete_receipt_missing}},
+            "receipt_complete": {"boolean": {"value": value.receipt_complete}},
+        }
+        for property_name, requested, state in (
+            (
+                "runner_capability",
+                value.requested_runner_capability,
+                value.runner_capability_state,
+            ),
+            (
+                "filesystem_isolation",
+                value.requested_filesystem_isolation,
+                value.filesystem_isolation_state,
+            ),
+            (
+                "network_isolation",
+                value.requested_network_isolation,
+                value.network_isolation_state,
+            ),
+            (
+                "containerization",
+                value.requested_containerization,
+                value.containerization_state,
+            ),
+            (
+                "same_operator_execution",
+                value.requested_same_operator_execution,
+                value.same_operator_execution_state,
+            ),
+        ):
+            fields[f"requested_{property_name}"] = {"boolean": {"value": requested}}
+            fields[f"{property_name}_state"] = self._abi_finite_value(
+                abi,
+                "ExecutionPropertyState",
+                state,
+                context=f"execution property {property_name}",
+            )
+
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": declaring_module, "function": "execution_assurance_assess"},
+            "arguments": [
+                self._record_value(
+                    input_type,
+                    "ExecutionAssuranceInput",
+                    fields,
+                )
+            ],
+            "step_budget": 200_000,
+        }
+        invocation = self._semantic_invocation(
+            request, request_name="execution-assurance-request.json"
+        )
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError(
+                "NATIVE_ASSURANCE_UNKNOWN",
+                "native execution assurance did not return a valid retained decision "
+                f"(returncode {invocation.returncode})",
+            )
+        returned = invocation.payload.get("returned")
+        if (
+            not isinstance(returned, list)
+            or len(returned) != 1
+            or not isinstance(returned[0], Mapping)
+            or not isinstance(returned[0].get("record"), Mapping)
+            or returned[0]["record"].get("type_identity") != output_type
+        ):
+            raise ForgeError(
+                "NATIVE_ABI_MISMATCH",
+                "execution assurance result type disagrees with language ABI",
+            )
+        result_fields = self._record_fields(invocation.payload, context="execution assurance")
+        status = self._abi_finite_variant(
+            result_fields.get("status"), abi, "Status", context="execution assurance status"
+        )
+        isolation_conflict = self._abi_finite_variant(
+            result_fields.get("isolation_conflict"),
+            abi,
+            "IsolationConflict",
+            context="execution isolation conflict",
+        )
+        findings = {
+            name: self._abi_finite_variant(
+                result_fields.get(name),
+                abi,
+                "ExecutionPropertyFinding",
+                context=f"execution property finding {name}",
+            )
+            for name in (
+                "runner_capability",
+                "filesystem_isolation",
+                "network_isolation",
+                "containerization",
+                "same_operator_execution",
+            )
+        }
+        return NativeExecutionAssuranceDecision(
+            status=str(status),
+            valid=self._boolean(result_fields.get("valid"), context="execution assurance validity"),
+            property_map_incomplete=self._boolean(
+                result_fields.get("property_map_incomplete"),
+                context="execution property map completeness",
+            ),
+            complete_receipt_missing=self._boolean(
+                result_fields.get("complete_receipt_missing"),
+                context="complete execution receipt presence",
+            ),
+            receipt_incomplete=self._boolean(
+                result_fields.get("receipt_incomplete"),
+                context="execution receipt completeness",
+            ),
+            isolation_conflict=str(isolation_conflict),
+            runner_capability=str(findings["runner_capability"]),
+            filesystem_isolation=str(findings["filesystem_isolation"]),
+            network_isolation=str(findings["network_isolation"]),
+            containerization=str(findings["containerization"]),
+            same_operator_execution=str(findings["same_operator_execution"]),
             duration_seconds=invocation.duration_seconds,
         )
 

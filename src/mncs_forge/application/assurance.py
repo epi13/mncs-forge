@@ -14,6 +14,7 @@ from typing import Literal
 
 from ..config import ForgeConfig
 from ..errors import ForgeError
+from ..mncs_native import NativeExecutionAssuranceInput, NativeForgeAdapter
 from ..ports import RecordCommitter, RecordReader
 from ..records import (
     ASSURANCE_REQUEST_PROPERTIES,
@@ -25,9 +26,6 @@ from ..records import (
 from .support import now
 
 AssuranceStatus = Literal["PASS", "FAIL", "UNKNOWN"]
-
-_LAUNDERING_RUNNER_KINDS = frozenset({"local-process"})
-_CONTAINER_PROPERTIES = ("filesystem_isolation", "network_isolation", "containerization")
 
 
 def _binding(records: RecordReader, binding_id: str) -> Mapping[str, object]:
@@ -43,38 +41,14 @@ def _property_map(binding: Mapping[str, object]) -> Mapping[str, object] | None:
     return properties if isinstance(properties, Mapping) else None
 
 
-def _structural_contradictions(binding: Mapping[str, object]) -> list[str]:
-    """Malformed-binding problems that make any assurance claim unreliable."""
+def _native_property_state(value: object) -> str:
+    """Translate persisted receipt facts to the finite MNCS input vocabulary."""
 
-    problems: list[str] = []
-    properties = _property_map(binding)
-    if properties is None:
-        return ["execution receipt binding has no established property map"]
-    missing = set(ESTABLISHED_PROPERTY_KEYS) - set(properties)
-    if missing:
-        problems.append("binding property map is incomplete: " + ", ".join(sorted(missing)))
-    if binding.get("receipt_completeness") == "complete" and not isinstance(
-        binding.get("mncs_receipt"), Mapping
-    ):
-        problems.append("complete binding is missing its MNCS execution-receipt envelope")
-    return problems
-
-
-def _laundering_contradiction(binding: Mapping[str, object]) -> str | None:
-    """Detect isolation claims that contradict the declared runner kind."""
-
-    properties = _property_map(binding)
-    runner_kind = binding.get("runner_kind")
-    if properties is None or not isinstance(runner_kind, str):
-        return None
-    if runner_kind in _LAUNDERING_RUNNER_KINDS:
-        for key in _CONTAINER_PROPERTIES:
-            if properties.get(key) == "established":
-                return (
-                    f"{key} is claimed established by a {runner_kind} runner, "
-                    "which cannot enforce it"
-                )
-    return None
+    return {
+        "established": "Established",
+        "not-established": "NotEstablished",
+        "unknown": "Unknown",
+    }.get(value, "Unreadable")
 
 
 def assess_execution_receipt(
@@ -82,6 +56,7 @@ def assess_execution_receipt(
     config: ForgeConfig,
     records: RecordReader,
     record_store: RecordCommitter,
+    native: NativeForgeAdapter,
     binding_id: str,
     requested_properties: list[str],
     policy_identity: str | None = None,
@@ -112,34 +87,93 @@ def assess_execution_receipt(
     if properties is None:
         raise ForgeError("RECORD_MALFORMED", "execution receipt binding has no property map")
 
-    laundering = _laundering_contradiction(binding)
-    reasons: list[str] = [*_structural_contradictions(binding)]
-    if laundering is not None:
-        reasons.append(laundering)
+    missing_keys = sorted(set(ESTABLISHED_PROPERTY_KEYS) - set(properties))
+    complete_receipt = binding.get("receipt_completeness") == "complete"
+
+    def state_for(key: str) -> str:
+        return _native_property_state(properties.get(key))
+
+    decision = native.execution_assurance_assess(
+        NativeExecutionAssuranceInput(
+            local_process_runner=binding.get("runner_kind") == "local-process",
+            property_map_complete=not missing_keys,
+            complete_receipt_missing=(
+                complete_receipt and not isinstance(binding.get("mncs_receipt"), Mapping)
+            ),
+            receipt_complete=complete_receipt,
+            requested_runner_capability="runner_capability" in requested_properties,
+            runner_capability_state=state_for("runner_capability"),
+            requested_filesystem_isolation="filesystem_isolation" in requested_properties,
+            filesystem_isolation_state=state_for("filesystem_isolation"),
+            requested_network_isolation="network_isolation" in requested_properties,
+            network_isolation_state=state_for("network_isolation"),
+            requested_containerization="containerization" in requested_properties,
+            containerization_state=state_for("containerization"),
+            requested_same_operator_execution="same_operator_execution" in requested_properties,
+            same_operator_execution_state=state_for("same_operator_execution"),
+        )
+    )
+    if not decision.valid:
+        raise ForgeError(
+            "NATIVE_ASSURANCE_UNKNOWN", "native execution assurance rejected the request"
+        )
+
+    reasons: list[str] = []
+    if decision.property_map_incomplete:
+        reasons.append("binding property map is incomplete: " + ", ".join(missing_keys))
+    if decision.complete_receipt_missing:
+        reasons.append("complete binding is missing its MNCS execution-receipt envelope")
+    conflict_keys = {
+        "FilesystemIsolation": "filesystem_isolation",
+        "NetworkIsolation": "network_isolation",
+        "Containerization": "containerization",
+    }
+    if decision.isolation_conflict != "None":
+        conflicted_key = conflict_keys.get(decision.isolation_conflict)
+        if conflicted_key is None:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "native assurance returned an unknown conflict")
+        runner_kind = binding.get("runner_kind")
+        reasons.append(
+            f"{conflicted_key} is claimed established by a {runner_kind} runner, "
+            "which cannot enforce it"
+        )
+
+    findings = {
+        "runner_capability": decision.runner_capability,
+        "filesystem_isolation": decision.filesystem_isolation,
+        "network_isolation": decision.network_isolation,
+        "containerization": decision.containerization,
+        "same_operator_execution": decision.same_operator_execution,
+    }
+    finding_messages = {
+        "NotEstablished": "requested property was not established by the runner",
+        "Unknown": "requested property could not be observed",
+        "Unreadable": "requested property has an unreadable state",
+    }
     unmet: list[str] = []
     for key in requested_properties:
-        state = properties.get(key)
-        if state == "established":
+        finding = findings[key]
+        if finding == "Satisfied":
             continue
+        if finding == "NotRequested":
+            raise ForgeError("NATIVE_ABI_MISMATCH", "native assurance omitted a requested property")
         unmet.append(key)
-        if state == "not-established":
-            reasons.append(f"requested property was not established by the runner: {key}")
-        elif state == "unknown":
-            reasons.append(f"requested property could not be observed: {key}")
-        else:
-            reasons.append(f"requested property has an unreadable state: {key}")
-    if binding.get("receipt_completeness") != "complete":
+        message = finding_messages.get(finding)
+        if message is None:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "native assurance returned an unknown finding")
+        reasons.append(f"{message}: {key}")
+
+    if decision.receipt_incomplete:
         reasons.append(
             "the bound execution is incomplete, so no assurance property can be confirmed"
         )
         unmet.extend(key for key in requested_properties if key not in unmet)
 
-    if laundering is not None:
-        status: AssuranceStatus = "FAIL"
-    elif unmet or reasons:
-        status = "UNKNOWN"
-    else:
-        status = "PASS"
+    status_by_native = {"PASS": "PASS", "FAIL": "FAIL", "UNKNOWN": "UNKNOWN"}
+    status_value = status_by_native.get(decision.status)
+    if status_value is None:
+        raise ForgeError("NATIVE_ABI_MISMATCH", "native assurance returned an unknown status")
+    status: AssuranceStatus = status_value  # type: ignore[assignment]
 
     record = new_record(
         RecordType.EXECUTION_ASSURANCE,
