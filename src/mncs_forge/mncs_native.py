@@ -1640,6 +1640,7 @@ class NativeForgeAdapter:
         *,
         request_name: str,
         force_stage0_reference: bool = False,
+        prefer_retained: bool = False,
     ) -> NativeInvocation:
         """Call the retained core; use the old request-file path only for tests/oracles."""
 
@@ -1651,11 +1652,13 @@ class NativeForgeAdapter:
         function = target.get("function")
         if not isinstance(module, str) or not isinstance(function, str):
             raise ForgeError("NATIVE_REQUEST_INVALID", "native target is invalid")
+        use_retained_session = prefer_retained and self._retained_session is not None
         grants = request.get("grants", [])
         if not isinstance(grants, list) or any(not isinstance(grant, Mapping) for grant in grants):
             raise ForgeError("NATIVE_REQUEST_INVALID", "native grants are not a list of objects")
         if (
             not force_stage0_reference
+            and not use_retained_session
             and not grants
             and not self._execute_is_overridden()
             and self._canonical_selection() is not None
@@ -1699,7 +1702,10 @@ class NativeForgeAdapter:
                     else None
                 ),
             )
-        if self._execute_is_overridden() or self._embed_library() is None:
+        if (
+            (self._execute_is_overridden() or self._embed_library() is None)
+            and not use_retained_session
+        ):
             if grants:
                 if (
                     function == "resource_budget_identity"
@@ -3223,6 +3229,65 @@ class NativeForgeAdapter:
                 "NATIVE_ABI_MISMATCH", "provider status aggregation returned no status"
             )
         return aggregate
+
+    def continuous_consumer_state(
+        self,
+        *,
+        durable_status_present: bool,
+        cursor_recovery_required: bool,
+        owner_retry_required: bool,
+        supervisor_present: bool,
+        test_supervisor_without_status_path: bool,
+        test_supervisor_has_stream_identity: bool,
+        stream_identity_matches: bool,
+        event_cursor_is_integer: bool,
+        event_cursor_matches: bool,
+    ) -> str:
+        """Classify the resident cursor pair through the MNCS Forge core."""
+
+        inputs = (
+            durable_status_present,
+            cursor_recovery_required,
+            owner_retry_required,
+            supervisor_present,
+            test_supervisor_without_status_path,
+            test_supervisor_has_stream_identity,
+            stream_identity_matches,
+            event_cursor_is_integer,
+            event_cursor_matches,
+        )
+        if any(type(value) is not bool for value in inputs):
+            raise ForgeError(
+                "NATIVE_CONTINUOUS_INPUT", "resident cursor evidence must contain booleans"
+            )
+        self.ensure_available()
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "continuous_consumer_state"},
+            "arguments": [self._mncs_boolean(value) for value in inputs],
+            "step_budget": 2_000,
+        }
+        invocation = self._semantic_invocation(
+            request,
+            request_name="resident-consumer-state.json",
+            prefer_retained=True,
+        )
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "native resident cursor decision failed")
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError(
+                "NATIVE_CONTINUOUS_UNKNOWN", "native resident cursor decision did not return"
+            )
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "resident cursor result arity is invalid")
+        code = self._byte(returned[0], context="resident cursor state")
+        states = ("starting", "ready", "blocked", "retry_required", "unknown", "reconciling")
+        if code >= len(states):
+            raise ForgeError(
+                "NATIVE_ABI_MISMATCH", "resident cursor state code is outside the contract"
+            )
+        return states[code]
 
     @staticmethod
     def _abi_shape(abi: NativeAbi, kind: str, name: str, *, context: str) -> Mapping[str, object]:

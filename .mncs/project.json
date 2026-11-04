@@ -241,6 +241,12 @@
         "contract": "resident-status",
         "version": "1",
         "kind": "resident-provider-status",
+        "fingerprint_sources": [
+          "scripts/resident.py",
+          "src/mncs_forge/resident.py",
+          "src/mncs_forge/mncs_native.py",
+          "src/mncs_forge/resources/native/forge/core.mncs"
+        ],
         "effects": [
           "read"
         ],
@@ -280,6 +286,12 @@
         "contract": "resident-reconcile",
         "version": "1",
         "kind": "resident-provider-reconcile",
+        "fingerprint_sources": [
+          "scripts/resident.py",
+          "src/mncs_forge/resident.py",
+          "src/mncs_forge/mncs_native.py",
+          "src/mncs_forge/resources/native/forge/core.mncs"
+        ],
         "effects": [
           "execute"
         ],
@@ -319,6 +331,12 @@
         "contract": "resident-stop",
         "version": "1",
         "kind": "resident-provider-stop",
+        "fingerprint_sources": [
+          "scripts/resident.py",
+          "src/mncs_forge/resident.py",
+          "src/mncs_forge/mncs_native.py",
+          "src/mncs_forge/resources/native/forge/core.mncs"
+        ],
         "effects": [
           "execute"
         ],

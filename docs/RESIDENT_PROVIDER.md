@@ -54,6 +54,12 @@ actual supervisor, matching provider/runtime/configuration/instance identity,
 and an attached current Language Service event stream. Forge either verifies
 its own selected LS process lease or the exact externally selected Environment
 endpoint above. File/executable/PID presence is insufficient.
+The durable cursor, recovery marker, supervisor presence, and strict cursor
+types are observed by the host; MNCS `core.continuous_consumer_state` owns the
+precedence that classifies them as starting, ready, blocked, retry-required,
+unknown, or reconciling. If the native decision is unavailable, the consumer
+reports unknown and the resident stays degraded rather than treating the
+cursor as ready.
 The resident initializes the existing native Forge and real Store before it
 can become ready. Status also reports stopped, starting, stale, incompatible,
 degraded, failed, or blocked, with stable diagnostic codes and recovery context.

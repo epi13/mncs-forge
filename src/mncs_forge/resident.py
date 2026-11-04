@@ -35,7 +35,7 @@ from .continuous import (
     _write_json_path,
 )
 from .errors import ForgeError
-from .mncs_native import selected_library_root
+from .mncs_native import NativeForgeAdapter, selected_library_root
 from .workspace_binding import resolve_continuous_config
 
 STATUS_SCHEMA = "mncs.forge.resident-status/1"
@@ -356,7 +356,24 @@ class ResidentEndpoint:
                 try:
                     request = _receive(connection)
                     supervisor = self.supervisor
-                    consumer = _continuous_consumer_status(self.config, supervisor)
+                    if supervisor is None:
+                        # Before Forge and its retained MNCS session exist,
+                        # the resident has no consumer position to project.
+                        consumer = {
+                            "state": "starting",
+                            "reason": "no durable continuous cursor exists",
+                        }
+                    else:
+                        native_adapter = getattr(supervisor, "_resource_semantics", None)
+                        if not callable(getattr(native_adapter, "continuous_consumer_state", None)):
+                            consumer = {
+                                "state": "unknown",
+                                "native_error": "NATIVE_EMBED_UNAVAILABLE",
+                            }
+                        else:
+                            consumer = _continuous_consumer_status(
+                                self.config, supervisor, native_adapter
+                            )
                     active = (
                         supervisor is not None
                         and supervisor.stream_identity
@@ -368,6 +385,8 @@ class ResidentEndpoint:
                             "ready": "ready",
                             "blocked": "degraded",
                             "retry_required": "degraded",
+                            "reconciling": "starting",
+                            "unknown": "degraded",
                         }.get(str(consumer.get("state")), "starting")
                     response = {
                         "nonce": request.get("nonce"),
@@ -390,44 +409,73 @@ class ResidentEndpoint:
         self.thread.join(timeout=0.5)
 
 
-def _continuous_consumer_status(config: Any, supervisor: Any | None = None) -> dict[str, Any]:
-    """Expose Forge's acknowledged Language Service position to Environment."""
+def _continuous_consumer_status(
+    config: Any,
+    supervisor: Any | None = None,
+    native_adapter: NativeForgeAdapter | None = None,
+) -> dict[str, Any]:
+    """Project Forge's acknowledged Language Service position in MNCS."""
     status_path = config.state_dir / "continuous" / "status.json"
     status = _read_json_path(status_path)
-    if status is None:
-        # Test doubles and a never-started service have no durable cursor yet.
-        if supervisor is not None and not callable(getattr(supervisor, "_status_path", None)):
-            return {
-                "state": "ready" if getattr(supervisor, "stream_identity", None) else "starting",
-                "stream_identity": getattr(supervisor, "stream_identity", None),
-                "cursor": getattr(supervisor, "current_cursor", None),
-            }
-        return {"state": "starting", "reason": "no durable continuous cursor exists"}
-    recovery = status.get("cursor_recovery")
+    recovery = status.get("cursor_recovery") if isinstance(status, dict) else None
     recovery_status = recovery.get("status") if isinstance(recovery, dict) else None
-    if recovery_status == "required":
-        state = "blocked"
-    elif recovery_status == "owner_retry_required":
-        state = "retry_required"
-    elif supervisor is None:
+    test_supervisor = supervisor is not None and not callable(
+        getattr(supervisor, "_status_path", None)
+    )
+    owns_adapter = native_adapter is None
+    adapter = native_adapter or NativeForgeAdapter(config.root)
+    try:
+        state = adapter.continuous_consumer_state(
+            durable_status_present=isinstance(status, dict),
+            cursor_recovery_required=recovery_status == "required",
+            owner_retry_required=recovery_status == "owner_retry_required",
+            supervisor_present=supervisor is not None,
+            test_supervisor_without_status_path=test_supervisor,
+            test_supervisor_has_stream_identity=bool(getattr(supervisor, "stream_identity", None)),
+            stream_identity_matches=(
+                isinstance(status, dict)
+                and status.get("event_stream_identity")
+                == getattr(supervisor, "stream_identity", None)
+            ),
+            event_cursor_is_integer=(
+                isinstance(status, dict) and type(status.get("event_cursor")) is int
+            ),
+            event_cursor_matches=(
+                isinstance(status, dict)
+                and status.get("event_cursor") == getattr(supervisor, "current_cursor", None)
+            ),
+        )
+    except ForgeError as error:
         state = "unknown"
-    elif (
-        status.get("event_stream_identity") == getattr(supervisor, "stream_identity", None)
-        and type(status.get("event_cursor")) is int
-        and status.get("event_cursor") == getattr(supervisor, "current_cursor", None)
-    ):
-        state = "ready"
+        native_error = error.code
     else:
-        state = "reconciling"
-    return {
-        "state": state,
-        "stream_identity": status.get("event_stream_identity"),
-        "cursor": status.get("event_cursor"),
-        "cursor_recovery": recovery,
-    }
+        native_error = None
+    finally:
+        if owns_adapter:
+            adapter.close()
+
+    result: dict[str, Any] = {"state": state}
+    if status is None:
+        if test_supervisor:
+            result.update(
+                stream_identity=getattr(supervisor, "stream_identity", None),
+                cursor=getattr(supervisor, "current_cursor", None),
+            )
+        elif native_error is None:
+            result["reason"] = "no durable continuous cursor exists"
+    else:
+        result.update(
+            stream_identity=status.get("event_stream_identity"),
+            cursor=status.get("event_cursor"),
+            cursor_recovery=recovery,
+        )
+    if native_error is not None:
+        result["native_error"] = native_error
+    return result
 
 
 def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
+    lease = _lease(config)
     result: dict[str, Any] = {
         "schema_version": STATUS_SCHEMA,
         "state": "stopped",
@@ -435,9 +483,7 @@ def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
         "observed": None,
         "diagnostics": [],
         "recovery": "invoke resident-reconcile with the same selected bindings and configuration",
-        "continuous_consumer": _continuous_consumer_status(config),
     }
-    lease = _lease(config)
     if not lease:
         # A never-started resident still reports its (absent) consumer
         # position so readiness predicates evaluate to not-ready instead
@@ -483,6 +529,15 @@ def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
                 }
             ],
         }
+    # An owned resident reports the consumer state from its live challenge,
+    # using the native session already retained by its supervisor. If that
+    # challenge fails, keep readiness unknown instead of compiling a second
+    # adapter with no supervisor evidence.
+    result["continuous_consumer"] = {
+        "state": "unknown",
+        "reason": "live resident challenge unavailable",
+    }
+    live_consumer_observed = False
     nonce = uuid.uuid4().hex
     try:
         with socket.socket(socket.AF_UNIX) as client:
@@ -500,16 +555,26 @@ def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
         result.update(state=observed["state"], observed=observed)
         observed.pop("nonce", None)
         result["continuous_consumer"] = observed.get("continuous_consumer")
+        live_consumer_observed = True
         if observed["state"] == "degraded":
             consumer = observed.get("continuous_consumer")
             recovery = consumer.get("cursor_recovery") if isinstance(consumer, dict) else None
-            result["diagnostics"] = [
-                {
-                    "code": "RESIDENT_EVENT_CURSOR_RECOVERY",
-                    "message": "continuous owner did not acknowledge the durable event cursor",
-                    "recovery": recovery,
-                }
-            ]
+            if isinstance(consumer, dict) and consumer.get("state") == "unknown":
+                result["diagnostics"] = [
+                    {
+                        "code": "RESIDENT_NATIVE_CURSOR_POLICY_UNAVAILABLE",
+                        "message": "MNCS resident cursor policy could not establish readiness",
+                        "native_error": consumer.get("native_error"),
+                    }
+                ]
+            else:
+                result["diagnostics"] = [
+                    {
+                        "code": "RESIDENT_EVENT_CURSOR_RECOVERY",
+                        "message": "continuous owner did not acknowledge the durable event cursor",
+                        "recovery": recovery,
+                    }
+                ]
         if observed["state"] == "starting" and time.monotonic() - float(
             lease.get("started_monotonic", 0)
         ) >= float(config.continuous_settings.get("start_timeout_seconds", 60)):
@@ -538,6 +603,11 @@ def resident_status(config: Any, identity: dict[str, Any]) -> dict[str, Any]:
             state="degraded",
             diagnostics=[{"code": "RESIDENT_PROBE_FAILED", "message": str(error)[:512]}],
         )
+        if not live_consumer_observed:
+            # The retained resident session could not answer, so fall back to
+            # native policy over durable recovery evidence. This keeps a
+            # required cursor recovery blocked during an unavailable challenge.
+            result["continuous_consumer"] = _continuous_consumer_status(config)
         if lease.get("phase") == "starting" and time.monotonic() - float(
             lease.get("started_monotonic", 0)
         ) < float(config.continuous_settings.get("start_timeout_seconds", 60)):
@@ -562,7 +632,16 @@ def resident_reconcile(
             consumer = status.get("continuous_consumer")
             if not isinstance(consumer, dict) and isinstance(observed, dict):
                 consumer = observed.get("continuous_consumer")
-            if isinstance(consumer, dict) and consumer.get("state") == "blocked":
+            recovery = consumer.get("cursor_recovery") if isinstance(consumer, dict) else None
+            native_unknown_with_required_recovery = (
+                isinstance(consumer, dict)
+                and consumer.get("state") == "unknown"
+                and isinstance(recovery, dict)
+                and recovery.get("status") == "required"
+            )
+            if (isinstance(consumer, dict) and consumer.get("state") == "blocked") or (
+                native_unknown_with_required_recovery
+            ):
                 return {
                     "schema_version": RECONCILE_SCHEMA,
                     "operation": "blocked",

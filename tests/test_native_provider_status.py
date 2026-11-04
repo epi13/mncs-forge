@@ -8,7 +8,6 @@ import pytest
 from mncs_forge.engine import Forge
 from mncs_forge.mncs_native import NativeForgeAdapter
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -36,6 +35,99 @@ def test_native_status_aggregation_matches_independent_expectation(
     native_adapter: NativeForgeAdapter, statuses: list[str], expected: str
 ) -> None:
     assert native_adapter.status_aggregate(statuses) == expected
+
+
+def _continuous_consumer_inputs(**changes: bool) -> dict[str, bool]:
+    return {
+        "durable_status_present": False,
+        "cursor_recovery_required": False,
+        "owner_retry_required": False,
+        "supervisor_present": False,
+        "test_supervisor_without_status_path": False,
+        "test_supervisor_has_stream_identity": False,
+        "stream_identity_matches": False,
+        "event_cursor_is_integer": False,
+        "event_cursor_matches": False,
+        **changes,
+    }
+
+
+@pytest.mark.parametrize(
+    ("evidence", "expected"),
+    [
+        (_continuous_consumer_inputs(), "starting"),
+        (
+            _continuous_consumer_inputs(
+                test_supervisor_without_status_path=True,
+                test_supervisor_has_stream_identity=True,
+            ),
+            "ready",
+        ),
+        (
+            _continuous_consumer_inputs(test_supervisor_without_status_path=True),
+            "starting",
+        ),
+        (
+            _continuous_consumer_inputs(
+                durable_status_present=True,
+                cursor_recovery_required=True,
+            ),
+            "blocked",
+        ),
+        (
+            _continuous_consumer_inputs(
+                durable_status_present=True,
+                owner_retry_required=True,
+            ),
+            "retry_required",
+        ),
+        (
+            _continuous_consumer_inputs(
+                durable_status_present=True,
+                supervisor_present=True,
+                stream_identity_matches=True,
+                event_cursor_is_integer=True,
+                event_cursor_matches=True,
+            ),
+            "ready",
+        ),
+        (
+            _continuous_consumer_inputs(
+                durable_status_present=True,
+                supervisor_present=True,
+            ),
+            "reconciling",
+        ),
+        (
+            _continuous_consumer_inputs(
+                durable_status_present=True,
+                supervisor_present=True,
+                stream_identity_matches=True,
+                event_cursor_is_integer=False,
+                event_cursor_matches=True,
+            ),
+            "reconciling",
+        ),
+        (
+            _continuous_consumer_inputs(
+                durable_status_present=True,
+                cursor_recovery_required=True,
+                owner_retry_required=True,
+            ),
+            "blocked",
+        ),
+        (
+            _continuous_consumer_inputs(durable_status_present=True),
+            "unknown",
+        ),
+    ],
+)
+def test_native_continuous_consumer_projection_matches_independent_expectation(
+    native_adapter: NativeForgeAdapter,
+    evidence: dict[str, bool],
+    expected: str,
+) -> None:
+    assert native_adapter.continuous_consumer_state(**evidence) == expected
 
 
 def test_provider_inventory_and_capability_blockers_use_native_status(

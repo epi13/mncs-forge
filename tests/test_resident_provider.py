@@ -14,6 +14,7 @@ import pytest
 
 from mncs_forge import continuous, resident
 from mncs_forge.errors import ForgeError
+from mncs_forge.mncs_native import NativeForgeAdapter
 
 
 @pytest.fixture
@@ -100,6 +101,21 @@ def test_live_challenge_and_language_stream_are_required(config, identity, monke
             "selected_bindings": resident.language_bindings(identity),
         },
     )
+    native = NativeForgeAdapter(config.root)
+    assert (
+        native.continuous_consumer_state(
+            durable_status_present=False,
+            cursor_recovery_required=False,
+            owner_retry_required=False,
+            supervisor_present=False,
+            test_supervisor_without_status_path=False,
+            test_supervisor_has_stream_identity=False,
+            stream_identity_matches=False,
+            event_cursor_is_integer=False,
+            event_cursor_matches=False,
+        )
+        == "starting"
+    )
     endpoint = resident.ResidentEndpoint(config, identity, "test")
     try:
         assert resident.resident_status(config, identity)["state"] == "starting"
@@ -108,13 +124,22 @@ def test_live_challenge_and_language_stream_are_required(config, identity, monke
             current_generation=2,
             current_cursor=3,
             _stop_requested=False,
+            _resource_semantics=native,
         )
         monkeypatch.setattr(
             resident,
             "_probe_language_service",
             lambda _c: {"workspace_root": str(config.root), "stream_identity": "selected-stream"},
         )
-        result = resident.resident_status(config, identity)
+        with monkeypatch.context() as no_extra_native_adapter:
+            no_extra_native_adapter.setattr(
+                resident,
+                "NativeForgeAdapter",
+                lambda *_args, **_kwargs: pytest.fail(
+                    "live status must reuse the resident's retained native session"
+                ),
+            )
+            result = resident.resident_status(config, identity)
         assert result["state"] == "ready"
         assert "nonce" not in result["observed"]
         assert resident.resident_reconcile(config, identity)["operation"] == "reused"
@@ -127,6 +152,7 @@ def test_live_challenge_and_language_stream_are_required(config, identity, monke
         assert resident.resident_status(config, identity)["state"] == "degraded"
     finally:
         endpoint.close()
+        native.close()
 
 
 def test_resident_health_exposes_and_preserves_cursor_recovery(config, identity, monkeypatch):
@@ -146,6 +172,21 @@ def test_resident_health_exposes_and_preserves_cursor_recovery(config, identity,
         },
     )
     write_lease(config, identity, instance="cursor-test")
+    native = NativeForgeAdapter(config.root)
+    assert (
+        native.continuous_consumer_state(
+            durable_status_present=True,
+            cursor_recovery_required=True,
+            owner_retry_required=False,
+            supervisor_present=True,
+            test_supervisor_without_status_path=False,
+            test_supervisor_has_stream_identity=True,
+            stream_identity_matches=True,
+            event_cursor_is_integer=True,
+            event_cursor_matches=True,
+        )
+        == "blocked"
+    )
     endpoint = resident.ResidentEndpoint(config, identity, "cursor-test")
     endpoint.supervisor = SimpleNamespace(
         stream_identity="old-stream",
@@ -153,6 +194,7 @@ def test_resident_health_exposes_and_preserves_cursor_recovery(config, identity,
         current_cursor=2,
         _stop_requested=False,
         _status_path=lambda: status_path,
+        _resource_semantics=native,
     )
     monkeypatch.setattr(
         resident,
@@ -171,6 +213,40 @@ def test_resident_health_exposes_and_preserves_cursor_recovery(config, identity,
         assert result["status"]["continuous_consumer"]["state"] == "blocked"
     finally:
         endpoint.close()
+        native.close()
+
+
+def test_required_cursor_recovery_still_blocks_when_native_policy_is_unavailable(
+    config, identity, monkeypatch
+):
+    status_path = config.state_dir / "continuous" / "status.json"
+    continuous._write_json_path(
+        status_path,
+        {
+            "event_stream_identity": "old-stream",
+            "event_cursor": 2,
+            "cursor_recovery": {"status": "required"},
+        },
+    )
+    write_lease(config, identity)
+
+    class UnavailableNativePolicy:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def continuous_consumer_state(self, **_kwargs):
+            raise ForgeError("NATIVE_CONTINUOUS_UNKNOWN", "test runtime unavailable")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(resident, "NativeForgeAdapter", UnavailableNativePolicy)
+    monkeypatch.setattr(resident, "signal_owned", lambda *_args: pytest.fail("unsafe reset"))
+    result = resident.resident_reconcile(config, identity)
+
+    assert result["operation"] == "blocked"
+    assert result["status"]["continuous_consumer"]["state"] == "unknown"
+    assert result["status"]["continuous_consumer"]["cursor_recovery"]["status"] == "required"
 
 
 def test_resident_consumer_readiness_requires_matching_durable_pair(config):

@@ -1051,3 +1051,33 @@ fn verification_resource_transition(
         false
     );
 }
+
+// Project the resident's durable event-cursor evidence into one bounded
+// readiness state. The host supplies only observed facts (including strict
+// integer and identity comparisons); this kernel owns precedence and the
+// resulting classification consumed by Forge and Environment.
+fn continuous_consumer_state(
+    durable_status_present: bool,
+    cursor_recovery_required: bool,
+    owner_retry_required: bool,
+    supervisor_present: bool,
+    test_supervisor_without_status_path: bool,
+    test_supervisor_has_stream_identity: bool,
+    stream_identity_matches: bool,
+    event_cursor_is_integer: bool,
+    event_cursor_matches: bool
+) -> (result: byte) {
+    if durable_status_present {
+        if cursor_recovery_required { return 2; }
+        if owner_retry_required { return 3; }
+        if !supervisor_present { return 4; }
+        if stream_identity_matches && event_cursor_is_integer && event_cursor_matches {
+            return 1;
+        }
+        return 5;
+    }
+    if test_supervisor_without_status_path && test_supervisor_has_stream_identity {
+        return 1;
+    }
+    return 0;
+}
