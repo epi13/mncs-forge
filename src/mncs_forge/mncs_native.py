@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 from .errors import ForgeError
+from .compile_workspace import workspace as compile_workspace
 from .execution import run_bounded
 from .ports import Runner
 from .process_effect import ProcessEffectClient
@@ -1324,7 +1325,7 @@ class NativeForgeAdapter:
         """Compile the Forge core for one identity; semantic calls never use this path."""
 
         cache_path = self._artifact_cache_path(identity)
-        with tempfile.TemporaryDirectory(prefix=".mncs-native-artifact-", dir=self.forge_root) as directory:
+        with compile_workspace(self.forge_root) as directory:
             output_dir = Path(directory)
             command = [
                 *self._command(),
