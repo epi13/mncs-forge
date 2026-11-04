@@ -180,12 +180,14 @@ def test_matching_is_deterministic_stable_and_inspectable(config: ForgeConfig) -
     assert isinstance(matches, list)
     assert [item["rank"] for item in matches] == list(range(1, len(matches) + 1))
     assert matches[0]["verifier_id"] == "verify-pass"
+    assert matches[0]["matched_uncertainty_classes"] == ["structural"]
+    assert "supports mode development" in matches[0]["reasons"]
+    assert "supports language python" in matches[0]["reasons"]
+    assert "cost low is within maximum" in matches[0]["reasons"]
     assert first["execution_performed"] is False
     assert forge.ledger.verify()["entries"] == 0
 
-
-def test_matching_no_match_preserves_unknown(config: ForgeConfig) -> None:
-    result = Forge(config).verifier_match(
+    result = forge.verifier_match(
         uncertainty_classes=["whole-program-proof"],
         language="rust",
         scope="package",
@@ -195,6 +197,39 @@ def test_matching_no_match_preserves_unknown(config: ForgeConfig) -> None:
     assert result["unresolved_status"] == "UNKNOWN"
     assert result["matches"] == []
     assert result["incompatible"]
+    first_incompatible = next(
+        item for item in result["incompatible"] if item["verifier_id"] == "verify-pass"
+    )
+    assert "no requested uncertainty class is declared" in first_incompatible["exclusions"]
+    assert "language rust is not supported" in first_incompatible["exclusions"]
+    assert "scope package is not supported" in first_incompatible["exclusions"]
+
+    empty_optional_filters = forge.verifier_match(
+        uncertainty_classes=["structural"],
+        language="",
+        artifact_type="",
+        scope="",
+        required_category="",
+    )
+    assert empty_optional_filters["match_outcome"] == "NO_MATCH"
+    verifier = next(
+        item
+        for item in empty_optional_filters["incompatible"]
+        if item["verifier_id"] == "verify-pass"
+    )
+    assert "language  is not supported" in verifier["exclusions"]
+    assert "artifact type  is not supported" in verifier["exclusions"]
+    assert "scope  is not supported" in verifier["exclusions"]
+    assert "category bounded_structural_analysis differs from " in verifier["exclusions"]
+
+    cost_limited = forge.verifier_match(
+        uncertainty_classes=["structural"], maximum_cost="low"
+    )
+    assert all(item["cost"] == "low" for item in cost_limited["matches"])
+    medium_cost = next(
+        item for item in cost_limited["incompatible"] if item["verifier_id"] == "verify-fail"
+    )
+    assert "cost medium exceeds maximum low" in medium_cost["exclusions"]
 
 
 @pytest.mark.parametrize(

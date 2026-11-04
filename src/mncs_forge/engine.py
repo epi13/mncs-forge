@@ -163,6 +163,7 @@ class Forge:
             lifecycle=self._lifecycle,
             observer=self._observer,
             executor=self._executor,
+            native_semantics=self._resource_semantics,
         )
         self._candidate_service = CandidateService(
             config=config,

@@ -51,6 +51,8 @@ _MNCS_TYPE_PREFIX = "mncs:0.2:finite-type:"
 _MNCS_VARIANT_PREFIX = "mncs:0.2:finite-variant:"
 _STATUS_VARIANTS = {"PASS": 0, "FAIL": 1, "UNKNOWN": 2}
 _VERIFICATION_COST_TIERS = {"low": 0, "medium": 1, "high": 2}
+_VERIFIER_MATCH_MAX_ITEMS = 64
+_VERIFIER_MATCH_MAX_TEXT_BYTES = 256
 _LIFECYCLE_STAGES = {
     "NoEpoch": 0,
     "EpochActive": 1,
@@ -450,6 +452,23 @@ class NativeVerificationStatusDecision:
     status: str
     stale_observed: bool
     escalation_required: bool
+    duration_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class NativeVerifierMatchDecision:
+    """Typed Forge-native compatibility result for one declared micro-verifier."""
+
+    compatible: bool
+    mode_supported: bool
+    uncertainty_supported: bool
+    language_supported: bool
+    artifact_type_supported: bool
+    scope_supported: bool
+    category_supported: bool
+    cost_admitted: bool
+    matched_uncertainty_classes: tuple[str, ...]
+    overlap_count: int
     duration_seconds: float
 
 
@@ -2913,6 +2932,176 @@ class NativeForgeAdapter:
         if selected < 0 or deferred < 0 or selected + deferred != total_count:
             raise ForgeError("NATIVE_ABI_MISMATCH", "native queue admission counts do not balance")
         return selected, deferred
+
+    def verifier_match_decide(
+        self,
+        *,
+        active_mode: str,
+        requested_uncertainties: Sequence[str],
+        verifier_modes: Sequence[str],
+        verifier_uncertainties: Sequence[str],
+        language: str | None,
+        verifier_languages: Sequence[str],
+        artifact_type: str | None,
+        verifier_artifact_types: Sequence[str],
+        scope: str | None,
+        verifier_scopes: Sequence[str],
+        required_category: str | None,
+        verifier_category: str,
+        verifier_cost: str,
+        maximum_cost: str,
+    ) -> NativeVerifierMatchDecision:
+        """Decide one micro-verifier match in the Forge MNCS core."""
+
+        def byte_view(value: object, *, context: str, allow_empty: bool = False) -> dict[str, object]:
+            if not isinstance(value, str) or (not allow_empty and not value):
+                raise ForgeError(
+                    "NATIVE_VERIFIER_MATCH_INPUT", f"{context} must be non-empty text"
+                )
+            encoded = value.encode("utf-8")
+            if len(encoded) > _VERIFIER_MATCH_MAX_TEXT_BYTES:
+                raise ForgeError(
+                    "NATIVE_VERIFIER_MATCH_INPUT",
+                    f"{context} exceeds {_VERIFIER_MATCH_MAX_TEXT_BYTES} UTF-8 bytes",
+                )
+            return self._sequence_value([{"byte": {"value": byte}} for byte in encoded])
+
+        def text_sequence(values: Sequence[str], *, context: str) -> dict[str, object]:
+            if isinstance(values, (str, bytes)) or len(values) > _VERIFIER_MATCH_MAX_ITEMS:
+                raise ForgeError(
+                    "NATIVE_VERIFIER_MATCH_INPUT",
+                    f"{context} must contain at most {_VERIFIER_MATCH_MAX_ITEMS} values",
+                )
+            return self._sequence_value(
+                [byte_view(value, context=f"{context}[{index}]") for index, value in enumerate(values)]
+            )
+
+        def optional_byte_view(value: object, *, context: str) -> dict[str, object]:
+            if value is None:
+                return byte_view("", context=context, allow_empty=True)
+            return byte_view(value, context=context, allow_empty=True)
+
+        if not isinstance(active_mode, str) or not active_mode:
+            raise ForgeError("NATIVE_VERIFIER_MATCH_INPUT", "active mode must be non-empty text")
+        if not isinstance(verifier_category, str) or not verifier_category:
+            raise ForgeError(
+                "NATIVE_VERIFIER_MATCH_INPUT", "verifier category must be non-empty text"
+            )
+        verifier_tier = _VERIFICATION_COST_TIERS.get(verifier_cost, -1)
+        maximum_tier = _VERIFICATION_COST_TIERS.get(maximum_cost, -1)
+        if len(requested_uncertainties) > _VERIFIER_MATCH_MAX_ITEMS:
+            raise ForgeError(
+                "NATIVE_VERIFIER_MATCH_INPUT",
+                f"requested uncertainty classes exceed {_VERIFIER_MATCH_MAX_ITEMS}",
+            )
+
+        fields: dict[str, object] = {
+            "requested_mode": byte_view(active_mode, context="active mode"),
+            "requested_uncertainties": text_sequence(
+                requested_uncertainties, context="requested uncertainty classes"
+            ),
+            "verifier_modes": text_sequence(verifier_modes, context="verifier modes"),
+            "verifier_uncertainties": text_sequence(
+                verifier_uncertainties, context="verifier uncertainty classes"
+            ),
+            "requested_language": optional_byte_view(language, context="language"),
+            "has_language": self._mncs_boolean(language is not None),
+            "verifier_languages": text_sequence(verifier_languages, context="verifier languages"),
+            "requested_artifact_type": optional_byte_view(
+                artifact_type, context="artifact type"
+            ),
+            "has_artifact_type": self._mncs_boolean(artifact_type is not None),
+            "verifier_artifact_types": text_sequence(
+                verifier_artifact_types, context="verifier artifact types"
+            ),
+            "requested_scope": optional_byte_view(scope, context="scope"),
+            "has_scope": self._mncs_boolean(scope is not None),
+            "verifier_scopes": text_sequence(verifier_scopes, context="verifier scopes"),
+            "requested_category": optional_byte_view(
+                required_category, context="required category"
+            ),
+            "has_category": self._mncs_boolean(required_category is not None),
+            "verifier_category": byte_view(verifier_category, context="verifier category"),
+            "verifier_cost_tier": self._mncs_integer(verifier_tier),
+            "maximum_cost_tier": self._mncs_integer(maximum_tier),
+        }
+        abi = self.language_owned_abi()
+        input_type = self._abi_record_type(
+            abi, "VerifierMatchInput", context="VerifierMatchInput"
+        )
+        record = self._record_value(input_type, "VerifierMatchInput", fields)
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "verifier_match"},
+            "arguments": [record],
+            "step_budget": 2_000_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="verifier-match.json")
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError("NATIVE_VERIFIER_MATCH_UNKNOWN", "native verifier match failed")
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError(
+                "NATIVE_VERIFIER_MATCH_UNKNOWN", "native verifier match did not return"
+            )
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "verifier match result arity is invalid")
+        result_type = self._abi_record_type(
+            abi, "VerifierMatchDecision", context="VerifierMatchDecision"
+        )
+        result_fields = self._record_value_fields(
+            returned[0], result_type, context="verifier match decision"
+        )
+        flags_value = result_fields.get("overlap_flags")
+        if not isinstance(flags_value, Mapping) or not isinstance(
+            flags_value.get("sequence"), Mapping
+        ):
+            raise ForgeError("NATIVE_ABI_MISMATCH", "verifier overlap flags are malformed")
+        raw_flags = flags_value["sequence"].get("values")
+        if not isinstance(raw_flags, list) or len(raw_flags) != _VERIFIER_MATCH_MAX_ITEMS:
+            raise ForgeError("NATIVE_ABI_MISMATCH", "verifier overlap flags have an invalid length")
+        flags = [
+            self._boolean(flag, context=f"verifier overlap flag {index}")
+            for index, flag in enumerate(raw_flags)
+        ]
+        if any(flags[len(requested_uncertainties) :]):
+            raise ForgeError("NATIVE_ABI_MISMATCH", "native verifier overlap exceeds the request")
+        overlap_count = self._integer(
+            result_fields.get("overlap_count"), context="verifier uncertainty overlap count"
+        )
+        matched = tuple(
+            value for index, value in enumerate(requested_uncertainties) if flags[index]
+        )
+        if overlap_count != len(matched):
+            raise ForgeError("NATIVE_ABI_MISMATCH", "native verifier overlap count is inconsistent")
+        return NativeVerifierMatchDecision(
+            compatible=self._boolean(result_fields.get("compatible"), context="verifier compatibility"),
+            mode_supported=self._boolean(
+                result_fields.get("mode_supported"), context="verifier mode compatibility"
+            ),
+            uncertainty_supported=self._boolean(
+                result_fields.get("uncertainty_supported"), context="verifier uncertainty compatibility"
+            ),
+            language_supported=self._boolean(
+                result_fields.get("language_supported"), context="verifier language compatibility"
+            ),
+            artifact_type_supported=self._boolean(
+                result_fields.get("artifact_type_supported"),
+                context="verifier artifact type compatibility",
+            ),
+            scope_supported=self._boolean(
+                result_fields.get("scope_supported"), context="verifier scope compatibility"
+            ),
+            category_supported=self._boolean(
+                result_fields.get("category_supported"), context="verifier category compatibility"
+            ),
+            cost_admitted=self._boolean(
+                result_fields.get("cost_admitted"), context="verifier cost admission"
+            ),
+            matched_uncertainty_classes=matched,
+            overlap_count=overlap_count,
+            duration_seconds=invocation.duration_seconds,
+        )
 
     def verification_cost_admit(
         self, verifier_cost: str | None, maximum_cost: str

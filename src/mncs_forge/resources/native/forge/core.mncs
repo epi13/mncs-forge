@@ -510,6 +510,114 @@ fn verification_cost_admit(verifier_tier: i64, maximum_tier: i64) -> (result: bo
     return verifier_tier <= maximum_tier;
 }
 
+record VerifierMatchInput {
+    requested_mode: [byte; up_to 1024],
+    requested_uncertainties: [[byte; up_to 1024]; up_to 64],
+    verifier_modes: [[byte; up_to 1024]; up_to 64],
+    verifier_uncertainties: [[byte; up_to 1024]; up_to 64],
+    requested_language: [byte; up_to 1024],
+    has_language: bool,
+    verifier_languages: [[byte; up_to 1024]; up_to 64],
+    requested_artifact_type: [byte; up_to 1024],
+    has_artifact_type: bool,
+    verifier_artifact_types: [[byte; up_to 1024]; up_to 64],
+    requested_scope: [byte; up_to 1024],
+    has_scope: bool,
+    verifier_scopes: [[byte; up_to 1024]; up_to 64],
+    requested_category: [byte; up_to 1024],
+    has_category: bool,
+    verifier_category: [byte; up_to 1024],
+    verifier_cost_tier: i64,
+    maximum_cost_tier: i64
+}
+
+record VerifierMatchDecision {
+    compatible: bool,
+    mode_supported: bool,
+    uncertainty_supported: bool,
+    language_supported: bool,
+    artifact_type_supported: bool,
+    scope_supported: bool,
+    category_supported: bool,
+    cost_admitted: bool,
+    overlap_count: i64,
+    overlap_flags: [bool; 64]
+}
+
+record VerifierOverlapState {
+    flags: [bool; 64],
+    count: i64
+}
+
+fn verifier_match_contains(
+    values: [[byte; up_to 1024]; up_to 64],
+    candidate: [byte; up_to 1024]
+) -> (result: bool) {
+    iterate i over values carrying found: bool = false {
+        next found = found || sequences.equals_byte_view<1024>(values[i], candidate);
+    }
+    return found;
+}
+
+fn verifier_match_overlap(
+    requested: [[byte; up_to 1024]; up_to 64],
+    declared: [[byte; up_to 1024]; up_to 64]
+) -> (result: VerifierOverlapState) {
+    let initial: VerifierOverlapState = VerifierOverlapState {
+        flags: [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false],
+        count: 0
+    };
+    iterate i over requested carrying state: VerifierOverlapState = initial {
+        let matched: bool = verifier_match_contains(declared, requested[i]);
+        let flags: [bool; 64] = replace(state.flags, i as u64, matched);
+        next state = VerifierOverlapState {
+            flags: flags,
+            count: state.count +% (matched as i64)
+        };
+    }
+    return state;
+}
+
+// Match one declared verifier against a bounded request. The host supplies
+// normalized declaration fields, while compatibility and uncertainty overlap
+// remain Forge-owned MNCS decisions.
+fn verifier_match(input: VerifierMatchInput) -> (result: VerifierMatchDecision) {
+    let mode_supported: bool =
+        verifier_match_contains(input.verifier_modes, input.requested_mode);
+    let overlap: VerifierOverlapState =
+        verifier_match_overlap(input.requested_uncertainties, input.verifier_uncertainties);
+    let uncertainty_supported: bool =
+        input.requested_uncertainties.len == 0 || overlap.count > 0;
+    let language_supported: bool = !input.has_language
+        || verifier_match_contains(input.verifier_languages, input.requested_language);
+    let artifact_type_supported: bool = !input.has_artifact_type
+        || verifier_match_contains(input.verifier_artifact_types, input.requested_artifact_type);
+    let scope_supported: bool = !input.has_scope
+        || verifier_match_contains(input.verifier_scopes, input.requested_scope);
+    let category_supported: bool = !input.has_category
+        || sequences.equals_byte_view<1024>(input.verifier_category, input.requested_category);
+    let cost_admitted: bool =
+        verification_cost_admit(input.verifier_cost_tier, input.maximum_cost_tier);
+    return VerifierMatchDecision {
+        compatible: mode_supported
+            && uncertainty_supported
+            && language_supported
+            && artifact_type_supported
+            && scope_supported
+            && category_supported
+            && cost_admitted,
+        mode_supported: mode_supported,
+        uncertainty_supported: uncertainty_supported,
+        language_supported: language_supported,
+        artifact_type_supported: artifact_type_supported,
+        scope_supported: scope_supported,
+        category_supported: category_supported,
+        cost_admitted: cost_admitted,
+        overlap_count: overlap.count,
+        overlap_flags: overlap.flags
+    };
+}
+
 record VerificationStatusSet {
     statuses: [statlib.Status; 16],
     status_count: byte,

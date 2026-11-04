@@ -18,6 +18,7 @@ from .application.support import now, redact
 from .config import ForgeConfig, Provider, Verifier, Workflow
 from .errors import ForgeError
 from .execution import parse_provider_response
+from .mncs_native import NativeForgeAdapter
 from .paths import is_within, resolve_contained, validate_relative_path
 from .ports import (
     ExecutionResult,
@@ -49,7 +50,6 @@ from .verifier_support import (
 )
 
 COST_ORDER = {"low": 0, "medium": 1, "high": 2}
-STATUS_ORDER = {"PASS": 0, "UNKNOWN": 1, "FAIL": 2}
 RESERVED_PARAMETER_KEYS = {
     "argv",
     "command",
@@ -59,11 +59,6 @@ RESERVED_PARAMETER_KEYS = {
     "shell",
     "working_directory",
 }
-
-
-def _aggregate_status(statuses: list[str]) -> str:
-    values = [value for value in statuses if value in STATUS_ORDER]
-    return max(values, key=STATUS_ORDER.__getitem__) if values else "UNKNOWN"
 
 
 def _string_list(value: object, *, limit: int = 20) -> list[str]:
@@ -89,6 +84,7 @@ class MicroVerifierService:
         lifecycle: LifecycleContext,
         observer: ProjectObserver,
         executor: Runner,
+        native_semantics: NativeForgeAdapter,
     ) -> None:
         self.config = config
         self.mode = mode
@@ -97,6 +93,7 @@ class MicroVerifierService:
         self.lifecycle = lifecycle
         self.observer = observer
         self.executor = executor
+        self.native_semantics = native_semantics
 
     def _public(self, verifier: Verifier) -> dict[str, object]:
         provider = self.config.providers[verifier.provider_id]
@@ -181,54 +178,73 @@ class MicroVerifierService:
         for verifier in sorted(self.config.verifiers.values(), key=lambda item: item.verifier_id):
             reasons: list[str] = []
             exclusions: list[str] = []
-            overlap = sorted(
-                set(requested_uncertainties).intersection(verifier.uncertainty_classes)
+            decision = self.native_semantics.verifier_match_decide(
+                active_mode=mode,
+                requested_uncertainties=requested_uncertainties,
+                verifier_modes=verifier.modes,
+                verifier_uncertainties=verifier.uncertainty_classes,
+                language=language,
+                verifier_languages=verifier.languages,
+                artifact_type=artifact_type,
+                verifier_artifact_types=verifier.artifact_types,
+                scope=scope,
+                verifier_scopes=verifier.scopes,
+                required_category=required_category,
+                verifier_category=verifier.category,
+                verifier_cost=verifier.cost,
+                maximum_cost=maximum_cost,
             )
-            if mode not in verifier.modes:
+            overlap = list(decision.matched_uncertainty_classes)
+            if not decision.mode_supported:
                 exclusions.append(f"mode {mode} is not supported")
             else:
                 reasons.append(f"supports mode {mode}")
-            if requested_uncertainties and not overlap:
+            if not decision.uncertainty_supported:
                 exclusions.append("no requested uncertainty class is declared")
             elif overlap:
                 reasons.append("uncertainty classes: " + ", ".join(overlap))
             if language is not None:
-                if language in verifier.languages:
+                if decision.language_supported:
                     reasons.append(f"supports language {language}")
                 else:
                     exclusions.append(f"language {language} is not supported")
             if artifact_type is not None:
-                if artifact_type in verifier.artifact_types:
+                if decision.artifact_type_supported:
                     reasons.append(f"supports artifact type {artifact_type}")
                 else:
                     exclusions.append(f"artifact type {artifact_type} is not supported")
             if scope is not None:
-                if scope in verifier.scopes:
+                if decision.scope_supported:
                     reasons.append(f"supports scope {scope}")
                 else:
                     exclusions.append(f"scope {scope} is not supported")
             if required_category is not None:
-                if required_category == verifier.category:
+                if decision.category_supported:
                     reasons.append(f"category is {required_category}")
                 else:
                     exclusions.append(
                         f"category {verifier.category} differs from {required_category}"
                     )
-            if COST_ORDER[verifier.cost] > COST_ORDER[maximum_cost]:
+            if not decision.cost_admitted:
                 exclusions.append(f"cost {verifier.cost} exceeds maximum {maximum_cost}")
             else:
                 reasons.append(f"cost {verifier.cost} is within maximum")
+            if decision.compatible != (not exclusions):
+                raise ForgeError(
+                    "NATIVE_ABI_MISMATCH",
+                    "native verifier compatibility disagrees with its reason projection",
+                )
             entry: dict[str, object] = {
                 **self._public(verifier),
                 "matched_uncertainty_classes": overlap,
                 "reasons": reasons,
                 "exclusions": exclusions,
             }
-            if exclusions:
-                incompatible.append(entry)
-            else:
-                entry["_score"] = len(overlap)
+            if decision.compatible:
+                entry["_score"] = decision.overlap_count
                 compatible.append(entry)
+            else:
+                incompatible.append(entry)
 
         def match_key(item: dict[str, object]) -> tuple[int, int, str]:
             score = item["_score"]
@@ -570,7 +586,7 @@ class MicroVerifierService:
         recorded_count = sum(bool(result.get("output_identity")) for result in results)
         return {
             "results": results,
-            "aggregate_status": _aggregate_status(statuses),
+            "aggregate_status": self.native_semantics.status_aggregate(statuses),
             "individual_results_retained": True,
             "recorded_result_count": recorded_count,
             "unrecorded_result_count": len(results) - recorded_count,
