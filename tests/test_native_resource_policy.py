@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from mncs_forge.errors import ForgeError
 from mncs_forge.mncs_native import (
     NativeForgeAdapter,
     NativeResourceAdmissionDecision,
@@ -12,7 +14,6 @@ from mncs_forge.mncs_native import (
     NativeResourceOutcomeDecision,
     NativeVerificationTransition,
 )
-from mncs_forge.errors import ForgeError
 from mncs_forge.ports import ExecutionResult
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -168,12 +169,68 @@ def test_process_resource_reproducer_exposes_current_native_gap(
     assert "process_run takes exactly one typed process-request argument" in diagnostics
 
 
-@pytest.mark.parametrize(
-    "function",
-    ["resource_budget_select", "resource_admission", "resource_budget_identity"],
-)
-def test_float_gap_fallback_uses_focused_resource_module(
-    function: str, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("operation", ["budget", "admission"])
+def test_resource_policy_uses_canonical_vm_when_selected(operation: str) -> None:
+    required = (
+        "MNCS_COMPILER_CHECKOUT",
+        "MNCS_COMPILER_PROBE",
+        "MNCS_LANGUAGE_ROOT",
+        "MNCS_STDLIB_ROOT",
+        "MNCS_VM_CHECKOUT",
+        "MNCS_VM_BIN",
+        "MNCS_VM_ARTIFACT_CACHE",
+    )
+    if any(not os.environ.get(name) for name in required):
+        pytest.skip("canonical compiler/VM selection is not configured")
+
+    adapter = NativeForgeAdapter(ROOT)
+    try:
+        if operation == "budget":
+            decision = adapter.resource_budget_select(
+                {"host_memory_total_bytes": 4 * GIB, "cgroup_memory_max_bytes": None},
+                {"memory_fraction": 0.05},
+            )
+            assert (
+                decision.status,
+                decision.memory_high_bytes,
+                decision.memory_max_bytes,
+                decision.execution_backend,
+            ) == ("Selected", 107374182, 214748364, "canonical-vm-retained")
+        else:
+            decision = adapter.resource_admission(
+                {
+                    "containment_available": True,
+                    "has_budget": True,
+                    "available_memory_bytes": 1024 * MIB,
+                    "active_tasks": 0,
+                    "execution_slot_available": True,
+                    "requested_runtime_seconds": 30.0,
+                },
+                {
+                    "containment_required": True,
+                    "memory_max_bytes": 256 * MIB,
+                    "concurrency_max": 1,
+                    "runtime_max_seconds": 12.0,
+                },
+            )
+            assert (
+                decision.status,
+                decision.reason,
+                decision.required_headroom_bytes,
+                decision.runtime_seconds,
+            ) == ("Admit", "None", 512 * MIB, 12.0)
+
+        application = adapter._canonical_application
+        assert application is not None
+        status = application.status()
+        assert status["selected"] == "canonical-vm"
+        assert status["calls"] == 1
+    finally:
+        adapter.close()
+
+
+def test_resource_budget_identity_uses_focused_stage0_module_for_typed_grant(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: list[list[str]] = []
 
@@ -193,22 +250,23 @@ def test_float_gap_fallback_uses_focused_resource_module(
     adapter.library_root = ROOT
     monkeypatch.setattr(adapter, "_command", lambda: ["mncs"])
     monkeypatch.setattr(adapter, "_environment", lambda: {})
+    monkeypatch.setattr(adapter, "_embed_library", lambda: None)
     try:
         request = {
-            "target": {"module": "mncs.forge.core.v1", "function": function},
+            "target": {
+                "module": "mncs.forge.core.v1",
+                "function": "resource_budget_identity",
+            },
             "arguments": [],
-            "step_budget": 20_000,
-        }
-        if function == "resource_budget_identity":
-            request["grants"] = [{
+            "grants": [{
                 "capability": "resource_budget_identity",
                 "locator": "forge-resource-budget-identity",
                 "bytes": [],
-            }]
+            }],
+            "step_budget": 20_000,
+        }
         invocation = adapter._semantic_invocation(
-            request,
-            request_name="resource-policy.json",
-            force_stage0_reference=function != "resource_budget_identity",
+            request, request_name="resource-policy.json"
         )
     finally:
         adapter.close()
@@ -218,9 +276,8 @@ def test_float_gap_fallback_uses_focused_resource_module(
     command = captured[0]
     assert str((ROOT / "src/mncs_forge/resources/native/forge/resource_policy.mncs").resolve()) in command
     assert "mncs.forge.resource_policy.v1" in command
-    assert function in command
-    if function == "resource_budget_identity":
-        assert command[-2:] == ["--grant-structured", "resource_budget_identity"]
+    assert "resource_budget_identity" in command
+    assert command[-2:] == ["--grant-structured", "resource_budget_identity"]
 
 
 def test_stage0_host_call_value_preserves_typed_finite_identity() -> None:

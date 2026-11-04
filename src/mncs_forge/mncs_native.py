@@ -46,9 +46,6 @@ NATIVE_ARTIFACT_CACHE_KEEP = 8
 # Explicit Stage-0 embedding lane for host-granted process/effect providers.
 # Pure applications use the selected compiler + canonical VM when composed.
 STAGE0_EMBED_BACKEND = "mncs-research-bytecode"
-RESOURCE_POLICY_VM_FLOAT_GAPS = frozenset(
-    {"float_constant", "float", "float_compare", "float_intrinsic"}
-)
 NATIVE_SOURCE_PROFILE = "0.10"
 _MNCS_TYPE_PREFIX = "mncs:0.2:finite-type:"
 _MNCS_VARIANT_PREFIX = "mncs:0.2:finite-variant:"
@@ -68,10 +65,6 @@ _LIFECYCLE_STAGES = {
 }
 
 
-def _resource_policy_vm_float_gap(feature: object) -> bool:
-    if not isinstance(feature, str):
-        return False
-    return feature.removeprefix("instruction ") in RESOURCE_POLICY_VM_FLOAT_GAPS
 _LIFECYCLE_OPERATIONS = {
     "BeginEpoch": 0,
     "RegisterCandidate": 1,
@@ -807,7 +800,6 @@ class NativeForgeAdapter:
         self._retained_invocations = 0
         self._retained_call_mean_seconds = 0.0
         self._retained_call_max_seconds = 0.0
-        self._execution_fallbacks: list[dict[str, object]] = []
         self._artifact_cache_override: Path | None = None
         self._native_caches = {
             name: BoundedNativeCache(
@@ -952,17 +944,12 @@ class NativeForgeAdapter:
                     "pure_applications": "canonical-vm"
                     if self._canonical_selection()
                     else "stage0-reference",
-                    "resource_policy": (
-                        "stage0-reference-for-vm-float-gap"
-                        if self._execution_fallbacks
-                        else "canonical-vm"
-                        if self._canonical_selection()
-                        else "stage0-reference"
-                    ),
+                    "resource_policy": "canonical-vm"
+                    if self._canonical_selection()
+                    else "stage0-reference",
                     "host_grants": "stage0-reference/embed",
                     "stage0_backend": STAGE0_EMBED_BACKEND,
                 },
-                "execution_fallbacks": list(self._execution_fallbacks),
                 **self._selected_binary_observation(),
             }
         return {
@@ -1536,12 +1523,11 @@ class NativeForgeAdapter:
         source: Path | None = None,
         target_module: str | None = None,
     ) -> NativeInvocation:
-        """Run bounded Stage-0 policy work through the selected Language CLI.
+        """Run the exact typed resource-identity grant through the selected Language CLI.
 
-        This path is used only when the canonical VM reports a known runtime
-        gap. The CLI and its compiler source identity are selected by the
-        existing Language checkout binding; no retained embed library is
-        loaded or substituted.
+        Pure resource decisions use the canonical VM when it is selected. This
+        compatibility path retains the structured digest grant when the
+        selected toolchain has no retained host-grant provider.
         """
         target = request.get("target")
         arguments = request.get("arguments")
@@ -1639,10 +1625,9 @@ class NativeForgeAdapter:
         request: Mapping[str, object],
         *,
         request_name: str,
-        force_stage0_reference: bool = False,
         prefer_retained: bool = False,
     ) -> NativeInvocation:
-        """Call the retained core; use the old request-file path only for tests/oracles."""
+        """Dispatch to the canonical VM, retained embedding, or typed-grant adapter."""
 
         target = request.get("target")
         arguments = request.get("arguments")
@@ -1657,51 +1642,13 @@ class NativeForgeAdapter:
         if not isinstance(grants, list) or any(not isinstance(grant, Mapping) for grant in grants):
             raise ForgeError("NATIVE_REQUEST_INVALID", "native grants are not a list of objects")
         if (
-            not force_stage0_reference
-            and not use_retained_session
+            not use_retained_session
             and not grants
             and not self._execute_is_overridden()
             and self._canonical_selection() is not None
         ):
             assert self.library_root is not None
             return self.execute_canonical(self.native_source, request, libraries=(self.native_root, self.library_root))
-        if force_stage0_reference:
-            if grants and not (
-                function == "resource_budget_identity"
-                and len(grants) == 1
-                and set(grants[0]) == {"capability", "locator", "bytes"}
-                and grants[0].get("capability") == "resource_budget_identity"
-                and grants[0].get("locator") == "forge-resource-budget-identity"
-                and grants[0].get("bytes") == []
-            ):
-                raise ForgeError(
-                    "NATIVE_FALLBACK_GRANTS",
-                    "Stage-0 fallback grant is not the exact structured resource identity capability",
-                )
-            # The retained C ABI library can lag the selected Language CLI
-            # and reject current Forge source. Keep the pure compatibility
-            # path on the selected Stage-0 Language implementation instead
-            # of substituting stale embed bytes. Resource decisions have a
-            # focused source module so this bounded fallback does not compile
-            # the unrelated Forge core on every admission.
-            resource_policy_target = function in {
-                "resource_budget_select",
-                "resource_admission",
-                "resource_budget_identity",
-            }
-            return self._execute_stage0_reference_cli(
-                request,
-                source=(
-                    self.native_root / "resource_policy.mncs"
-                    if resource_policy_target
-                    else None
-                ),
-                target_module=(
-                    "mncs.forge.resource_policy.v1"
-                    if resource_policy_target
-                    else None
-                ),
-            )
         if (
             (self._execute_is_overridden() or self._embed_library() is None)
             and not use_retained_session
@@ -1753,72 +1700,6 @@ class NativeForgeAdapter:
             duration_seconds=duration,
             transport="retained",
         )
-
-    def _resource_policy_invocation(
-        self, request: Mapping[str, object], *, request_name: str
-    ) -> NativeInvocation:
-        """Run pure resource policy through the selected fallback for VM float gaps."""
-
-        invocation = self._semantic_invocation(request, request_name=request_name)
-        payload = invocation.payload
-        failure = payload.get("failure_reason") if isinstance(payload, Mapping) else None
-        feature = failure.get("feature") if isinstance(failure, Mapping) else None
-        if (
-            not payload
-            or payload.get("status") != "unsupported"
-            or not _resource_policy_vm_float_gap(feature)
-            or self._canonical_selection() is None
-        ):
-            return invocation
-
-        selected_status = (
-            self._canonical_application.status()
-            if self._canonical_application is not None
-            else {}
-        )
-        artifact = selected_status.get("artifact")
-        artifact = artifact if isinstance(artifact, Mapping) else {}
-        runtime = selected_status.get("runtime")
-        runtime = runtime if isinstance(runtime, Mapping) else {}
-        build_origin = runtime.get("build_origin")
-        build_origin = build_origin if isinstance(build_origin, Mapping) else {}
-        invocation = self._semantic_invocation(
-            request,
-            request_name=request_name,
-            force_stage0_reference=True,
-        )
-        target = request.get("target")
-        function = target.get("function") if isinstance(target, Mapping) else "unknown"
-        resource_policy_target = function in {
-            "resource_budget_select",
-            "resource_admission",
-        }
-        self._execution_fallbacks.append(
-            {
-                "target": f"forge/core.mncs::{function}",
-                "reason": f"canonical VM unsupported {feature}",
-                "from": "canonical-vm",
-                "to": "stage0-reference-cli",
-                "fallback_source": (
-                    "forge/resource_policy.mncs"
-                    if resource_policy_target
-                    else "forge/core.mncs"
-                ),
-                "fallback_target": (
-                    f"mncs.forge.resource_policy.v1::{function}"
-                    if resource_policy_target
-                    else f"mncs.forge.core.v1::{function}"
-                ),
-                "artifact_identity": artifact.get("identity"),
-                "producer": selected_status.get("producer"),
-                "vm_executable_sha256": runtime.get("executable_sha256"),
-                "vm_build_receipt_identity": build_origin.get("receipt_identity"),
-                "stage0_artifact": self._retained_artifact_identity,
-                "stage0_semantic_input_identity": self._retained_identity,
-            }
-        )
-        self._execution_fallbacks = self._execution_fallbacks[-8:]
-        return invocation
 
     def source_study(self, source: Path, *, node_id: str = "forge-native") -> NativeInvocation:
         return self.invoke(["source-study", str(source.resolve()), "--node-id", node_id])
@@ -2321,9 +2202,7 @@ class NativeForgeAdapter:
             "arguments": [observation_value, policy_value],
             "step_budget": 20_000,
         }
-        invocation = self._resource_policy_invocation(
-            request, request_name="resource-budget-request.json"
-        )
+        invocation = self._semantic_invocation(request, request_name="resource-budget-request.json")
         if not invocation.ok or invocation.payload is None:
             diagnostic = (invocation.stderr or invocation.stdout).decode(
                 "utf-8", errors="replace"
@@ -2563,9 +2442,7 @@ class NativeForgeAdapter:
             "arguments": [observation_value, policy_value],
             "step_budget": 20_000,
         }
-        invocation = self._resource_policy_invocation(
-            request, request_name="resource-admission.json"
-        )
+        invocation = self._semantic_invocation(request, request_name="resource-admission.json")
         if not invocation.ok or invocation.payload is None:
             diagnostic = (invocation.stderr or invocation.stdout).decode(
                 "utf-8", errors="replace"

@@ -50,6 +50,17 @@ _RECORD_PROJECTION_ENTRY_OVERHEAD_ESTIMATE = 1024
 _COUNTER_MAX = (1 << 63) - 1
 
 
+def _discover_store_root(module_file: Path) -> Path:
+    """Find the workspace Store checkout from main and registered worktrees."""
+
+    source = Path(module_file).resolve()
+    for ancestor in source.parents:
+        candidate = ancestor / "mncs-store"
+        if (candidate / "python" / "mncs_store").is_dir():
+            return candidate
+    return source.parents[3] / "mncs-store"
+
+
 def _load_store_types(store_root: Path | None = None) -> tuple[Any, ...]:
     """Load only the supported Store package, never Store test drivers."""
 
@@ -66,7 +77,7 @@ def _load_store_types(store_root: Path | None = None) -> tuple[Any, ...]:
         configured = os.environ.get("MNCS_STORE_ROOT")
         root = Path(configured).expanduser().resolve() if configured else store_root
         if root is None:
-            root = Path(__file__).resolve().parents[3] / "mncs-store"
+            root = _discover_store_root(Path(__file__))
         package_path = root / "python"
         if not (package_path / "mncs_store").is_dir():
             raise ForgeError(

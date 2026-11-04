@@ -2,9 +2,8 @@ mncs 0.18;
 
 module mncs.forge.resource_policy.v1;
 
-// Canonical resource budget and admission decisions. Keeping these pure
-// operations in a focused module also bounds the Stage-0 compatibility path
-// used when the selected canonical VM reports an unsupported float operation.
+// Canonical resource budget and admission decisions. Pure policy calls use
+// the selected canonical VM; structured identity keeps its explicit grant.
 enum ResourceBudgetStatus { Selected, Unavailable, InvalidPolicy }
 
 record ResourceObservation {
