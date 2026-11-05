@@ -65,6 +65,7 @@ _LIFECYCLE_STAGES = {
     "CandidateFrozen": 7,
     "EvaluationComplete": 8,
     "AmbiguousHistory": 9,
+    "BundleComplete": 10,
 }
 
 
@@ -139,6 +140,7 @@ _PROJECTION_INPUT_TYPE = _record_type_identity(
         "event_count": "byte",
         "events": "[HistoryEvent; 32]",
         "required_evidence": "byte",
+        "bundle_present": "bool",
     },
 )
 _PROJECTION_STATE_TYPE = _record_type_identity(
@@ -237,7 +239,7 @@ _FINITE_VARIANTS: dict[str, dict[str, int]] = {
     },
 }
 NATIVE_EXECUTION_CONTRACT = "mncs-forge.native-execution.v1"
-NATIVE_LIFECYCLE_PROJECTION_CONTRACT = "mncs-forge.lifecycle-projection.v1"
+NATIVE_LIFECYCLE_PROJECTION_CONTRACT = "mncs-forge.lifecycle-projection.v2"
 NATIVE_RECONCILIATION_CONTRACT = "mncs-forge.reconciliation-projection.v1"
 NATIVE_READINESS_CONTRACT = "mncs-forge.readiness-projection.v1"
 NATIVE_BUNDLE_CONTRACT = "mncs-forge.bundle-preconditions.v1"
@@ -4205,13 +4207,14 @@ class NativeForgeAdapter:
         *,
         current_candidate: str | None,
         required_evidence: int,
+        bundle_present: bool = False,
     ) -> NativeLifecycleProjection:
         """Project bounded typed lifecycle history in the MNCS runtime.
 
-        The host supplies only normalized record observations and digest
-        identities.  The native module owns parentage, disposition, freshness,
-        status, and stage projection; persistence and digest production remain
-        outside the language boundary.
+        The host supplies normalized record observations, digest identities,
+        and current-candidate bundle presence. The native module owns parentage,
+        disposition, freshness, status, and stage projection; persistence and
+        digest production remain outside the language boundary.
         """
 
         if len(events) > 32:
@@ -4224,6 +4227,10 @@ class NativeForgeAdapter:
             raise ForgeError(
                 "NATIVE_LIFECYCLE_UNKNOWN", "native evidence bound is outside byte range"
             )
+        if type(bundle_present) is not bool:
+            raise ForgeError(
+                "NATIVE_LIFECYCLE_UNKNOWN", "native bundle presence must be a boolean"
+            )
         self.ensure_available()
         event_list = [dict(event) for event in events]
         cache_key = (
@@ -4232,6 +4239,7 @@ class NativeForgeAdapter:
             json.dumps(event_list, sort_keys=True),
             current_candidate or "",
             required_evidence,
+            bundle_present,
         )
         cached = self._native_caches["lifecycle_projection"].get(cache_key)
         if cached is not None:
@@ -4248,6 +4256,7 @@ class NativeForgeAdapter:
                 "event_count": {"byte": {"value": len(event_list)}},
                 "events": self._sequence_value(event_values),
                 "required_evidence": {"byte": {"value": required_evidence}},
+                "bundle_present": self._mncs_boolean(bundle_present),
             },
         )
         request = {

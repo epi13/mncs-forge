@@ -944,3 +944,39 @@ def test_legacy_history_projects_without_rewriting_or_prospective_rejection() ->
     assert inspected["stage"] == "bundle_complete"
     assert candidate.schema_version == "0.1-unversioned"
     assert Ledger(state_dir).verify()["ok"] is True
+
+
+@pytest.mark.native
+def test_native_projection_owns_bundle_complete_for_persisted_current_bundle() -> None:
+    state_dir = Path(__file__).parent / "fixtures/legacy-0.1/complete-state"
+    history = Ledger(state_dir).records()
+    epoch = next(entry.payload for entry in history if entry.kind == "epoch")
+    candidate = [entry.payload for entry in history if entry.kind == "candidate"][-1]
+    disposition = [entry.payload for entry in history if entry.kind == "disposition"][-1]
+    freeze = next(entry.payload for entry in history if entry.kind == "freeze")
+    freeze_bindings = {
+        name: str(freeze[name])
+        for name in (
+            "candidate_identity",
+            "contract_identity",
+            "reference_identity",
+            "evaluator_identity",
+            "acceptance_policy_identity",
+            "protected_identity",
+        )
+    }
+    machine = ForgeStateMachine(
+        mode="evaluator",
+        history=history,
+        current_candidate_identity=str(candidate["candidate_id"]),
+        current_authority_identities=dict(epoch["authority_identities"]),  # type: ignore[arg-type]
+        current_freeze_bindings=freeze_bindings,
+        selection_policy_identity=str(disposition["selection_policy_identity"]),
+        required_evidence=["pass-check"],
+        native=NativeForgeAdapter(Path(__file__).resolve().parents[1]),
+    )
+
+    assert machine.inspect()["stage"] == "bundle_complete"
+    assert machine.projection.stage.value == "bundle_complete"
+    assert machine.projection.bundle_status == "complete"
+    assert Ledger(state_dir).verify()["ok"] is True

@@ -21,7 +21,8 @@ enum Stage {
     CandidateRejected,
     CandidateFrozen,
     EvaluationComplete,
-    AmbiguousHistory
+    AmbiguousHistory,
+    BundleComplete
 }
 
 enum Operation {
@@ -65,7 +66,8 @@ record ProjectionInput {
     events: [HistoryEvent; 32],
     event_count: byte,
     current_candidate: idlib.Digest32,
-    required_evidence: byte
+    required_evidence: byte,
+    bundle_present: bool
 }
 
 record LifecycleState {
@@ -115,6 +117,7 @@ fn stage_code(value: Stage) -> (result: i64) {
         CandidateFrozen => 7,
         EvaluationComplete => 8,
         AmbiguousHistory => 9,
+        BundleComplete => 10,
     };
 }
 
@@ -504,10 +507,15 @@ fn undisposed_stage(current: ProjectionState, required_evidence: byte) -> (resul
     return Stage.EvidenceIncomplete;
 }
 
-fn project_stage(current: ProjectionState, required_evidence: byte) -> (result: Stage) {
+fn project_stage(
+    current: ProjectionState,
+    required_evidence: byte,
+    bundle_present: bool
+) -> (result: Stage) {
     if is_false(current.lineage_ok) { return Stage.AmbiguousHistory; }
     if idlib.is_zero(current.active_epoch) { return Stage.NoEpoch; }
     if idlib.is_zero(current.current_candidate) { return Stage.EpochActive; }
+    if bundle_present { return Stage.BundleComplete; }
     if current.evaluated { return Stage.EvaluationComplete; }
     if current.frozen { return Stage.CandidateFrozen; }
     return match current.disposition {
@@ -536,6 +544,7 @@ fn project_status(stage: Stage, evidence: statlib.Status) -> (result: statlib.St
         Stage.CandidateSelected => selected_status(evidence),
         Stage.CandidateFrozen => selected_status(evidence),
         Stage.EvaluationComplete => evidence,
+        Stage.BundleComplete => selected_status(evidence),
         Stage.AmbiguousHistory => statlib.Status.UNKNOWN,
     };
 }
@@ -574,7 +583,11 @@ fn project(input: ProjectionInput) -> (result: ProjectionResult) {
     let initial: ProjectionState = projection_initial();
     let projected: ProjectionState = project_events(input, initial);
     let freshness: Freshness = project_freshness(projected, input);
-    let stage: Stage = project_stage(projected, input.required_evidence);
+    let stage: Stage = project_stage(
+        projected,
+        input.required_evidence,
+        input.bundle_present
+    );
     let final_state: ProjectionState = ProjectionState {
         stage: stage,
         active_epoch: projected.active_epoch,

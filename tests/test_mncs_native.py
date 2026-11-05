@@ -301,6 +301,24 @@ def test_native_lifecycle_projection_covers_lineage_freshness_and_terminality() 
     assert result.evaluated is True
     assert result.status == "PASS"
 
+    bundled = adapter.lifecycle_projection(
+        events,
+        current_candidate=candidate,
+        required_evidence=1,
+        bundle_present=True,
+    )
+    assert bundled.stage == "BundleComplete"
+    assert bundled.status == "PASS"
+
+    bundle_without_candidate = adapter.lifecycle_projection(
+        [], current_candidate=None, required_evidence=1, bundle_present=True
+    )
+    assert bundle_without_candidate.stage == "NoEpoch"
+    with pytest.raises(ForgeError, match="bundle presence must be a boolean"):
+        adapter.lifecycle_projection(
+            [], current_candidate=None, required_evidence=1, bundle_present=1  # type: ignore[arg-type]
+        )
+
     ambiguous = adapter.lifecycle_projection(
         [{"kind": "EpochStarted", "epoch": epoch, "parent_epoch": "epoch:" + ("03" * 32)}],
         current_candidate=None,

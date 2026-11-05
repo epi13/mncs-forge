@@ -783,6 +783,7 @@ class ForgeStateMachine:
             self._native_history_events(),
             current_candidate=self.current_candidate_identity,
             required_evidence=len(self.required_evidence),
+            bundle_present=bool(projection.bundles),
         )
         active_identity = (
             str(projection.active_epoch["epoch_id"])
@@ -843,23 +844,21 @@ class ForgeStateMachine:
                 limitations=tuple(limitations),
                 reconciliation_status="unknown",
             )
-        if projection.bundles:
-            stage = projection.stage
-        else:
-            stage = LifecycleStage(
-                {
-                    "NoEpoch": LifecycleStage.NO_EPOCH,
-                    "EpochActive": LifecycleStage.EPOCH_ACTIVE,
-                    "CandidateRegistered": LifecycleStage.CANDIDATE_REGISTERED,
-                    "EvidenceIncomplete": LifecycleStage.EVIDENCE_INCOMPLETE,
-                    "CandidateReady": LifecycleStage.CANDIDATE_READY,
-                    "CandidateSelected": LifecycleStage.CANDIDATE_SELECTED,
-                    "CandidateRejected": LifecycleStage.CANDIDATE_REJECTED,
-                    "CandidateFrozen": LifecycleStage.CANDIDATE_FROZEN,
-                    "EvaluationComplete": LifecycleStage.EVALUATION_COMPLETE,
-                    "AmbiguousHistory": LifecycleStage.AMBIGUOUS_HISTORY,
-                }[native.stage]
-            )
+        stage = LifecycleStage(
+            {
+                "NoEpoch": LifecycleStage.NO_EPOCH,
+                "EpochActive": LifecycleStage.EPOCH_ACTIVE,
+                "CandidateRegistered": LifecycleStage.CANDIDATE_REGISTERED,
+                "EvidenceIncomplete": LifecycleStage.EVIDENCE_INCOMPLETE,
+                "CandidateReady": LifecycleStage.CANDIDATE_READY,
+                "CandidateSelected": LifecycleStage.CANDIDATE_SELECTED,
+                "CandidateRejected": LifecycleStage.CANDIDATE_REJECTED,
+                "CandidateFrozen": LifecycleStage.CANDIDATE_FROZEN,
+                "EvaluationComplete": LifecycleStage.EVALUATION_COMPLETE,
+                "AmbiguousHistory": LifecycleStage.AMBIGUOUS_HISTORY,
+                "BundleComplete": LifecycleStage.BUNDLE_COMPLETE,
+            }[native.stage]
+        )
         native_freshness = {
             "NotApplicable": "NOT_APPLICABLE",
             "Current": "CURRENT",

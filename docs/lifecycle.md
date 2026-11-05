@@ -16,8 +16,9 @@ both call `Forge.state_inspect`; neither adapter implements lifecycle policy.
 
 The state machine projects the bounded lifecycle event material through the MNCS-owned lifecycle
 module when native execution is selected. That projection owns epoch/candidate parentage,
-evidence dominance, disposition, freeze/evaluation sequencing, freshness, and the compact stage;
-Forge retains persistence, record identity production, authority checks, evidence envelopes, and
+evidence dominance, disposition, freeze/evaluation sequencing, freshness, and the compact stage,
+including `bundle_complete`. Forge supplies bundle presence from its typed current-candidate records
+and retains persistence, record identity production, authority checks, evidence envelopes, and
 bundle materialization. Bundle authorization uses a separate typed native precondition projection.
 Covered mutations also require a bounded language-owned preflight before
 authorization returns. An unavailable runtime uses the explicit compatibility path, while a
