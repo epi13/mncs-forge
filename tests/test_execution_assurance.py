@@ -89,6 +89,56 @@ def test_property_outside_vocabulary_is_rejected_without_persistence(
     assert forge.ledger.records("execution_assurance") == []
 
 
+@pytest.mark.parametrize(
+    ("requested_properties", "message"),
+    [
+        ([], "requested execution-assurance properties cannot be empty"),
+        (
+            ["network_isolation", "network_isolation"],
+            "requested execution-assurance properties must be unique",
+        ),
+        (
+            ["unknown_a", "unknown_b"],
+            "requested properties are outside the declared vocabulary",
+        ),
+        (
+            ["unknown_a", "unknown_a"],
+            "requested execution-assurance properties must be unique",
+        ),
+    ],
+)
+def test_native_request_policy_rejects_invalid_requests_before_binding_lookup(
+    config: ForgeConfig, requested_properties: list[str], message: str
+) -> None:
+    forge = Forge(config)
+
+    with pytest.raises(ForgeError) as excinfo:
+        forge.execution_assurance_assess(
+            binding_id="execution-receipt-binding:does-not-exist",
+            requested_properties=requested_properties,
+        )
+
+    assert excinfo.value.code == "ASSURANCE_REQUEST"
+    assert excinfo.value.message == message
+    assert forge.ledger.records("execution_assurance") == []
+
+
+def test_native_request_transport_bound_is_reported_as_assurance_request(
+    config: ForgeConfig,
+) -> None:
+    forge = Forge(config)
+
+    with pytest.raises(ForgeError) as excinfo:
+        forge.execution_assurance_assess(
+            binding_id="execution-receipt-binding:does-not-exist",
+            requested_properties=[f"unknown_{index}" for index in range(9)],
+        )
+
+    assert excinfo.value.code == "ASSURANCE_REQUEST"
+    assert excinfo.value.message == "assurance properties exceed 8 items"
+    assert forge.ledger.records("execution_assurance") == []
+
+
 def test_incomplete_execution_keeps_assurance_unknown(config: ForgeConfig) -> None:
     forge = Forge(config)
     begin(forge)

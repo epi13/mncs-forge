@@ -359,3 +359,73 @@ def test_native_execution_assurance_matches_independent_vectors(
     assert result.runner_capability == runner, name
     assert result.network_isolation == network, name
     assert result.receipt_incomplete is receipt_incomplete, name
+
+
+@pytest.mark.parametrize(
+    ("requested", "status", "valid", "flags"),
+    [
+        ([], "Empty", False, (False, False, False, False, False)),
+        (
+            ["network_isolation", "network_isolation"],
+            "Duplicate",
+            False,
+            (False, False, True, False, False),
+        ),
+        (
+            ["unsupported_a", "unsupported_b"],
+            "UnknownProperty",
+            False,
+            (False, False, False, False, False),
+        ),
+        (
+            ["unsupported_a", "unsupported_a"],
+            "Duplicate",
+            False,
+            (False, False, False, False, False),
+        ),
+        (
+            ["runner_capability", "unsupported"],
+            "UnknownProperty",
+            False,
+            (True, False, False, False, False),
+        ),
+        (
+            ["filesystem_isolation", "same_operator_execution"],
+            "Valid",
+            True,
+            (False, True, False, False, True),
+        ),
+        (
+            [
+                "runner_capability",
+                "filesystem_isolation",
+                "network_isolation",
+                "containerization",
+                "same_operator_execution",
+            ],
+            "Valid",
+            True,
+            (True, True, True, True, True),
+        ),
+    ],
+)
+def test_native_assurance_request_validation_matches_independent_vectors(
+    requested: list[str], status: str, valid: bool, flags: tuple[bool, ...]
+) -> None:
+    result = NativeForgeAdapter(ROOT).execution_assurance_request_validate(requested)
+    assert result.status == status
+    assert result.valid is valid
+    assert (
+        result.requested_runner_capability,
+        result.requested_filesystem_isolation,
+        result.requested_network_isolation,
+        result.requested_containerization,
+        result.requested_same_operator_execution,
+    ) == flags
+
+
+def test_native_assurance_request_validation_handles_its_maximum_bounded_workload() -> None:
+    requested = ["x" * 30 + f"{index:02d}" for index in range(8)]
+    result = NativeForgeAdapter(ROOT).execution_assurance_request_validate(requested)
+    assert result.status == "UnknownProperty"
+    assert not result.valid

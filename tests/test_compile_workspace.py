@@ -1,4 +1,5 @@
 """Compiler scratch is disposable without taking over another live build."""
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,19 @@ def test_success_failure_and_live_lease(tmp_path):
     with pytest.raises(RuntimeError):
         with scratch.workspace(tmp_path) as directory:
             raise RuntimeError("failed compile")
+    assert not directory.exists()
+
+
+def test_compiler_scratch_does_not_reacquire_the_environment_checkout_lock(tmp_path):
+    checkout_lock = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(checkout_lock, fcntl.LOCK_EX)
+        with scratch.workspace(tmp_path) as directory:
+            assert directory.parent == tmp_path
+            assert directory.is_dir()
+    finally:
+        fcntl.flock(checkout_lock, fcntl.LOCK_UN)
+        os.close(checkout_lock)
     assert not directory.exists()
 
 

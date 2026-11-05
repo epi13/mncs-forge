@@ -54,6 +54,8 @@ _STATUS_VARIANTS = {"PASS": 0, "FAIL": 1, "UNKNOWN": 2}
 _VERIFICATION_COST_TIERS = {"low": 0, "medium": 1, "high": 2}
 _VERIFIER_MATCH_MAX_ITEMS = 64
 _VERIFIER_MATCH_MAX_TEXT_BYTES = 256
+_ASSURANCE_REQUEST_MAX_ITEMS = 8
+_ASSURANCE_REQUEST_MAX_TEXT_BYTES = 32
 _LIFECYCLE_STAGES = {
     "NoEpoch": 0,
     "EpochActive": 1,
@@ -372,6 +374,20 @@ class NativeExecutionAssuranceInput:
     containerization_state: str
     requested_same_operator_execution: bool
     same_operator_execution_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class NativeExecutionAssuranceRequestDecision:
+    """Native validation and requested-property projection for Forge assurance."""
+
+    status: str
+    valid: bool
+    requested_runner_capability: bool
+    requested_filesystem_isolation: bool
+    requested_network_isolation: bool
+    requested_containerization: bool
+    requested_same_operator_execution: bool
+    duration_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -1922,6 +1938,132 @@ class NativeForgeAdapter:
             phase=str(phase),
             terminal=terminal,
             valid=valid,
+            duration_seconds=invocation.duration_seconds,
+        )
+
+    def execution_assurance_request_validate(
+        self, requested_properties: Sequence[str]
+    ) -> NativeExecutionAssuranceRequestDecision:
+        """Validate exact assurance property names and project request flags in MNCS."""
+
+        if isinstance(requested_properties, (str, bytes)) or not isinstance(
+            requested_properties, Sequence
+        ):
+            raise ForgeError(
+                "NATIVE_ASSURANCE_INPUT", "assurance properties must be a bounded sequence"
+            )
+        if len(requested_properties) > _ASSURANCE_REQUEST_MAX_ITEMS:
+            raise ForgeError(
+                "NATIVE_ASSURANCE_INPUT",
+                f"assurance properties exceed {_ASSURANCE_REQUEST_MAX_ITEMS} items",
+            )
+        encoded_properties: list[dict[str, object]] = []
+        for index, value in enumerate(requested_properties):
+            if not isinstance(value, str):
+                raise ForgeError(
+                    "NATIVE_ASSURANCE_INPUT",
+                    f"assurance property {index} must be text",
+                )
+            try:
+                encoded = value.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise ForgeError(
+                    "NATIVE_ASSURANCE_INPUT",
+                    f"assurance property {index} is not valid UTF-8 text",
+                ) from error
+            if len(encoded) > _ASSURANCE_REQUEST_MAX_TEXT_BYTES:
+                raise ForgeError(
+                    "NATIVE_ASSURANCE_INPUT",
+                    f"assurance property {index} exceeds "
+                    f"{_ASSURANCE_REQUEST_MAX_TEXT_BYTES} UTF-8 bytes",
+                )
+            encoded_properties.append(
+                self._sequence_value([{"byte": {"value": byte}} for byte in encoded])
+            )
+
+        self.ensure_available()
+        abi = self.language_owned_abi()
+        function_name = "execution_assurance_request_validate"
+        function_contract = abi.functions.get(function_name)
+        if function_contract is None:
+            raise ForgeError("NATIVE_ABI_UNKNOWN", "execution assurance request policy is absent")
+        declaring_module = function_contract.get("declaring_module")
+        if not isinstance(declaring_module, str) or not declaring_module:
+            raise ForgeError(
+                "NATIVE_ABI_UNKNOWN", "execution assurance request has no declaring module"
+            )
+        input_type = self._abi_record_type(
+            abi, "ExecutionAssuranceRequestInput", context="ExecutionAssuranceRequestInput"
+        )
+        output_type = self._abi_record_type(
+            abi, "ExecutionAssuranceRequestDecision", context="ExecutionAssuranceRequestDecision"
+        )
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": declaring_module, "function": function_name},
+            "arguments": [
+                self._record_value(
+                    input_type,
+                    "ExecutionAssuranceRequestInput",
+                    {"requested_properties": self._sequence_value(encoded_properties)},
+                )
+            ],
+            "step_budget": 50_000,
+        }
+        invocation = self._semantic_invocation(
+            request, request_name="execution-assurance-request-validation.json"
+        )
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError(
+                "NATIVE_ASSURANCE_UNKNOWN",
+                "native execution assurance request validation did not return a decision "
+                f"(returncode {invocation.returncode})",
+            )
+        returned = invocation.payload.get("returned")
+        if (
+            not isinstance(returned, list)
+            or len(returned) != 1
+            or not isinstance(returned[0], Mapping)
+            or not isinstance(returned[0].get("record"), Mapping)
+            or returned[0]["record"].get("type_identity") != output_type
+        ):
+            raise ForgeError(
+                "NATIVE_ABI_MISMATCH", "execution assurance request result type is invalid"
+            )
+        result_fields = self._record_fields(
+            invocation.payload, context="execution assurance request validation"
+        )
+        status = self._abi_finite_variant(
+            result_fields.get("status"),
+            abi,
+            "ExecutionAssuranceRequestStatus",
+            context="execution assurance request status",
+        )
+        valid = self._boolean(
+            result_fields.get("valid"), context="execution assurance request validity"
+        )
+        requested = {
+            name: self._boolean(result_fields.get(name), context=f"{name} request flag")
+            for name in (
+                "requested_runner_capability",
+                "requested_filesystem_isolation",
+                "requested_network_isolation",
+                "requested_containerization",
+                "requested_same_operator_execution",
+            )
+        }
+        if (status == "Valid") != valid:
+            raise ForgeError(
+                "NATIVE_ABI_MISMATCH", "execution assurance request status and validity disagree"
+            )
+        return NativeExecutionAssuranceRequestDecision(
+            status=status,
+            valid=valid,
+            requested_runner_capability=requested["requested_runner_capability"],
+            requested_filesystem_isolation=requested["requested_filesystem_isolation"],
+            requested_network_isolation=requested["requested_network_isolation"],
+            requested_containerization=requested["requested_containerization"],
+            requested_same_operator_execution=requested["requested_same_operator_execution"],
             duration_seconds=invocation.duration_seconds,
         )
 

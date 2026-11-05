@@ -12,6 +12,7 @@ module mncs.forge.assurance.v1;
 
 use mncs.core.status as statlib;
 use mncs.core.logic as boollib;
+use mncs.core.sequences.v1 as sequences;
 
 enum LoopPhase { InitialVerification, AfterRepair }
 
@@ -61,6 +62,7 @@ enum StopReason {
 enum ExecutionPropertyState { Established, NotEstablished, Unknown, Unreadable }
 enum ExecutionPropertyFinding { NotRequested, Satisfied, NotEstablished, Unknown, Unreadable }
 enum IsolationConflict { None, FilesystemIsolation, NetworkIsolation, Containerization }
+enum ExecutionAssuranceRequestStatus { Valid, Empty, Duplicate, UnknownProperty }
 
 // Facts have already crossed the provider membranes. A status field is a
 // provider-owned verdict/sufficiency projection; booleans describe only
@@ -128,6 +130,20 @@ record ExecutionAssuranceInput {
     containerization_state: ExecutionPropertyState,
     requested_same_operator_execution: bool,
     same_operator_execution_state: ExecutionPropertyState
+}
+
+record ExecutionAssuranceRequestInput {
+    requested_properties: [[byte; up_to 32]; up_to 8]
+}
+
+record ExecutionAssuranceRequestDecision {
+    status: ExecutionAssuranceRequestStatus,
+    valid: bool,
+    requested_runner_capability: bool,
+    requested_filesystem_isolation: bool,
+    requested_network_isolation: bool,
+    requested_containerization: bool,
+    requested_same_operator_execution: bool
 }
 
 record ExecutionAssuranceDecision {
@@ -269,6 +285,125 @@ fn execution_property_established(value: ExecutionPropertyState) -> (result: boo
         NotEstablished => false,
         Unknown => false,
         Unreadable => false,
+    };
+}
+
+// Validate the caller's original property names before any receipt lookup or
+// assessment persistence. Exact duplicate detection includes unknown names,
+// matching the API's duplicate-before-vocabulary precedence.
+fn execution_assurance_request_known(
+    value: [byte; up_to 32]
+) -> (result: bool) {
+    return sequences.equals_byte_view<32>(
+        value, [114, 117, 110, 110, 101, 114, 95, 99, 97, 112, 97, 98, 105, 108, 105, 116, 121]
+    ) || sequences.equals_byte_view<32>(
+        value, [102, 105, 108, 101, 115, 121, 115, 116, 101, 109, 95, 105, 115, 111, 108, 97, 116, 105, 111, 110]
+    ) || sequences.equals_byte_view<32>(
+        value, [110, 101, 116, 119, 111, 114, 107, 95, 105, 115, 111, 108, 97, 116, 105, 111, 110]
+    ) || sequences.equals_byte_view<32>(
+        value, [99, 111, 110, 116, 97, 105, 110, 101, 114, 105, 122, 97, 116, 105, 111, 110]
+    ) || sequences.equals_byte_view<32>(
+        value, [115, 97, 109, 101, 95, 111, 112, 101, 114, 97, 116, 111, 114, 95, 101, 120, 101, 99, 117, 116, 105, 111, 110]
+    );
+}
+
+fn execution_assurance_request_has_duplicate(
+    values: [[byte; up_to 32]; up_to 8]
+) -> (result: bool) {
+    iterate i over values carrying duplicate: bool = false {
+        iterate j over values carrying duplicate_at_index: bool = false {
+            next duplicate_at_index = duplicate_at_index || (
+                j > i && sequences.equals_byte_view<32>(values[i], values[j])
+            );
+        }
+        next duplicate = duplicate || duplicate_at_index;
+    }
+    return duplicate;
+}
+
+fn execution_assurance_request_has_unknown(
+    values: [[byte; up_to 32]; up_to 8]
+) -> (result: bool) {
+    iterate i over values carrying unknown: bool = false {
+        next unknown = unknown || !execution_assurance_request_known(values[i]);
+    }
+    return unknown;
+}
+
+fn execution_assurance_request_contains(
+    values: [[byte; up_to 32]; up_to 8],
+    candidate: [byte; up_to 32]
+) -> (result: bool) {
+    iterate i over values carrying found: bool = false {
+        next found = found || sequences.equals_byte_view<32>(values[i], candidate);
+    }
+    return found;
+}
+
+fn execution_assurance_request_validate(
+    input: ExecutionAssuranceRequestInput
+) -> (result: ExecutionAssuranceRequestDecision) {
+    let runner_capability: bool = execution_assurance_request_contains(
+        input.requested_properties,
+        [114, 117, 110, 110, 101, 114, 95, 99, 97, 112, 97, 98, 105, 108, 105, 116, 121]
+    );
+    let filesystem_isolation: bool = execution_assurance_request_contains(
+        input.requested_properties,
+        [102, 105, 108, 101, 115, 121, 115, 116, 101, 109, 95, 105, 115, 111, 108, 97, 116, 105, 111, 110]
+    );
+    let network_isolation: bool = execution_assurance_request_contains(
+        input.requested_properties,
+        [110, 101, 116, 119, 111, 114, 107, 95, 105, 115, 111, 108, 97, 116, 105, 111, 110]
+    );
+    let containerization: bool = execution_assurance_request_contains(
+        input.requested_properties,
+        [99, 111, 110, 116, 97, 105, 110, 101, 114, 105, 122, 97, 116, 105, 111, 110]
+    );
+    let same_operator_execution: bool = execution_assurance_request_contains(
+        input.requested_properties,
+        [115, 97, 109, 101, 95, 111, 112, 101, 114, 97, 116, 111, 114, 95, 101, 120, 101, 99, 117, 116, 105, 111, 110]
+    );
+    if input.requested_properties.len == 0 {
+        return ExecutionAssuranceRequestDecision {
+            status: ExecutionAssuranceRequestStatus.Empty,
+            valid: false,
+            requested_runner_capability: runner_capability,
+            requested_filesystem_isolation: filesystem_isolation,
+            requested_network_isolation: network_isolation,
+            requested_containerization: containerization,
+            requested_same_operator_execution: same_operator_execution
+        };
+    }
+    if execution_assurance_request_has_duplicate(input.requested_properties) {
+        return ExecutionAssuranceRequestDecision {
+            status: ExecutionAssuranceRequestStatus.Duplicate,
+            valid: false,
+            requested_runner_capability: runner_capability,
+            requested_filesystem_isolation: filesystem_isolation,
+            requested_network_isolation: network_isolation,
+            requested_containerization: containerization,
+            requested_same_operator_execution: same_operator_execution
+        };
+    }
+    if execution_assurance_request_has_unknown(input.requested_properties) {
+        return ExecutionAssuranceRequestDecision {
+            status: ExecutionAssuranceRequestStatus.UnknownProperty,
+            valid: false,
+            requested_runner_capability: runner_capability,
+            requested_filesystem_isolation: filesystem_isolation,
+            requested_network_isolation: network_isolation,
+            requested_containerization: containerization,
+            requested_same_operator_execution: same_operator_execution
+        };
+    }
+    return ExecutionAssuranceRequestDecision {
+        status: ExecutionAssuranceRequestStatus.Valid,
+        valid: true,
+        requested_runner_capability: runner_capability,
+        requested_filesystem_isolation: filesystem_isolation,
+        requested_network_isolation: network_isolation,
+        requested_containerization: containerization,
+        requested_same_operator_execution: same_operator_execution
     };
 }
 

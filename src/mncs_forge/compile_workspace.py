@@ -21,12 +21,45 @@ FILES = {MARKER, LEASE, "backend.json", "result.json"}
 
 @contextmanager
 def _root_lock(root: Path):
-    # Directory locks coordinate aliases of the same local filesystem root
-    # without leaving another coordination file in the user's project.
-    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    # Keep scratch coordination out of the checkout-directory lock namespace.
+    # Environment holds a directory flock across provider execution, so taking
+    # that same lock from a native compile invoked by a test deadlocks the
+    # provider against its child. The ignored MNCS cache file still serializes
+    # Forge scratch creation and pruning within this exact checkout.
+    resolved = root.resolve(strict=True)
+    opened_root = resolved.stat()
+    if not stat.S_ISDIR(opened_root.st_mode):
+        raise ValueError("compiler scratch root must be a directory")
+    mncs_directory = resolved / ".mncs"
+    cache_directory = mncs_directory / "cache"
+    for directory in (mncs_directory, cache_directory):
+        directory.mkdir(mode=0o700, exist_ok=True)
+        metadata = directory.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise ValueError("compiler scratch coordination cache is not an owned directory")
+    lock_path = cache_directory / "forge-compile-workspace.lock"
+    descriptor = os.open(
+        lock_path,
+        os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+        0o600,
+    )
     try:
+        lock_metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(lock_metadata.st_mode)
+            or lock_metadata.st_uid != os.getuid()
+            or lock_metadata.st_mode & 0o077
+            or lock_metadata.st_nlink != 1
+        ):
+            raise ValueError("compiler scratch coordination lock is not a private owned file")
         fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield os.fstat(descriptor)
+        current_root = resolved.stat()
+        if (opened_root.st_dev, opened_root.st_ino) != (
+            current_root.st_dev,
+            current_root.st_ino,
+        ):
+            raise ValueError("compiler scratch root changed while acquiring its lock")
+        yield current_root
     finally:
         os.close(descriptor)
 

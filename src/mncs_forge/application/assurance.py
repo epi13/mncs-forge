@@ -63,20 +63,24 @@ def assess_execution_receipt(
 ) -> dict[str, object]:
     """Assess and persist requested execution-assurance properties fail-closed."""
 
-    if not requested_properties:
-        raise ForgeError(
-            "ASSURANCE_REQUEST", "requested execution-assurance properties cannot be empty"
-        )
-    if len(set(requested_properties)) != len(requested_properties):
-        raise ForgeError(
-            "ASSURANCE_REQUEST", "requested execution-assurance properties must be unique"
-        )
-    invalid = sorted(set(requested_properties) - ASSURANCE_REQUEST_PROPERTIES)
-    if invalid:
-        raise ForgeError(
-            "ASSURANCE_REQUEST",
-            "requested properties outside the declared vocabulary: " + ", ".join(invalid),
-        )
+    try:
+        request = native.execution_assurance_request_validate(requested_properties)
+    except ForgeError as error:
+        if error.code != "NATIVE_ASSURANCE_INPUT":
+            raise
+        raise ForgeError("ASSURANCE_REQUEST", error.message) from error
+    if not request.valid:
+        request_messages = {
+            "Empty": "requested execution-assurance properties cannot be empty",
+            "Duplicate": "requested execution-assurance properties must be unique",
+            "UnknownProperty": "requested properties are outside the declared vocabulary",
+        }
+        message = request_messages.get(request.status)
+        if message is None:
+            raise ForgeError(
+                "NATIVE_ABI_MISMATCH", "native assurance returned an unknown request disposition"
+            )
+        raise ForgeError("ASSURANCE_REQUEST", message)
     binding = _binding(records, binding_id)
     if binding.get("project_identity") != config.project_identity:
         raise ForgeError(
@@ -101,15 +105,15 @@ def assess_execution_receipt(
                 complete_receipt and not isinstance(binding.get("mncs_receipt"), Mapping)
             ),
             receipt_complete=complete_receipt,
-            requested_runner_capability="runner_capability" in requested_properties,
+            requested_runner_capability=request.requested_runner_capability,
             runner_capability_state=state_for("runner_capability"),
-            requested_filesystem_isolation="filesystem_isolation" in requested_properties,
+            requested_filesystem_isolation=request.requested_filesystem_isolation,
             filesystem_isolation_state=state_for("filesystem_isolation"),
-            requested_network_isolation="network_isolation" in requested_properties,
+            requested_network_isolation=request.requested_network_isolation,
             network_isolation_state=state_for("network_isolation"),
-            requested_containerization="containerization" in requested_properties,
+            requested_containerization=request.requested_containerization,
             containerization_state=state_for("containerization"),
-            requested_same_operator_execution="same_operator_execution" in requested_properties,
+            requested_same_operator_execution=request.requested_same_operator_execution,
             same_operator_execution_state=state_for("same_operator_execution"),
         )
     )
