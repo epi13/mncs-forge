@@ -244,6 +244,7 @@ NATIVE_EXECUTION_CONTRACT = "mncs-forge.native-execution.v1"
 NATIVE_LIFECYCLE_PROJECTION_CONTRACT = "mncs-forge.lifecycle-projection.v2"
 NATIVE_RECONCILIATION_CONTRACT = "mncs-forge.reconciliation-projection.v1"
 NATIVE_READINESS_CONTRACT = "mncs-forge.readiness-projection.v1"
+NATIVE_PROVIDER_POLICY_CONTRACT = "mncs-forge.provider-capability-policy.v1"
 NATIVE_BUNDLE_CONTRACT = "mncs-forge.bundle-preconditions.v1"
 NATIVE_ASSURANCE_CONTRACT = "mncs-forge.assurance-loop.v1"
 _ASSURANCE_WIRE_LENGTH = 24
@@ -585,6 +586,17 @@ class NativeReadinessProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeProviderCapabilityDecision:
+    """MNCS classification of one provider against one required capability."""
+
+    candidate: bool
+    established: bool
+    required_blocker: bool
+    optional_unavailable: bool
+    valid: bool
+
+
+@dataclass(frozen=True, slots=True)
 class NativeBundlePreconditionProjection:
     """Typed MNCS projection of deterministic bundle authorization inputs."""
 
@@ -852,6 +864,7 @@ class NativeForgeAdapter:
                 "lifecycle_projection",
                 "reconciliation",
                 "readiness",
+                "provider_policy",
                 "bundle",
                 "abi",
             )
@@ -938,6 +951,7 @@ class NativeForgeAdapter:
                 "lifecycle.mncs",
                 "reconciliation.mncs",
                 "readiness.mncs",
+                "provider_policy.mncs",
                 "records.mncs",
                 "serialization.mncs",
             )
@@ -3440,6 +3454,211 @@ class NativeForgeAdapter:
                 "NATIVE_ABI_MISMATCH", "provider status aggregation returned no status"
             )
         return aggregate
+
+    @staticmethod
+    def _provider_capability_digest(value: str, *, context: str) -> bytes:
+        if not isinstance(value, str) or not value:
+            raise ForgeError("NATIVE_PROVIDER_POLICY_INPUT", f"{context} is malformed")
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ForgeError("NATIVE_PROVIDER_POLICY_INPUT", f"{context} is malformed") from exc
+        return hashlib.sha256(b"mncs-forge.provider-capability.v1\0" + encoded).digest()
+
+    def provider_capability_projection(
+        self,
+        capability: str | None,
+        *,
+        declared_capabilities: Sequence[str],
+        probed_capabilities: Sequence[str],
+        unsupported_constructs: Sequence[str],
+        provider_status: str,
+        provider_required: bool,
+        provider_available: bool,
+    ) -> NativeProviderCapabilityDecision:
+        """Classify one provider/capability pair through the MNCS policy fold.
+
+        Capability identifiers are host-encoded and hashed; membership and
+        probe qualification are decided in MNCS. The fact lists are streamed
+        in sixteen-item chunks, so existing unbounded config lists are neither
+        truncated nor subject to a new compatibility limit.
+        """
+
+        if provider_status not in _STATUS_VARIANTS:
+            raise ForgeError("NATIVE_PROVIDER_POLICY_INPUT", "provider status is invalid")
+        if type(provider_required) is not bool or type(provider_available) is not bool:
+            raise ForgeError("NATIVE_PROVIDER_POLICY_INPUT", "provider flags are invalid")
+        normalized_lists: list[Sequence[str]] = []
+        for label, values in (
+            ("declared capabilities", declared_capabilities),
+            ("probed capabilities", probed_capabilities),
+            ("unsupported constructs", unsupported_constructs),
+        ):
+            if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+                raise ForgeError("NATIVE_PROVIDER_POLICY_INPUT", f"{label} are malformed")
+            for value in values:
+                if not isinstance(value, str) or not value:
+                    raise ForgeError("NATIVE_PROVIDER_POLICY_INPUT", f"{label} are malformed")
+            normalized_lists.append(values)
+        if capability is not None and (not isinstance(capability, str) or not capability):
+            raise ForgeError("NATIVE_PROVIDER_POLICY_INPUT", "required capability is malformed")
+
+        capability_digest = (
+            self._provider_capability_digest(capability, context="required capability")
+            if capability is not None
+            else bytes(32)
+        )
+        fingerprint = hashlib.sha256(b"mncs-forge.provider-policy-input.v1\0")
+        fingerprint.update(capability_digest)
+        fingerprint.update(provider_status.encode("ascii"))
+        fingerprint.update(bytes((provider_required, provider_available, capability is not None)))
+        for label, values in zip(
+            (b"declared\0", b"probed\0", b"unsupported\0"), normalized_lists, strict=True
+        ):
+            fingerprint.update(label)
+            fingerprint.update(len(values).to_bytes(8, "big"))
+            for value in values:
+                encoded = value.encode("utf-8")
+                fingerprint.update(len(encoded).to_bytes(8, "big"))
+                fingerprint.update(encoded)
+        cache_key = (
+            NATIVE_PROVIDER_POLICY_CONTRACT,
+            self.semantic_input_identity(),
+            fingerprint.hexdigest(),
+        )
+        cached = self._native_caches["provider_policy"].get(cache_key)
+        if isinstance(cached, NativeProviderCapabilityDecision):
+            return cached
+
+        self.ensure_available()
+        abi = self.language_owned_abi()
+        state_type = self._abi_record_type(
+            abi, "ProviderCapabilityState", context="ProviderCapabilityState"
+        )
+        chunk_type = self._abi_record_type(
+            abi, "CapabilityChunk", context="CapabilityChunk"
+        )
+        digest_type = self._abi_record_type(abi, "Digest32", context="Digest32")
+        zero_digest = self._digest_value(
+            bytes(32), context="unused capability", type_identity=digest_type
+        )
+        state_value = self._record_value(
+            state_type,
+            "ProviderCapabilityState",
+            {
+                "provider_status": self._abi_finite_value(
+                    abi, "Status", provider_status, context="provider policy status"
+                ),
+                "provider_required": self._mncs_boolean(provider_required),
+                "provider_available": self._mncs_boolean(provider_available),
+                "candidate": self._mncs_boolean(False),
+                "probed": self._mncs_boolean(False),
+                "unsupported": self._mncs_boolean(False),
+                "established": self._mncs_boolean(False),
+                "required_blocker": self._mncs_boolean(False),
+                "optional_unavailable": self._mncs_boolean(False),
+                "valid": self._mncs_boolean(True),
+            },
+        )
+        capability_value = (
+            self._digest_value(
+                capability_digest,
+                context="required capability",
+                type_identity=digest_type,
+            )
+            if capability is not None
+            else zero_digest
+        )
+        chunk_size = 16
+        chunk_count = max(
+            1,
+            *(
+                (len(values) + chunk_size - 1) // chunk_size
+                for values in normalized_lists
+            ),
+        )
+        for chunk_index in range(chunk_count):
+            offset = chunk_index * chunk_size
+            encoded_chunks: list[list[dict[str, object]]] = []
+            counts: list[int] = []
+            for values in normalized_lists:
+                selected = values[offset : offset + chunk_size]
+                chunk_values = [
+                    self._digest_value(
+                        self._provider_capability_digest(value, context="provider capability"),
+                        context="provider capability",
+                        type_identity=digest_type,
+                    )
+                    for value in selected
+                ]
+                counts.append(len(chunk_values))
+                chunk_values.extend(zero_digest for _ in range(chunk_size - len(chunk_values)))
+                encoded_chunks.append(chunk_values)
+            chunk_value = self._record_value(
+                chunk_type,
+                "CapabilityChunk",
+                {
+                    "requested": capability_value,
+                    "capability_active": self._mncs_boolean(capability is not None),
+                    "declared": self._sequence_value(encoded_chunks[0]),
+                    "declared_count": {"byte": {"value": counts[0]}},
+                    "probed": self._sequence_value(encoded_chunks[1]),
+                    "probed_count": {"byte": {"value": counts[1]}},
+                    "unsupported": self._sequence_value(encoded_chunks[2]),
+                    "unsupported_count": {"byte": {"value": counts[2]}},
+                },
+            )
+            request = {
+                "schema_version": NATIVE_SCHEMA_VERSION,
+                "target": {"module": _CORE_MODULE, "function": "provider_capability_fold"},
+                "arguments": [state_value, chunk_value],
+                "step_budget": 200_000,
+            }
+            invocation = self._semantic_invocation(
+                request, request_name="provider-capability-policy.json"
+            )
+            if not invocation.ok or invocation.payload is None:
+                raise ForgeError(
+                    "NATIVE_PROVIDER_POLICY_UNKNOWN", "native provider capability policy failed"
+                )
+            returned = invocation.payload.get("returned")
+            if (
+                invocation.payload.get("status") != "returned"
+                or not isinstance(returned, list)
+                or len(returned) != 1
+            ):
+                raise ForgeError(
+                    "NATIVE_ABI_MISMATCH", "provider capability policy result arity is invalid"
+                )
+            self._record_value_fields(
+                returned[0], state_type, context="provider capability policy state"
+            )
+            state_value = returned[0]
+
+        fields = self._record_value_fields(
+            state_value, state_type, context="provider capability policy state"
+        )
+        decision = NativeProviderCapabilityDecision(
+            candidate=self._boolean(
+                fields.get("candidate"), context="provider capability candidate"
+            ),
+            established=self._boolean(
+                fields.get("established"), context="provider capability established"
+            ),
+            required_blocker=self._boolean(
+                fields.get("required_blocker"), context="required provider blocker"
+            ),
+            optional_unavailable=self._boolean(
+                fields.get("optional_unavailable"), context="optional provider availability"
+            ),
+            valid=self._boolean(fields.get("valid"), context="provider policy validity"),
+        )
+        if not decision.valid or (decision.established and not decision.candidate):
+            raise ForgeError(
+                "NATIVE_PROVIDER_POLICY_UNKNOWN", "native provider capability policy is invalid"
+            )
+        self._native_caches["provider_policy"].put(cache_key, decision)
+        return decision
 
     def continuous_consumer_state(
         self,

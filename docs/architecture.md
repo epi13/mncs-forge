@@ -172,6 +172,16 @@ status = "NATIVE_AUTHORITY"
 bootstrap_provisional = false
 
 [[capability]]
+identity = "forge.provider-capability-policy.v1"
+semantic_owner = "mncs.forge.core.v1::provider_capability_fold"
+native_source = "src/mncs_forge/resources/native/forge/provider_policy.mncs"
+host_realization = "src/mncs_forge/mncs_native.py::NativeForgeAdapter.provider_capability_projection"
+host_may = ["encode_capability_identities", "stream_bounded_fact_chunks", "assemble_provider_presentation", "retain_explicit_compatibility_mode"]
+host_must_not = ["decide_declared_or_probed_capability_membership", "qualify_probe_evidence", "classify_required_or_optional_provider_disposition"]
+status = "NATIVE_AUTHORITY"
+bootstrap_provisional = false
+
+[[capability]]
 identity = "mncs.process-resource-envelope.v1"
 semantic_owner = "mncs.std.process.v1::process_run"
 native_source = ""

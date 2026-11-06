@@ -1,0 +1,82 @@
+mncs 0.18;
+
+// Native provider capability policy over host-normalized, digest-addressed
+// capability names. The host owns UTF-8 encoding and digest production; this
+// module owns membership, probe qualification, and provider disposition.
+module mncs.forge.provider_policy.v1;
+
+use mncs.core.identity as idlib;
+use mncs.core.status as statlib;
+
+record CapabilityChunk {
+    requested: idlib.Digest32,
+    capability_active: bool,
+    declared: [idlib.Digest32; 16],
+    declared_count: byte,
+    probed: [idlib.Digest32; 16],
+    probed_count: byte,
+    unsupported: [idlib.Digest32; 16],
+    unsupported_count: byte
+}
+
+record ProviderCapabilityState {
+    provider_status: statlib.Status,
+    provider_required: bool,
+    provider_available: bool,
+    candidate: bool,
+    probed: bool,
+    unsupported: bool,
+    established: bool,
+    required_blocker: bool,
+    optional_unavailable: bool,
+    valid: bool
+}
+
+fn contains_digest(values: [idlib.Digest32; 16], count: byte, wanted: idlib.Digest32) -> (result: bool) {
+    iterate i over values carrying found: bool = false {
+        let active: bool = (i as u64) < (count as u64);
+        next found = found || (active && idlib.equal(values[i], wanted));
+    }
+    return found;
+}
+
+fn status_is_pass(value: statlib.Status) -> (result: bool) {
+    return match value {
+        PASS => true,
+        FAIL => false,
+        UNKNOWN => false,
+    };
+}
+
+fn provider_capability_fold(
+    state: ProviderCapabilityState,
+    input: CapabilityChunk
+) -> (result: ProviderCapabilityState) {
+    let counts_valid: bool = input.declared_count <= (16 as byte)
+        && input.probed_count <= (16 as byte)
+        && input.unsupported_count <= (16 as byte);
+    let valid: bool = state.valid && counts_valid;
+    let declared_match: bool = input.capability_active
+        && contains_digest(input.declared, input.declared_count, input.requested);
+    let probed_match: bool = input.capability_active
+        && contains_digest(input.probed, input.probed_count, input.requested);
+    let unsupported_match: bool = input.capability_active
+        && contains_digest(input.unsupported, input.unsupported_count, input.requested);
+    let candidate: bool = state.candidate || declared_match;
+    let probed: bool = state.probed || probed_match;
+    let unsupported: bool = state.unsupported || unsupported_match;
+    return ProviderCapabilityState {
+        provider_status: state.provider_status,
+        provider_required: state.provider_required,
+        provider_available: state.provider_available,
+        candidate: candidate,
+        probed: probed,
+        unsupported: unsupported,
+        established: valid && candidate && status_is_pass(state.provider_status)
+            && probed && !unsupported,
+        required_blocker: state.provider_required
+            && !status_is_pass(state.provider_status),
+        optional_unavailable: !state.provider_required && !state.provider_available,
+        valid: valid
+    };
+}

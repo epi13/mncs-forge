@@ -19,7 +19,11 @@ output overflow, or identity drift remains UNKNOWN.
 
 Capability blockers are satisfied only by a current successful probe whose returned analyses
 include the required capability and do not mark it unsupported. Declared capability without a
-current probe is not PASS.
+current probe is not PASS. In the native Forge path, the MNCS provider policy owns capability
+membership, probe qualification, and required/optional provider disposition. The host adapter
+encodes capability names as opaque digests and streams the full fact lists in bounded chunks; it
+retains probe execution, provider inventory, and response presentation. Explicit native-off mode
+continues to use the compatibility classifier.
 
 Micro-verifiers use the same `analysis_request`/`analysis_response` framing. The declared verifier
 method must appear in the referenced provider's configured capabilities and becomes the request

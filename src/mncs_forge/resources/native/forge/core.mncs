@@ -17,6 +17,7 @@ use mncs.forge.reconciliation as reconlib;
 use mncs.forge.records as recslib;
 use mncs.forge.resource_policy.v1 as resource_policy;
 use mncs.forge.readiness as readylib;
+use mncs.forge.provider_policy.v1 as provider_policy;
 use mncs.forge.serialization as serlib;
 
 fn candidate_bytes(candidate: recslib.CandidateRecord) -> (result: serlib.CanonicalMaterial) {
@@ -88,6 +89,15 @@ fn evidence_reconcile(input: reconlib.ReconciliationInput) -> (result: reconlib.
 
 fn evidence_readiness(input: readylib.ReadinessInput) -> (result: readylib.ReadinessResult) {
     return readylib.project(input);
+}
+
+// Fold one bounded chunk of provider capability facts. The host retains
+// provider inventory and presentation; MNCS owns matching and qualification.
+fn provider_capability_fold(
+    state: provider_policy.ProviderCapabilityState,
+    input: provider_policy.CapabilityChunk
+) -> (result: provider_policy.ProviderCapabilityState) {
+    return provider_policy.provider_capability_fold(state, input);
 }
 
 fn bundle_preconditions(input: bundlelib.BundleInput) -> (result: bundlelib.BundleResult) {

@@ -37,6 +37,74 @@ def test_native_status_aggregation_matches_independent_expectation(
     assert native_adapter.status_aggregate(statuses) == expected
 
 
+def test_native_provider_capability_policy_streams_unbounded_lists(
+    native_adapter: NativeForgeAdapter,
+) -> None:
+    capability = "capability/" + ("long-name-" * 12)
+    decoys = [f"unrelated-capability-{index}" for index in range(35)]
+    result = native_adapter.provider_capability_projection(
+        capability,
+        declared_capabilities=[*decoys, capability],
+        probed_capabilities=[*decoys[:19], capability, *decoys[19:]],
+        unsupported_constructs=decoys,
+        provider_status="PASS",
+        provider_required=False,
+        provider_available=True,
+    )
+    assert result.candidate is True
+    assert result.established is True
+    assert result.required_blocker is False
+    assert result.optional_unavailable is False
+    assert result.valid is True
+
+
+def test_native_provider_policy_keeps_late_unsupported_fact_authoritative(
+    native_adapter: NativeForgeAdapter,
+) -> None:
+    capability = "bounded-structural"
+    unsupported = [f"unrelated-{index}" for index in range(24)] + [capability]
+    result = native_adapter.provider_capability_projection(
+        capability,
+        declared_capabilities=[capability],
+        probed_capabilities=[capability],
+        unsupported_constructs=unsupported,
+        provider_status="PASS",
+        provider_required=True,
+        provider_available=True,
+    )
+    assert result.candidate is True
+    assert result.established is False
+    assert result.required_blocker is False
+    assert result.optional_unavailable is False
+
+
+def test_native_provider_policy_classifies_required_and_optional_provider_state(
+    native_adapter: NativeForgeAdapter,
+) -> None:
+    required = native_adapter.provider_capability_projection(
+        None,
+        declared_capabilities=(),
+        probed_capabilities=(),
+        unsupported_constructs=(),
+        provider_status="UNKNOWN",
+        provider_required=True,
+        provider_available=False,
+    )
+    optional = native_adapter.provider_capability_projection(
+        None,
+        declared_capabilities=(),
+        probed_capabilities=(),
+        unsupported_constructs=(),
+        provider_status="UNKNOWN",
+        provider_required=False,
+        provider_available=False,
+    )
+    assert required.required_blocker is True
+    assert required.optional_unavailable is False
+    assert optional.required_blocker is False
+    assert optional.optional_unavailable is True
+
+
 def _continuous_consumer_inputs(**changes: bool) -> dict[str, bool]:
     return {
         "durable_status_present": False,
@@ -158,5 +226,53 @@ def test_provider_inventory_and_capability_blockers_use_native_status(
         assert blockers["status"] == "PASS"
         assert blockers["blocked"] is False
         assert native.retained_status()["call_count"] > before_blockers
+    finally:
+        forge.close()
+
+
+def test_native_capability_policy_drives_provider_blocker_projection(
+    config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MNCS_FORGE_NATIVE_MODE", raising=False)
+    provider = replace(
+        config.providers["provider-pass"],
+        required=True,
+        unsupported_constructs=["bounded-structural"],
+    )
+    raw = {
+        **config.raw,
+        "native": {"mode": "required"},
+        "required_capabilities": ["bounded-structural"],
+    }
+    forge = Forge(replace(config, raw=raw, providers={provider.provider_id: provider}))
+    try:
+        native = forge._native
+        assert native is not None
+        forge.provider_probe(provider.provider_id)
+        before = native.retained_status()["call_count"]
+        result = forge.capability_blockers()
+
+        assert result["status"] == "UNKNOWN"
+        assert result["blocked"] is True
+        assert result["satisfied"] == []
+        assert result["blockers"][0]["providers"] == [provider.provider_id]
+        assert native.retained_status()["call_count"] > before
+    finally:
+        forge.close()
+
+
+def test_native_off_keeps_the_explicit_compatibility_classifier(
+    config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MNCS_FORGE_NATIVE_MODE", "off")
+    raw = {**config.raw, "required_capabilities": ["bounded-structural"]}
+    forge = Forge(replace(config, raw=raw))
+    try:
+        assert forge._native is None
+        forge.provider_probe("provider-pass")
+        result = forge.capability_blockers()
+        assert result["status"] == "PASS"
+        assert result["blocked"] is False
+        assert result["satisfied"][0]["providers"] == ["provider-pass"]
     finally:
         forge.close()

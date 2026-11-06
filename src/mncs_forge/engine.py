@@ -154,6 +154,9 @@ class Forge:
             native_status_aggregate=(
                 self._native.status_aggregate if self._native is not None else None
             ),
+            native_capability_policy=(
+                self._native.provider_capability_projection if self._native is not None else None
+            ),
         )
         self._verifier_service = MicroVerifierService(
             config=config,

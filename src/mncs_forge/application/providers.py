@@ -10,6 +10,7 @@ from pathlib import Path
 from ..config import ForgeConfig, Provider
 from ..errors import ForgeError
 from ..execution import STATUSES, parse_provider_capabilities
+from ..mncs_native import NativeProviderCapabilityDecision
 from ..ports import ProjectObserver, RecordCommitter, RecordReader, Runner
 from ..records import ForgeRecord, RecordType, new_record
 from ..serialization import canonical_bytes, local_json_identity
@@ -27,6 +28,7 @@ class ProviderService:
         executor: Runner,
         observer: ProjectObserver,
         native_status_aggregate: Callable[[list[str]], str] | None = None,
+        native_capability_policy: Callable[..., NativeProviderCapabilityDecision] | None = None,
     ) -> None:
         self.config = config
         self.mode = mode
@@ -35,6 +37,7 @@ class ProviderService:
         self.executor = executor
         self.observer = observer
         self.native_status_aggregate = native_status_aggregate
+        self.native_capability_policy = native_capability_policy
 
     def _aggregate_status(self, statuses: Iterable[str]) -> str:
         # Preserve the compatibility helper's treatment of non-status values
@@ -323,48 +326,117 @@ class ProviderService:
         blockers: list[dict[str, object]] = []
         satisfied: list[dict[str, object]] = []
         informational: list[dict[str, object]] = []
-        for provider in self.config.providers.values():
-            item = inventory[provider.provider_id]
-            if provider.required and item["status"] != "PASS":
-                blockers.append(
-                    {
-                        "kind": "required_provider",
-                        "provider_id": provider.provider_id,
-                        "status": "UNKNOWN",
-                        "problem": (
-                            "required provider is unavailable, unprobed, stale, or inconclusive"
-                        ),
-                    }
+        if self.native_capability_policy is None:
+            for provider in self.config.providers.values():
+                item = inventory[provider.provider_id]
+                if provider.required and item["status"] != "PASS":
+                    blockers.append(
+                        {
+                            "kind": "required_provider",
+                            "provider_id": provider.provider_id,
+                            "status": "UNKNOWN",
+                            "problem": (
+                                "required provider is unavailable, unprobed, stale, or inconclusive"
+                            ),
+                        }
+                    )
+                elif not provider.required and item["availability"] != "AVAILABLE":
+                    informational.append(
+                        {
+                            "kind": "optional_provider",
+                            "provider_id": provider.provider_id,
+                            "status": "UNKNOWN",
+                            "problem": "optional provider is unavailable",
+                        }
+                    )
+        else:
+            for provider in self.config.providers.values():
+                item = inventory[provider.provider_id]
+                decision = self.native_capability_policy(
+                    None,
+                    declared_capabilities=(),
+                    probed_capabilities=(),
+                    unsupported_constructs=(),
+                    provider_status=str(item["status"]),
+                    provider_required=provider.required,
+                    provider_available=item["availability"] == "AVAILABLE",
                 )
-            elif not provider.required and item["availability"] != "AVAILABLE":
-                informational.append(
-                    {
-                        "kind": "optional_provider",
-                        "provider_id": provider.provider_id,
-                        "status": "UNKNOWN",
-                        "problem": "optional provider is unavailable",
-                    }
-                )
+                if decision.required_blocker:
+                    blockers.append(
+                        {
+                            "kind": "required_provider",
+                            "provider_id": provider.provider_id,
+                            "status": "UNKNOWN",
+                            "problem": (
+                                "required provider is unavailable, unprobed, stale, or inconclusive"
+                            ),
+                        }
+                    )
+                elif decision.optional_unavailable:
+                    informational.append(
+                        {
+                            "kind": "optional_provider",
+                            "provider_id": provider.provider_id,
+                            "status": "UNKNOWN",
+                            "problem": "optional provider is unavailable",
+                        }
+                    )
         for capability in required:
-            candidates = [
-                item
-                for provider_id, item in inventory.items()
-                if capability in self.config.providers[provider_id].capabilities
-            ]
-            established = [
-                item
-                for item in candidates
-                if item["status"] == "PASS"
-                and isinstance(item["last_probe_result"], dict)
-                and capability in item["last_probe_result"].get("probed_capabilities", [])
-                and capability not in item["last_probe_result"].get("unsupported_constructs", [])
-            ]
-            if established:
+            if self.native_capability_policy is None:
+                candidates = [
+                    item
+                    for provider_id, item in inventory.items()
+                    if capability in self.config.providers[provider_id].capabilities
+                ]
+                established = [
+                    item
+                    for item in candidates
+                    if item["status"] == "PASS"
+                    and isinstance(item["last_probe_result"], dict)
+                    and capability in item["last_probe_result"].get("probed_capabilities", [])
+                    and capability
+                    not in item["last_probe_result"].get("unsupported_constructs", [])
+                ]
+                candidate_provider_ids = sorted(str(item["provider_id"]) for item in candidates)
+                established_provider_ids = sorted(
+                    str(item["provider_id"]) for item in established
+                )
+            else:
+                policy_results: dict[str, NativeProviderCapabilityDecision] = {}
+                for provider_id, item in inventory.items():
+                    provider = self.config.providers[provider_id]
+                    probe = item["last_probe_result"]
+                    probed = (
+                        probe.get("probed_capabilities", []) if isinstance(probe, dict) else []
+                    )
+                    unsupported = (
+                        probe.get("unsupported_constructs", []) if isinstance(probe, dict) else []
+                    )
+                    policy_results[provider_id] = self.native_capability_policy(
+                        capability,
+                        declared_capabilities=provider.capabilities,
+                        probed_capabilities=probed,
+                        unsupported_constructs=unsupported,
+                        provider_status=str(item["status"]),
+                        provider_required=provider.required,
+                        provider_available=item["availability"] == "AVAILABLE",
+                    )
+                candidate_provider_ids = sorted(
+                    provider_id
+                    for provider_id, decision in policy_results.items()
+                    if decision.candidate
+                )
+                established_provider_ids = sorted(
+                    provider_id
+                    for provider_id, decision in policy_results.items()
+                    if decision.established
+                )
+            if established_provider_ids:
                 satisfied.append(
                     {
                         "capability": capability,
                         "status": "PASS",
-                        "providers": sorted(str(item["provider_id"]) for item in established),
+                        "providers": established_provider_ids,
                         "scope": "validated capability discovery only",
                     }
                 )
@@ -374,7 +446,7 @@ class ProviderService:
                         "kind": "required_capability",
                         "capability": capability,
                         "status": "UNKNOWN",
-                        "providers": sorted(str(item["provider_id"]) for item in candidates),
+                        "providers": candidate_provider_ids,
                         "problem": (
                             "no current recognized provider probe established this capability"
                         ),
