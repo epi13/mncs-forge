@@ -109,7 +109,10 @@ class EvidenceService:
         sources: dict[str, list[str]] = {}
         for claim_class in CLAIM_CLASSES:
             matching = [item for item in source_records if item["claim_class"] == claim_class]
-            statuses[claim_class] = aggregate_status(item["status"] for item in matching)
+            statuses[claim_class] = aggregate_status(
+                (item["status"] for item in matching),
+                native_status_aggregate=self.lifecycle.native_status_aggregate,
+            )
             sources[claim_class] = sorted({item["source"] for item in matching})[:20]
         statuses["operator_controlled_reproduction"] = "UNKNOWN"
         statuses["promotion_disposition"] = (

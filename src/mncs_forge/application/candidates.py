@@ -188,7 +188,9 @@ class CandidateService:
             candidates.append(
                 {
                     "candidate_identity": candidate_id,
-                    "correctness_and_safety": aggregate_status(statuses),
+                    "correctness_and_safety": aggregate_status(
+                        statuses, native_status_aggregate=self.lifecycle.native_status_aggregate
+                    ),
                     "resource_constraints": [
                         item["status"] for item in results if item["category"] == "resource_checks"
                     ]

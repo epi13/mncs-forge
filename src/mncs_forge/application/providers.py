@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..config import ForgeConfig, Provider
 from ..errors import ForgeError
-from ..execution import STATUSES, parse_provider_capabilities
+from ..execution import parse_provider_capabilities
 from ..mncs_native import NativeProviderCapabilityDecision
 from ..ports import ProjectObserver, RecordCommitter, RecordReader, Runner
 from ..records import ForgeRecord, RecordType, new_record
@@ -40,17 +40,9 @@ class ProviderService:
         self.native_capability_policy = native_capability_policy
 
     def _aggregate_status(self, statuses: Iterable[str]) -> str:
-        # Preserve the compatibility helper's treatment of non-status values
-        # at this internal boundary; native code owns the status fold itself.
-        values = [status for status in statuses if status in STATUSES]
-        if self.native_status_aggregate is None:
-            return aggregate_status(values)
-        result = self.native_status_aggregate(values)
-        if result not in STATUSES:
-            raise ForgeError(
-                "NATIVE_PROVIDER_STATUS_UNKNOWN", "native provider status is not recognized"
-            )
-        return result
+        return aggregate_status(
+            statuses, native_status_aggregate=self.native_status_aggregate
+        )
 
     def _require_development(self) -> None:
         if self.mode != "development":

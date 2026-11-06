@@ -311,7 +311,10 @@ class DevelopmentWorkflowService:
             "subject_identities": sorted({str(item["candidate_identity"]) for item in results}),
             "results": [result.to_object_dict() for result in results],
             "execution_receipts": receipts,
-            "aggregate_status": aggregate_status(str(item["status"]) for item in results),
+            "aggregate_status": aggregate_status(
+                (str(item["status"]) for item in results),
+                native_status_aggregate=self.lifecycle.native_status_aggregate,
+            ),
             "dominance": "FAIL > UNKNOWN > PASS",
         }
 

@@ -94,12 +94,15 @@ def _candidate_identity(lifecycle: LifecycleContext, candidate_identity: str | N
 
 
 def _technical_status(
-    development: DevelopmentWorkflowService, candidate_identity: str | None
+    lifecycle: LifecycleContext,
+    development: DevelopmentWorkflowService,
+    candidate_identity: str | None,
 ) -> str:
     if candidate_identity is None:
         return "UNKNOWN"
     return aggregate_status(
-        str(record["status"]) for record in development.result_records(candidate_identity)
+        (str(record["status"]) for record in development.result_records(candidate_identity)),
+        native_status_aggregate=lifecycle.native_status_aggregate,
     )
 
 
@@ -150,7 +153,7 @@ def draft_manifest(
             if isinstance(raw_paths, tuple):
                 changed_paths = [str(item) for item in raw_paths]
 
-    technical = _technical_status(development, candidate)
+    technical = _technical_status(lifecycle, development, candidate)
     declared_technical = "not-run"
     if technical == "PASS":
         declared_technical = "passed"
@@ -229,16 +232,18 @@ def _review_status(value: object, *, passed: set[str], failed: set[str]) -> str:
     return "UNKNOWN"
 
 
-def _rights_basis_status(rights: Mapping[str, object]) -> tuple[str, list[str]]:
+def _rights_basis_status(
+    rights: Mapping[str, object], lifecycle: LifecycleContext
+) -> tuple[str, list[str]]:
     blockers: list[str] = []
-    status = "PASS"
+    statuses = ["PASS"]
     if rights.get("rights_basis") == "unknown-needs-review":
-        status = "UNKNOWN"
+        statuses.append("UNKNOWN")
         blockers.append("rights basis is explicitly unknown and needs review")
 
     third_party = rights.get("third_party_material")
     if third_party in {"possible", "unknown"}:
-        status = aggregate_status([status, "UNKNOWN"])
+        statuses.append("UNKNOWN")
         blockers.append(f"third-party material status is {third_party}")
 
     sources = rights.get("sources")
@@ -249,13 +254,16 @@ def _rights_basis_status(rights: Mapping[str, object]) -> tuple[str, list[str]]:
             license_status = source.get("license_status")
             reference = source.get("reference", "source")
             if license_status == "incompatible":
-                status = "FAIL"
+                statuses.append("FAIL")
                 blockers.append(f"declared incompatible source license: {reference}")
             elif license_status == "unknown":
-                status = aggregate_status([status, "UNKNOWN"])
+                statuses.append("UNKNOWN")
                 blockers.append(f"source license status is unknown: {reference}")
 
-    return status, blockers
+    return (
+        aggregate_status(statuses, native_status_aggregate=lifecycle.native_status_aggregate),
+        blockers,
+    )
 
 
 def _policy_projection(mode: str, evidence_status: str, blockers: list[str]) -> dict[str, object]:
@@ -342,14 +350,15 @@ def assess_manifest(
 
         rights_value = manifest.get("rights")
         if isinstance(rights_value, Mapping):
-            rights_status, rights_blockers = _rights_basis_status(rights_value)
+            rights_status, rights_blockers = _rights_basis_status(rights_value, lifecycle)
             blockers.extend(rights_blockers)
 
     evidence_status = aggregate_status(
-        [contract_status, provenance_status, rights_status, human_review_status]
+        [contract_status, provenance_status, rights_status, human_review_status],
+        native_status_aggregate=lifecycle.native_status_aggregate,
     )
     policy = _policy_projection(mode, evidence_status, blockers)
-    technical = _technical_status(development, candidate)
+    technical = _technical_status(lifecycle, development, candidate)
 
     rights_value = manifest.get("rights")
     rights: Mapping[str, object] = (

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 
+from ..errors import ForgeError
 from ..execution import STATUSES
 
 STATUS_ORDER = {"PASS": 0, "UNKNOWN": 1, "FAIL": 2}
@@ -34,10 +35,21 @@ SECRET_PATTERN = re.compile(
 )
 
 
-def aggregate_status(statuses: Iterable[str]) -> str:
+def aggregate_status(
+    statuses: Iterable[str],
+    *,
+    native_status_aggregate: Callable[[list[str]], str] | None = None,
+) -> str:
+    """Aggregate recognized statuses, delegating the fold when native is selected."""
+
     values = [status for status in statuses if status in STATUSES]
     if not values:
         return "UNKNOWN"
+    if native_status_aggregate is not None:
+        result = native_status_aggregate(values)
+        if result not in STATUSES:
+            raise ForgeError("NATIVE_STATUS_UNKNOWN", "native status aggregate is not recognized")
+        return result
     return max(values, key=STATUS_ORDER.__getitem__)
 
 

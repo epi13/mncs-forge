@@ -138,7 +138,10 @@ class EvaluationService:
                 for item in results
             ],
             "execution_receipts": receipts,
-            "aggregate_status": aggregate_status(str(item["status"]) for item in results),
+            "aggregate_status": aggregate_status(
+                (str(item["status"]) for item in results),
+                native_status_aggregate=self.lifecycle.native_status_aggregate,
+            ),
             "repair_feedback_withheld": True,
             "dominance": "FAIL > UNKNOWN > PASS",
         }

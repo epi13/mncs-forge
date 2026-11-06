@@ -247,6 +247,42 @@ def test_provider_inventory_and_capability_blockers_use_native_status(
         forge.close()
 
 
+def test_development_application_aggregation_uses_shared_native_status_kernel(
+    config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MNCS_FORGE_NATIVE_MODE", raising=False)
+    forge = Forge(replace(config, raw={**config.raw, "native": {"mode": "required"}}))
+    try:
+        forge.epoch_begin(generator_identity="generator-v1", evaluator_identity="evaluator-v1")
+        candidate = forge.candidate_register(
+            changed_files=["candidate/main.py"],
+            hypothesis="application status aggregation",
+            generator_identity="generator-v1",
+            generator_config_identity="generator-config-v1",
+        )
+        native = forge._native
+        assert native is not None
+        observed: list[list[str]] = []
+        native_status_aggregate = native.status_aggregate
+
+        def observe_status_aggregate(statuses: list[str]) -> str:
+            observed.append(list(statuses))
+            return native_status_aggregate(statuses)
+
+        monkeypatch.setattr(native, "status_aggregate", observe_status_aggregate)
+        result = forge.development_checks_run(["pass-check"], str(candidate["candidate_id"]))
+
+        assert result["aggregate_status"] == "PASS"
+        assert ["PASS"] in observed
+
+        calls_before_claim_status = len(observed)
+        claim_status = forge.claim_status()
+        assert len(observed) > calls_before_claim_status
+        assert claim_status["dominance"] == "FAIL > UNKNOWN > PASS"
+    finally:
+        forge.close()
+
+
 def test_native_capability_policy_drives_provider_blocker_projection(
     config, monkeypatch: pytest.MonkeyPatch
 ) -> None:

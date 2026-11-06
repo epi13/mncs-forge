@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from ..mncs_native import NativeForgeAdapter
@@ -51,6 +51,10 @@ class LifecycleContext:
                 }
             return NativeForgeAdapter(self.root).status(self.native_mode)
         return self.native.status(self.native_mode)
+
+    @property
+    def native_status_aggregate(self) -> Callable[[list[str]], str] | None:
+        return self.native.status_aggregate if self.native is not None else None
 
     def machine(
         self,

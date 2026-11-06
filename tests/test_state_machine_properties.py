@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -35,6 +36,29 @@ def test_status_aggregation_preserves_failure_and_unknown_precedence(
 
     assert aggregate_status(statuses) == expected
     assert aggregate_status(reversed(statuses)) == expected
+
+
+def test_status_aggregation_delegates_recognized_values_to_native_kernel() -> None:
+    from mncs_forge.application.support import aggregate_status as aggregate_status_with_native
+
+    observed: list[list[str]] = []
+
+    def native_aggregate(statuses: list[str]) -> str:
+        observed.append(list(statuses))
+        return "UNKNOWN" if "UNKNOWN" in statuses else "PASS"
+
+    assert aggregate_status_with_native(
+        ["PASS", "ignored", "UNKNOWN"], native_status_aggregate=native_aggregate
+    ) == "UNKNOWN"
+    assert observed == [["PASS", "UNKNOWN"]]
+    assert aggregate_status_with_native(
+        [], native_status_aggregate=lambda _statuses: "REVIEW_REQUIRED"
+    ) == "UNKNOWN"
+
+    with pytest.raises(ForgeError, match="native status aggregate is not recognized"):
+        aggregate_status_with_native(
+            ["PASS"], native_status_aggregate=lambda _statuses: "REVIEW_REQUIRED"
+        )
 
 
 def _current_identity(observation: dict[str, object], section: str) -> str | None:
