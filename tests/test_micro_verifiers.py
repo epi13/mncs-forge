@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -77,6 +79,142 @@ def test_verifier_configuration_and_backward_compatibility(
     path.write_text(text, encoding="utf-8")
     compatible = load_config(path)
     assert compatible.verifiers == {}
+
+
+@pytest.mark.skipif(
+    not (os.environ.get("MNCS_STDLIB_ROOT") and os.environ.get("MNCS_EMBED_LIB")),
+    reason="requires the selected Stdlib and matching Language embed runtime",
+)
+def test_native_forge_verifier_delivers_large_request_through_chunked_stdin(
+    project: Path,
+) -> None:
+    """Exercise the real verifier -> LocalProcessRunner -> MNCS process path."""
+
+    provider_script = project / "chunked_input_provider.py"
+    provider_script.write_text(
+        """from __future__ import annotations
+import json
+import sys
+
+provider = {"id": "provider-chunked-input", "name": "provider-chunked-input",
+            "version": "1", "identity": "chunked-input-fixture-v1"}
+request_line = sys.stdin.buffer.readline()
+request = json.loads(request_line)
+if request["type"] == "capabilities":
+    response = {
+        "protocol_version": "0.1", "type": "capabilities", "provider": provider,
+        "analyses": ["bounded-structural"], "statuses": ["PASS", "FAIL", "UNKNOWN"],
+        "cancellation": False, "health_checks": True,
+        "extensions": {"supported_constructs": ["direct-calls"],
+                       "unsupported_constructs": [], "limitations": []},
+    }
+else:
+    parameters = request.get("extensions", {}).get("mncs_forge", {}).get(
+        "question_parameters", {})
+    expected = {"context": ["B" * 4000 for _ in range(128)],
+                "note": ["A" * 4000 for _ in range(128)]}
+    complete = parameters == expected
+    response = {
+        "protocol_version": "0.1", "type": "analysis_response",
+        "request_id": request["request_id"], "provider": provider,
+        "status": "PASS" if complete else "FAIL",
+        "summary": (f"received {len(request_line)} request bytes and "
+                    "all 1024000 parameter characters"
+                    if complete else "large request contents did not match"),
+        "witnesses": [], "limitations": [],
+        "extensions": {"unsupported": [], "mncs_forge": {
+            "assumptions": [], "dependency_envelope": {
+                "paths": ["candidate/main.py"], "identities": {}, "complete": True}}},
+    }
+print(json.dumps(response, sort_keys=True, separators=(",", ":")))
+""",
+        encoding="utf-8",
+    )
+    manifest = project / "mncs-forge.toml"
+    existing = manifest.read_text(encoding="utf-8")
+    existing = existing.replace(
+        "[limits]\ntimeout_seconds = 0.5\n",
+        "[limits]\ntimeout_seconds = 30\n",
+        1,
+    )
+    existing += f"""
+[[providers]]
+id = "provider-chunked-input"
+name = "provider-chunked-input"
+command = {json.dumps([sys.executable, str(provider_script)])}
+transport = "stdio-jsonl"
+required = false
+capabilities = ["bounded-structural"]
+identity = "chunked-input-fixture-v1"
+version = "1"
+
+[[workflows]]
+name = "chunked-input-provider"
+category = "bounded_structural_analysis"
+mode = "development"
+command = {json.dumps([sys.executable, str(provider_script)])}
+provider_protocol = true
+provider_id = "provider-chunked-input"
+
+[[verifiers]]
+id = "verify-chunked-input"
+version = "1"
+workflow = "chunked-input-provider"
+provider = "provider-chunked-input"
+method = "bounded-structural"
+claim = "The complete bounded request reaches the declared provider."
+category = "bounded_structural_analysis"
+modes = ["development"]
+languages = ["python"]
+artifact_types = ["source"]
+scopes = ["file"]
+input_kinds = ["candidate_identity", "changed_paths", "question_parameters"]
+uncertainty_classes = ["structural"]
+cost = "low"
+parameter_keys = ["context", "note"]
+timeout_seconds = 10
+
+[verifier_limits]
+request_bytes = 1048576
+batch_timeout_seconds = 90
+
+[native]
+mode = "required"
+"""
+    manifest.write_text(existing, encoding="utf-8")
+
+    config = load_config(manifest)
+    forge = Forge(config)
+    try:
+        candidate = begin_and_register(forge)
+        result = forge.verifier_run(
+            "verify-chunked-input",
+            candidate_identity=str(candidate["candidate_id"]),
+            changed_paths=["candidate/main.py"],
+            scope="file",
+            question_parameters={
+                "context": ["B" * 4000 for _ in range(128)],
+                "note": ["A" * 4000 for _ in range(128)],
+            },
+        )
+        bindings = forge.ledger.records("execution_receipt_binding")
+        assert len(bindings) == 1
+        binding = bindings[0].payload
+        assert binding["runner_kind"] == "local-process"
+        assert binding["termination_category"] == "completed"
+        assert binding["receipt_completeness"] == "complete"
+        assert binding["status"] == "UNKNOWN"
+        properties = binding["established_properties"]
+        assert properties["execution_completed"] == "established"
+    finally:
+        forge.close()
+
+    assert result["status"] == "PASS", result
+    assert result["summary"].startswith("received ")
+    assert result["summary"].endswith("all 1024000 parameter characters")
+    request_size = int(str(result["summary"]).split()[1])
+    assert 4096 < request_size <= 1_048_576
+    assert result.get("operational_error") is None
 
 
 def test_duplicate_verifier_id_rejected(project: Path) -> None:
@@ -222,9 +360,7 @@ def test_matching_is_deterministic_stable_and_inspectable(config: ForgeConfig) -
     assert "scope  is not supported" in verifier["exclusions"]
     assert "category bounded_structural_analysis differs from " in verifier["exclusions"]
 
-    cost_limited = forge.verifier_match(
-        uncertainty_classes=["structural"], maximum_cost="low"
-    )
+    cost_limited = forge.verifier_match(uncertainty_classes=["structural"], maximum_cost="low")
     assert all(item["cost"] == "low" for item in cost_limited["matches"])
     medium_cost = next(
         item for item in cost_limited["incompatible"] if item["verifier_id"] == "verify-fail"

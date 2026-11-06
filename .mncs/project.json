@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-forge",
-  "revision": 17,
+  "revision": 18,
   "manifest_location": "in-repository",
   "authority": {
     "note": "Forge owns controlled candidate/evidence workflow and assurance search; it does not own MNCS semantics, Commons pressure status, or promotion authority."
@@ -951,6 +951,30 @@
             "-m",
             "pytest",
             "tests/test_workspace_binding.py",
+            "-q"
+          ],
+          "environment": {
+            "UV_CACHE_DIR": ".mncs/cache/uv"
+          }
+        }
+      },
+      {
+        "test": "forge-process-effect-transport",
+        "covers": [
+          "process-input-transport"
+        ],
+        "obligation": "self",
+        "command": {
+          "argv": [
+            "uv",
+            "run",
+            "--no-project",
+            "--with-editable",
+            ".[dev]",
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_process_effect.py",
             "-q"
           ],
           "environment": {

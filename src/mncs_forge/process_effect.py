@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time
+from base64 import b64encode
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,12 @@ from .retained_embed import RetainedEmbedError, RetainedEmbedSession
 
 PROCESS_MODULE = "mncs.std.process.v1"
 PROCESS_CAPABILITY = "process_capability"
+PROCESS_STDIN_INITIAL_BYTES = 4096
+PROCESS_STDIN_CHUNK_BYTES = 4096
+PROCESS_STDIN_CHUNK_COUNT_MAX = 256
+PROCESS_STDIN_MAX_BYTES = (
+    PROCESS_STDIN_INITIAL_BYTES + PROCESS_STDIN_CHUNK_BYTES * PROCESS_STDIN_CHUNK_COUNT_MAX
+)
 # Capture budget ceiling mirror: the runtime refuses larger requested
 # capture budgets (mncs_model::process::MAX_CAPTURE_BYTES). The 1KB typed
 # observation window is enforced runtime-side at materialization; Forge
@@ -34,7 +41,9 @@ def _boolean(value: bool) -> dict[str, object]:
 
 
 def _bytes(value: bytes) -> dict[str, object]:
-    return {"sequence": {"values": [{"byte": {"value": byte}} for byte in value]}}
+    """Use the language resolver's compact canonical byte-sequence transport."""
+
+    return {"byte_string": {"base64": b64encode(value).decode("ascii")}}
 
 
 def _record(type_name: str, fields: dict[str, object]) -> dict[str, object]:
@@ -57,11 +66,7 @@ def _record_fields(value: object, name: str) -> dict[str, object]:
         raise ForgeError("PROCESS_EFFECT_ABI", f"MNCS {name} result has the wrong identity")
     fields: dict[str, object] = {}
     for pair in raw_fields:
-        if (
-            isinstance(pair, list)
-            and len(pair) == 2
-            and isinstance(pair[0], str)
-        ):
+        if isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str):
             fields[pair[0]] = pair[1]
     return fields
 
@@ -195,7 +200,11 @@ class ProcessEffectClient:
         if output.get("status") != "returned":
             raise ForgeError(
                 "PROCESS_EFFECT_UNKNOWN",
-                str(output.get("failure_reason") or output.get("status") or "MNCS process call failed"),
+                str(
+                    output.get("failure_reason")
+                    or output.get("status")
+                    or "MNCS process call failed"
+                ),
                 details={"process_effect_status": output.get("status")},
             )
         returned = output.get("returned")
@@ -221,20 +230,34 @@ class ProcessEffectClient:
     ) -> tuple[OwnedProcess, dict[str, object]]:
         if not argv or not argv[0]:
             raise ForgeError("COMMAND_START", "the process effect requires an explicit program")
+        if len(stdin) > PROCESS_STDIN_MAX_BYTES:
+            raise ForgeError(
+                "PROCESS_INPUT_LIMIT",
+                f"process input exceeds the {PROCESS_STDIN_MAX_BYTES}-byte native contract",
+            )
         program = argv[0]
         bounded_stdout = min(PROCESS_CAPTURE_BUDGET_MAX, max(1, stdout_limit))
         bounded_stderr = min(PROCESS_CAPTURE_BUDGET_MAX, max(1, stderr_limit))
+        initial_stdin = stdin[:PROCESS_STDIN_INITIAL_BYTES]
+        stdin_chunks = [
+            stdin[offset : offset + PROCESS_STDIN_CHUNK_BYTES]
+            for offset in range(
+                PROCESS_STDIN_INITIAL_BYTES,
+                len(stdin),
+                PROCESS_STDIN_CHUNK_BYTES,
+            )
+        ]
         env = [
-            _record("EnvironmentEntry", {"key": _bytes(key.encode()), "value": _bytes(value.encode())})
+            _record(
+                "EnvironmentEntry", {"key": _bytes(key.encode()), "value": _bytes(value.encode())}
+            )
             for key, value in sorted(environment.items())
         ]
         request = _record(
             "ProcessRequest",
             {
                 "program": _bytes(program.encode()),
-                "argv": {
-                    "sequence": {"values": [_bytes(item.encode()) for item in argv[1:]]}
-                },
+                "argv": {"sequence": {"values": [_bytes(item.encode()) for item in argv[1:]]}},
                 "argv_count": _integer(len(argv) - 1),
                 "current_dir": _bytes(os.fsencode(cwd)),
                 "environment": {"sequence": {"values": env}},
@@ -249,7 +272,9 @@ class ProcessEffectClient:
                         "process_max": _integer(process_max),
                     },
                 ),
-                "stdin": _bytes(stdin),
+                "stdin": _bytes(initial_stdin),
+                "stdin_chunks": {"sequence": {"values": [_bytes(chunk) for chunk in stdin_chunks]}},
+                "stdin_chunk_count": _integer(len(stdin_chunks)),
                 "stdout_limit": _integer(bounded_stdout),
                 "stderr_limit": _integer(bounded_stderr),
                 "deadline_ms": _integer(max(1, deadline_ms)),
