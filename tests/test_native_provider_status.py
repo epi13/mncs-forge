@@ -78,6 +78,23 @@ def test_native_provider_policy_keeps_late_unsupported_fact_authoritative(
     assert result.optional_unavailable is False
 
 
+def test_native_declared_capability_without_probe_is_not_established(
+    native_adapter: NativeForgeAdapter,
+) -> None:
+    capability = "declared-without-probe"
+    result = native_adapter.provider_capability_projection(
+        capability,
+        declared_capabilities=[capability],
+        probed_capabilities=[],
+        unsupported_constructs=[],
+        provider_status="PASS",
+        provider_required=False,
+        provider_available=True,
+    )
+    assert result.candidate is True
+    assert result.established is False
+
+
 def test_native_provider_policy_classifies_required_and_optional_provider_state(
     native_adapter: NativeForgeAdapter,
 ) -> None:
