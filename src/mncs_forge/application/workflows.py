@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -37,11 +37,13 @@ class WorkflowExecutor:
         mode: str,
         executor: Runner,
         observer: ProjectObserver,
+        execution_result_classifier: Callable[[int | None, str | None], str],
     ) -> None:
         self.config = config
         self.mode = mode
         self.executor = executor
         self.observer = observer
+        self.execution_result_classifier = execution_result_classifier
 
     def workflow(self, name: str, expected_mode: str) -> Workflow:
         try:
@@ -174,7 +176,18 @@ class WorkflowExecutor:
             limitations = list(protocol.get("limitations", []))
             unsupported = list(protocol.get("extensions", {}).get("unsupported", []))
         else:
-            status = "UNKNOWN"
+            structured_result: dict[str, Any] | None = None
+            reported_status: str | None = None
+            if session.stdout:
+                try:
+                    value = json.loads(session.stdout)
+                    status_value = value.get("status") if isinstance(value, dict) else None
+                    if isinstance(status_value, str) and status_value in STATUSES:
+                        structured_result = value
+                        reported_status = status_value
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+            status = self.execution_result_classifier(execution.returncode, reported_status)
             method = "declared-command"
             provider = {"id": workflow.provider_id or workflow.name, "kind": "declared-workflow"}
             witnesses = []
@@ -184,19 +197,12 @@ class WorkflowExecutor:
             ]
             unsupported = []
             if execution.returncode != 0:
-                status = "FAIL"
                 witnesses = [{"exit_code": execution.returncode}]
                 limitations = []
-            elif session.stdout:
-                try:
-                    value = json.loads(session.stdout)
-                    if isinstance(value, dict) and value.get("status") in STATUSES:
-                        status = str(value["status"])
-                        witnesses = list(value.get("witnesses", []))
-                        limitations = list(value.get("limitations", []))
-                        unsupported = list(value.get("unsupported_constructs", []))
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    pass
+            elif structured_result is not None:
+                witnesses = list(structured_result.get("witnesses", []))
+                limitations = list(structured_result.get("limitations", []))
+                unsupported = list(structured_result.get("unsupported_constructs", []))
         if evaluator and workflow.disclosure == "status-only":
             witnesses = []
         record = new_record(

@@ -6,6 +6,7 @@ from mncs_forge.adapters import LocalCommandExecutor, LocalProjectObserver
 from mncs_forge.application.candidates import CandidateService
 from mncs_forge.application.lifecycle import LifecycleContext
 from mncs_forge.application.providers import ProviderService
+from mncs_forge.application.support import compatibility_execution_result_status
 from mncs_forge.application.workflows import DevelopmentWorkflowService, WorkflowExecutor
 from mncs_forge.config import ForgeConfig
 from mncs_forge.ledger import Ledger
@@ -34,6 +35,7 @@ def collaborators(config: ForgeConfig):  # type: ignore[no-untyped-def]
         mode="development",
         executor=executor,
         observer=observer,
+        execution_result_classifier=compatibility_execution_result_status,
     )
     development = DevelopmentWorkflowService(
         config=config,

@@ -9,6 +9,7 @@ import pytest
 
 from mncs_forge.adapters import LocalProcessRunner
 from mncs_forge.application.execution_receipts import persist_workflow_execution
+from mncs_forge.application.support import compatibility_execution_result_status
 from mncs_forge.config import ForgeConfig
 from mncs_forge.errors import ForgeError
 from mncs_forge.fabric_execution import FabricExecutionAdapter, ScriptedRunner
@@ -176,6 +177,7 @@ def test_binding_rejects_duplicate_action(config: ForgeConfig, tmp_path: Path) -
         mode="development",
         executor=LocalProcessRunner(),
         observer=observer,
+        execution_result_classifier=compatibility_execution_result_status,
     )
     from mncs_forge.application.candidates import CandidateService
     from mncs_forge.application.workflows import DevelopmentWorkflowService

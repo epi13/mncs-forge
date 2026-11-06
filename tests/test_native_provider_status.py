@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from mncs_forge.adapters import LocalProcessRunner
 from mncs_forge.engine import Forge
 from mncs_forge.mncs_native import NativeForgeAdapter
 
@@ -35,6 +36,27 @@ def test_native_status_aggregation_matches_independent_expectation(
     native_adapter: NativeForgeAdapter, statuses: list[str], expected: str
 ) -> None:
     assert native_adapter.status_aggregate(statuses) == expected
+
+
+@pytest.mark.parametrize(
+    ("exit_status", "reported_status", "expected"),
+    [
+        (0, "PASS", "PASS"),
+        (0, "UNKNOWN", "UNKNOWN"),
+        (0, "FAIL", "FAIL"),
+        (1, "PASS", "FAIL"),
+        (-15, None, "FAIL"),
+        (0, None, "UNKNOWN"),
+        (None, "PASS", "UNKNOWN"),
+    ],
+)
+def test_native_execution_result_status_matches_independent_contract(
+    native_adapter: NativeForgeAdapter,
+    exit_status: int | None,
+    reported_status: str | None,
+    expected: str,
+) -> None:
+    assert native_adapter.execution_result_status(exit_status, reported_status) == expected
 
 
 def test_native_provider_capability_policy_streams_unbounded_lists(
@@ -251,7 +273,27 @@ def test_development_application_aggregation_uses_shared_native_status_kernel(
     config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("MNCS_FORGE_NATIVE_MODE", raising=False)
-    forge = Forge(replace(config, raw={**config.raw, "native": {"mode": "required"}}))
+    python = config.workflows["pass-check"].command[0]
+    unknown_workflow = replace(
+        config.workflows["pass-check"],
+        name="unknown-check",
+        command=[python, "-c", "import json; print(json.dumps({'message': 'no status'}))"],
+    )
+    malformed_status_workflow = replace(
+        config.workflows["pass-check"],
+        name="malformed-status-check",
+        command=[python, "-c", "import json; print(json.dumps({'status': []}))"],
+    )
+    config = replace(
+        config,
+        raw={**config.raw, "native": {"mode": "required"}},
+        workflows={
+            **config.workflows,
+            "unknown-check": unknown_workflow,
+            "malformed-status-check": malformed_status_workflow,
+        },
+    )
+    forge = Forge(config)
     try:
         forge.epoch_begin(generator_identity="generator-v1", evaluator_identity="evaluator-v1")
         candidate = forge.candidate_register(
@@ -262,6 +304,18 @@ def test_development_application_aggregation_uses_shared_native_status_kernel(
         )
         native = forge._native
         assert native is not None
+        observed_execution_results: list[tuple[int | None, str | None]] = []
+        native_classifier = forge._workflow_executor.execution_result_classifier
+
+        def observe_execution_result(exit_status: int | None, reported_status: str | None) -> str:
+            observed_execution_results.append((exit_status, reported_status))
+            return native_classifier(exit_status, reported_status)
+
+        monkeypatch.setattr(
+            forge._workflow_executor,
+            "execution_result_classifier",
+            observe_execution_result,
+        )
         observed: list[list[str]] = []
         native_status_aggregate = native.status_aggregate
 
@@ -270,10 +324,20 @@ def test_development_application_aggregation_uses_shared_native_status_kernel(
             return native_status_aggregate(statuses)
 
         monkeypatch.setattr(native, "status_aggregate", observe_status_aggregate)
-        result = forge.development_checks_run(["pass-check"], str(candidate["candidate_id"]))
+        result = forge.development_checks_run(
+            ["pass-check", "fail-check", "unknown-check", "malformed-status-check"],
+            str(candidate["candidate_id"]),
+        )
 
-        assert result["aggregate_status"] == "PASS"
-        assert ["PASS"] in observed
+        assert result["aggregate_status"] == "FAIL"
+        assert [item["status"] for item in result["results"]] == [
+            "PASS",
+            "FAIL",
+            "UNKNOWN",
+            "UNKNOWN",
+        ]
+        assert observed_execution_results == [(0, "PASS"), (7, None), (0, None), (0, None)]
+        assert ["PASS", "FAIL", "UNKNOWN", "UNKNOWN"] in observed
 
         calls_before_claim_status = len(observed)
         claim_status = forge.claim_status()
@@ -319,7 +383,7 @@ def test_native_off_keeps_the_explicit_compatibility_classifier(
 ) -> None:
     monkeypatch.setenv("MNCS_FORGE_NATIVE_MODE", "off")
     raw = {**config.raw, "required_capabilities": ["bounded-structural"]}
-    forge = Forge(replace(config, raw=raw))
+    forge = Forge(replace(config, raw=raw), runner=LocalProcessRunner())
     try:
         assert forge._native is None
         forge.provider_probe("provider-pass")
@@ -327,5 +391,20 @@ def test_native_off_keeps_the_explicit_compatibility_classifier(
         assert result["status"] == "PASS"
         assert result["blocked"] is False
         assert result["satisfied"][0]["providers"] == ["provider-pass"]
+
+        forge.epoch_begin(
+            generator_identity="compatibility-generator",
+            evaluator_identity="compatibility-evaluator",
+        )
+        candidate = forge.candidate_register(
+            changed_files=["candidate/main.py"],
+            hypothesis="explicit native compatibility route",
+            generator_identity="compatibility-generator",
+            generator_config_identity="compatibility-config",
+        )
+        checks = forge.development_checks_run(
+            ["pass-check", "fail-check"], str(candidate["candidate_id"])
+        )
+        assert [item["status"] for item in checks["results"]] == ["PASS", "FAIL"]
     finally:
         forge.close()

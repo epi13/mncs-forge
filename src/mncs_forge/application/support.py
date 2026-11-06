@@ -35,6 +35,22 @@ SECRET_PATTERN = re.compile(
 )
 
 
+def compatibility_execution_result_status(
+    exit_status: int | None, reported_status: str | None
+) -> str:
+    """Preserve the explicitly selected host compatibility path for workflows."""
+
+    if not isinstance(exit_status, int) or isinstance(exit_status, bool):
+        return "UNKNOWN"
+    if exit_status != 0:
+        return "FAIL"
+    return (
+        reported_status
+        if isinstance(reported_status, str) and reported_status in STATUSES
+        else "UNKNOWN"
+    )
+
+
 def aggregate_status(
     statuses: Iterable[str],
     *,

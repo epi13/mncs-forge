@@ -14,11 +14,13 @@
     "assurance-loop state machine",
     "repair and verification eligibility policy",
     "FAIL > UNKNOWN > PASS verdict composition",
+    "declared-workflow result classification via shared Stdlib status kernel",
     "provider-fact identity and freshness gates",
     "identity, lifecycle, readiness, reconciliation, and bundle projections"
   ],
   "host_boundaries": [
     "provider command and MCP transport",
+    "declared command execution and structured JSON validation",
     "process, filesystem, environment, and deadline mechanics",
     "provider document admission and artifact publication",
     "exact source replacement and external file hashing"
@@ -26,7 +28,8 @@
   "compatibility_surfaces": {
     "retained_host_adaptation": "src/mncs_forge/application/mncs_development.py",
     "retained_differential_oracle": "tests/test_mncs_assurance.py",
-    "semantic_fallback": "explicit native_mode=off or unavailable runtime in prefer mode"
+    "semantic_fallback": "explicit native_mode=off or unavailable runtime in prefer mode",
+    "workflow_result_status": "host compatibility classifier only when native execution is off or unavailable"
   },
   "next_migration_slice": "no current Forge semantic blocker; consider only a concrete provider-boundary reduction"
 }

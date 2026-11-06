@@ -18,10 +18,16 @@
     "assurance-loop state machine",
     "repair and verification eligibility policy",
     "FAIL > UNKNOWN > PASS verdict composition",
+    "declared-workflow result classification via shared Stdlib status kernel",
     "provider-fact identity and freshness gates",
     "identity, lifecycle, readiness, reconciliation, and bundle projections"
   ],
   "host_canonical_responsibilities": [
+    {
+      "area": "declared command execution, structured JSON validation, and workflow diagnostics",
+      "classification": "bounded transport and compatibility boundary",
+      "eliminating_capability": "MNCS owns normal native-mode exit/result status classification; host classification remains only for explicit off or unavailable native mode"
+    },
     {
       "area": "provider command, MCP, and external artifact transport",
       "classification": "external_interoperability_only",

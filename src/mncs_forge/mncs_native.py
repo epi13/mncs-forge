@@ -3455,6 +3455,61 @@ class NativeForgeAdapter:
             )
         return aggregate
 
+    def execution_result_status(self, exit_status: int | None, reported_status: str | None) -> str:
+        """Classify one declared workflow result through the shared MNCS kernel."""
+
+        if exit_status is not None and (
+            not isinstance(exit_status, int)
+            or isinstance(exit_status, bool)
+            or not -(1 << 63) <= exit_status < (1 << 63)
+        ):
+            raise ForgeError(
+                "NATIVE_EXECUTION_RESULT_INPUT",
+                "workflow exit status is not a signed 64-bit integer",
+            )
+        if reported_status is not None and (
+            not isinstance(reported_status, str)
+            or reported_status not in _STATUS_VARIANTS
+        ):
+            raise ForgeError(
+                "NATIVE_EXECUTION_RESULT_INPUT", "workflow reported status is not recognized"
+            )
+        abi = self.language_owned_abi()
+        request = {
+            "schema_version": NATIVE_SCHEMA_VERSION,
+            "target": {"module": _CORE_MODULE, "function": "execution_result_status"},
+            "arguments": [
+                self._mncs_boolean(exit_status is not None),
+                self._mncs_integer(exit_status if exit_status is not None else 0),
+                self._mncs_boolean(reported_status is not None),
+                self._abi_finite_value(
+                    abi,
+                    "Status",
+                    reported_status if reported_status is not None else "UNKNOWN",
+                    context="workflow reported status",
+                ),
+            ],
+            "step_budget": 20_000,
+        }
+        invocation = self._semantic_invocation(request, request_name="execution-result-status.json")
+        if not invocation.ok or invocation.payload is None:
+            raise ForgeError(
+                "NATIVE_EXECUTION_RESULT_UNKNOWN", "native workflow result classification failed"
+            )
+        if invocation.payload.get("status") != "returned":
+            raise ForgeError(
+                "NATIVE_EXECUTION_RESULT_UNKNOWN",
+                "native workflow result classification did not return",
+            )
+        returned = invocation.payload.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            raise ForgeError(
+                "NATIVE_ABI_MISMATCH", "workflow result classification arity is invalid"
+            )
+        return self._abi_finite_variant(
+            returned[0], abi, "Status", context="workflow result status"
+        )
+
     @staticmethod
     def _provider_capability_digest(value: str, *, context: str) -> bytes:
         if not isinstance(value, str) or not value:

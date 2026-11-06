@@ -23,7 +23,7 @@ from .application.project import ProjectService
 from .application.providers import ProviderService
 from .application.recovery import RecoveryService
 from .application.support import aggregate_status as _aggregate_status
-from .application.support import now, redact
+from .application.support import compatibility_execution_result_status, now, redact
 from .application.workflows import DevelopmentWorkflowService, WorkflowExecutor
 from .config import ForgeConfig, Provider
 from .errors import ForgeError
@@ -129,6 +129,11 @@ class Forge:
             mode=mode,
             executor=self._executor,
             observer=self._observer,
+            execution_result_classifier=(
+                native.execution_result_status
+                if self._native is not None
+                else compatibility_execution_result_status
+            ),
         )
         self._mncs_development_service = MncsDevelopmentService(
             config=config,

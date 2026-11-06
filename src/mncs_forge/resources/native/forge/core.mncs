@@ -118,6 +118,22 @@ fn status_probe() -> (result: statlib.Status) {
     return statlib.Status.UNKNOWN;
 }
 
+// Keep declared process outcomes at the native boundary while Forge retains
+// responsibility for executing the command and validating structured JSON.
+fn execution_result_status(
+    has_exit_status: bool,
+    exit_status: i64,
+    has_reported_status: bool,
+    reported_status: statlib.Status
+) -> (result: statlib.Status) {
+    return statlib.classify_execution_result(
+        has_exit_status,
+        exit_status,
+        has_reported_status,
+        reported_status
+    );
+}
+
 fn canonical_probe() -> (result: serlib.CanonicalMaterial) {
     let parent: [byte; 32] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
         16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
