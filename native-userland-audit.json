@@ -20,6 +20,7 @@
     "FAIL > UNKNOWN > PASS verdict composition",
     "declared-workflow result classification via shared Stdlib status kernel",
     "provider-fact identity and freshness gates",
+    "provider artifact canonical identities via shared Stdlib SHA-256",
     "identity, lifecycle, readiness, reconciliation, and bundle projections"
   ],
   "host_canonical_responsibilities": [
@@ -47,6 +48,11 @@
       "area": "legacy compatibility and differential comparison",
       "classification": "reference_surface",
       "eliminating_capability": "native assurance parity across the bounded fixture set"
+    },
+    {
+      "area": "bulk source-file and compiled-artifact SHA-256 integrity",
+      "classification": "optimized byte-custody boundary",
+      "eliminating_capability": "revisit when the selected native runtime can process large byte streams within the provider latency budget"
     }
   ],
   "existing_pressures": [
@@ -57,8 +63,8 @@
   "migration_order": 7,
   "native_application_descriptor": "src/mncs_forge/resources/native/forge/assurance-application.json",
   "runtime_effect_dogfood": {
-    "process": "the generic compiled native-application cache executes the bounded assurance decision; external provider invocation remains host-owned",
-    "structured_data": "typed normalized provider facts cross a fixed wire membrane; provider-owned JSON semantics remain provider-owned",
+    "process": "the generic compiled native-application cache executes assurance and the retained provider-digest application; external provider invocation remains host-owned",
+    "structured_data": "Forge serializes provider records at the boundary; MNCS Stdlib SHA-256 owns canonical provider receipt and execution identities",
     "filesystem": "source and provider artifact acquisition remain host-owned mechanics"
   },
   "pressure_revalidation": {
@@ -71,5 +77,5 @@
     ],
     "cache_result": "generic compiled application cache is sufficient; no persistent-session runtime pressure reproduced"
   },
-  "next_native_slice": "no current Forge semantic blocker; consider only a concrete provider-boundary reduction"
+  "next_native_slice": "migrate a consumer of the public compatibility digest helper, beginning with Automation or Doctor structured provider identities"
 }

@@ -1,5 +1,6 @@
 """Signature-gated provider input identity: warm reuse without full rehash."""
 
+import hashlib
 import time
 
 import pytest
@@ -36,13 +37,26 @@ def provider(tmp_path):
     compiler.write_bytes(b"compiler-bytes" * 1000)
     embed = tmp_path / "libmncs_embed.so"
     embed.write_bytes(b"embed-bytes" * 1000)
-    return ProviderArtifact(
+    value = ProviderArtifact(
         _spec(),
         roots={"repo": root},
         compiler=compiler,
         embed=embed,
         cache=tmp_path / "cache",
     )
+    # These focused stat-cache tests do not select a compiler/embed toolchain.
+    # Use a host oracle explicitly as a test double; matched-toolchain tests
+    # exercise the native kernel through the actual provider consumer.
+    class HashOracle:
+        def __init__(self):
+            self.calls = {"bytes": 0}
+
+        def digest_bytes(self, data):
+            self.calls["bytes"] += 1
+            return hashlib.sha256(data).digest()
+
+    value._native_hasher = HashOracle()
+    return value
 
 
 def _counting_digests(monkeypatch):

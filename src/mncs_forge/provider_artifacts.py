@@ -6,6 +6,7 @@ It neither invents provenance nor turns compilation into verification PASS.
 """
 from __future__ import annotations
 
+import atexit
 import fcntl
 import hashlib
 import json
@@ -42,6 +43,153 @@ class ProviderArtifactError(RuntimeError):
     pass
 
 
+_NATIVE_DIGEST_ADAPTER_LOCK = threading.RLock()
+_NATIVE_DIGEST_ADAPTER: Any = None
+_NATIVE_DIGEST_ADAPTER_KEY: tuple[str, tuple[tuple[str, str], ...]] | None = None
+_NATIVE_DIGEST_ENVIRONMENT = (
+    'MNCS_CLI', 'MNCS_LANGUAGE_ROOT', 'MNCS_LIBRARY_ROOT', 'MNCS_STDLIB_ROOT',
+    'MNCS_EMBED_LIB', 'MNCS_NATIVE_APPLICATION_CACHE_DIR', 'MNCS_RUNTIME_PROFILE',
+    'MNCS_STDLIB_BUNDLE', 'MNCS_BACKEND_CONFIG', 'MNCS_TARGET_PROFILE',
+    'MNCS_COMPILER_CHECKOUT', 'MNCS_COMPILER_PROBE', 'MNCS_VM_CHECKOUT', 'MNCS_VM_BIN',
+)
+
+
+def _provider_digest_adapter(forge_root: Path):
+    """Share one bounded digest application across provider instances."""
+    from importlib.resources import as_file, files
+
+    from .errors import ForgeError
+    from .mncs_native import NativeForgeAdapter
+
+    global _NATIVE_DIGEST_ADAPTER, _NATIVE_DIGEST_ADAPTER_KEY
+    root = forge_root.resolve()
+    key = (str(root), tuple((name, os.environ.get(name, '')) for name in _NATIVE_DIGEST_ENVIRONMENT))
+    with _NATIVE_DIGEST_ADAPTER_LOCK:
+        if _NATIVE_DIGEST_ADAPTER is not None and key == _NATIVE_DIGEST_ADAPTER_KEY:
+            return _NATIVE_DIGEST_ADAPTER
+        if _NATIVE_DIGEST_ADAPTER is not None:
+            _NATIVE_DIGEST_ADAPTER.close()
+
+        class ProviderDigestAdapter(NativeForgeAdapter):
+            def __init__(self, adapter_root: Path) -> None:
+                super().__init__(adapter_root)
+                resource_root = files('mncs_forge.resources').joinpath(
+                    'native', 'forge', 'provider_digest')
+                self.native_root = self._resource_stack.enter_context(as_file(resource_root))
+                self.native_source = self.native_root / 'core.mncs'
+                configured_cache = os.environ.get('MNCS_NATIVE_APPLICATION_CACHE_DIR')
+                cache_root = (Path(configured_cache).expanduser() if configured_cache else
+                              self.forge_root / '.mncs' / 'cache' / 'native-applications')
+                if not cache_root.is_absolute():
+                    cache_root = self.forge_root / cache_root
+                self._artifact_cache_override = cache_root / 'provider-digest'
+
+            def ensure_available(self) -> None:
+                if not self.available:
+                    raise ForgeError('NATIVE_UNAVAILABLE',
+                                     'selected compiler and Stdlib are required for provider identities')
+                if not self.native_source.is_file():
+                    raise ForgeError('NATIVE_UNAVAILABLE', 'provider digest MNCS source is missing')
+
+        _NATIVE_DIGEST_ADAPTER = ProviderDigestAdapter(root)
+        _NATIVE_DIGEST_ADAPTER_KEY = key
+        return _NATIVE_DIGEST_ADAPTER
+
+
+def _close_native_digest_adapter() -> None:
+    global _NATIVE_DIGEST_ADAPTER, _NATIVE_DIGEST_ADAPTER_KEY
+    with _NATIVE_DIGEST_ADAPTER_LOCK:
+        adapter = _NATIVE_DIGEST_ADAPTER
+        _NATIVE_DIGEST_ADAPTER = None
+        _NATIVE_DIGEST_ADAPTER_KEY = None
+    if adapter is not None:
+        adapter.close()
+
+
+atexit.register(_close_native_digest_adapter)
+
+
+class _NativeProviderSha256:
+    """Stream provider identity bytes through Forge's retained MNCS runtime."""
+
+    MODULE = 'mncs.forge.provider_digest.v1'
+    CHUNK_BYTES = 1024
+    UPDATE_BUDGET = 500_000
+
+    def __init__(self, forge_root: Path) -> None:
+        from .mncs_native import _record_type_identity
+
+        self.adapter = _provider_digest_adapter(forge_root)
+        self._lock = threading.RLock()
+        self._state_identity = _record_type_identity(
+            'mncs.std.sha256.v1', 'DigestState',
+            {'h': '[u32; 8]', 'total': 'u64', 'buf': '[byte; 64]', 'buffered': 'u64'})
+        self._state_name = 'DigestState'
+
+    def _call(self, function: str, arguments: list[dict[str, Any]], *, budget: int) -> object:
+        try:
+            payload, _elapsed = self.adapter.ensure_session().call(
+                self.MODULE, function, arguments, step_budget=budget)
+        except Exception as error:
+            raise ProviderArtifactError(
+                f'native provider SHA-256 {function} failed: {error}') from error
+        if not isinstance(payload, dict):
+            raise ProviderArtifactError(f'native provider SHA-256 {function} returned malformed data')
+        returned = payload.get('returned')
+        if payload.get('status') != 'returned' or not isinstance(returned, list) or len(returned) != 1:
+            raise ProviderArtifactError(f'native provider SHA-256 {function} did not return one value')
+        return returned[0]
+
+    def _validate_state(self, value: object) -> dict[str, Any]:
+        if not isinstance(value, dict) or not isinstance(value.get('record'), dict):
+            raise ProviderArtifactError('native provider SHA-256 returned a non-record state')
+        record = value['record']
+        fields = record.get('fields')
+        if (record.get('type_identity') != self._state_identity or
+                record.get('name') != self._state_name or not isinstance(fields, list)):
+            raise ProviderArtifactError('native provider SHA-256 returned an invalid state type')
+        field_names = [field[0] for field in fields if isinstance(field, list) and len(field) == 2]
+        if len(field_names) != len(fields) or set(field_names) != {'h', 'total', 'buf', 'buffered'}:
+            raise ProviderArtifactError('native provider SHA-256 returned malformed state fields')
+        return value
+
+    def _digest(self, chunks: Any) -> bytes:
+        with self._lock:
+            state = self._validate_state(self._call('provider_sha256_init', [], budget=10_000))
+            for chunk in chunks:
+                if not isinstance(chunk, bytes) or not 0 < len(chunk) <= self.CHUNK_BYTES:
+                    raise ProviderArtifactError('provider SHA-256 chunks must contain 1..1024 bytes')
+                data = {'sequence': {'values': [{'byte': {'value': value}} for value in chunk]}}
+                state = self._validate_state(self._call(
+                    'provider_sha256_update', [state, data], budget=self.UPDATE_BUDGET))
+            output = self._call('provider_sha256_finalize', [state], budget=100_000)
+            if not isinstance(output, dict) or not isinstance(output.get('sequence'), dict):
+                raise ProviderArtifactError('native provider SHA-256 returned a malformed digest')
+            values = output['sequence'].get('values')
+            if not isinstance(values, list) or len(values) != 32:
+                raise ProviderArtifactError('native provider SHA-256 returned a non-32-byte digest')
+            result = bytearray()
+            for item in values:
+                if not isinstance(item, dict) or not isinstance(item.get('byte'), dict):
+                    raise ProviderArtifactError('native provider SHA-256 returned a malformed byte')
+                value = item['byte'].get('value')
+                if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255:
+                    raise ProviderArtifactError('native provider SHA-256 returned an invalid byte')
+                result.append(value)
+            return bytes(result)
+
+    def digest_bytes(self, data: bytes) -> bytes:
+        return self._digest(data[offset:offset + self.CHUNK_BYTES]
+                            for offset in range(0, len(data), self.CHUNK_BYTES))
+
+    def digest_file(self, path: Path) -> bytes:
+        def chunks():
+            with path.open('rb') as stream:
+                while data := stream.read(self.CHUNK_BYTES):
+                    yield data
+        return self._digest(chunks())
+
+
 class ProviderArtifact:
     """One owner declaration, one confined output namespace, exact receipts."""
 
@@ -57,6 +205,8 @@ class ProviderArtifact:
             raise ProviderArtifactError('artifact output cache overlaps selected provider source')
         self.cache = selected_cache / digest(specification['provider'])
         self.cache.mkdir(parents=True, exist_ok=True)
+        self._native_hasher: _NativeProviderSha256 | None = None
+        self._native_digest_lock = threading.RLock()
         self.runtime: RetainedEmbedSession | None = None
         self.receipt: dict[str, Any] | None = None
         self.rebuilds = 0
@@ -87,7 +237,10 @@ class ProviderArtifact:
         back to the exact path (which raises the canonical error).
         """
         try:
-            declaration = digest(self.spec)
+            # Exact canonical declaration bytes are a cache-generation key,
+            # not a published digest; this keeps warm freshness checks cheap.
+            declaration = json.dumps(
+                self.spec, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
             sources = tuple(
                 (f"{item['repository']}:{item['path']}",
                  self._stat_signature(self.path(item)))
@@ -115,6 +268,16 @@ class ProviderArtifact:
         except OSError:
             return None
         return (declaration, sources, tuple(libraries), compiler, transport)
+
+    def _hasher(self) -> _NativeProviderSha256:
+        with self._native_digest_lock:
+            if self._native_hasher is None:
+                self._native_hasher = _NativeProviderSha256(Path(__file__).resolve().parents[2])
+            return self._native_hasher
+
+    def _digest(self, value: object) -> str:
+        encoded = json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+        return self._hasher().digest_bytes(encoded).hex()
 
     def expected_inputs(self) -> dict[str, Any]:
         """Authoritative input identity, reusing it while the source generation is unchanged.
@@ -149,8 +312,8 @@ class ProviderArtifact:
                 if not path.resolve().is_relative_to(root):
                     raise ProviderArtifactError('library input symlink escapes selected root')
                 material.append([str(path.relative_to(root)), byte_digest(path)])
-            libraries.append(dict(binding, content_identity=digest(material)))
-        return {'provider': self.spec['provider'], 'declaration_identity': digest(self.spec),
+            libraries.append(dict(binding, content_identity=self._digest(material)))
+        return {'provider': self.spec['provider'], 'declaration_identity': self._digest(self.spec),
                 'source_inputs': sources, 'compiler_artifact_sha256': byte_digest(self.compiler),
                 'build_transport_sha256': byte_digest(__file__),
                 'configuration': self.spec['configuration'],
@@ -178,7 +341,7 @@ class ProviderArtifact:
     def _load(self, expected: dict[str, Any]) -> dict[str, Any] | None:
         try:
             receipt: Any = json.loads((self.cache / 'current.json').read_text())
-            if receipt['schema_version'] != BUILD_SCHEMA or digest(receipt['core']) != receipt['identity']:
+            if receipt['schema_version'] != BUILD_SCHEMA or self._digest(receipt['core']) != receipt['identity']:
                 return None
             return dict(receipt)
         except (OSError, ValueError, KeyError, TypeError):
@@ -196,18 +359,18 @@ class ProviderArtifact:
         built = '00' * 32
         if receipt:
             try:
-                built = digest(receipt['core']['inputs'])
+                built = self._digest(receipt['core']['inputs'])
                 artifact = json.loads(self._artifact(receipt).read_bytes())
                 claimed = receipt['core']['artifact']
                 intact = (byte_digest(self._artifact(receipt)) == claimed['sha256']
                           and artifact['identity'] == claimed['identity']
                           and artifact['bytes_sha256'] == claimed['payload_sha256']
                           and artifact['schema_version'] == self.spec['abi']['backend_schema']
-                          and digest(artifact['function_value_contracts']) == receipt['core']['inventory_identity'])
+                          and self._digest(artifact['function_value_contracts']) == receipt['core']['inventory_identity'])
             except (KeyError, OSError, ValueError, ProviderArtifactError):
                 pass
         state, _ = self._native(self.spec['admission'], 'artifact_state',
-                                [bytes_value(digest(expected)), bytes_value(built), integer(1),
+                                [bytes_value(self._digest(expected)), bytes_value(built), integer(1),
                                  integer(receipt is not None), integer(intact)])
         return state
 
@@ -266,11 +429,11 @@ class ProviderArtifact:
                     'identity': artifact['identity'], 'payload_sha256': artifact['bytes_sha256'],
                     'interface_identity': artifact['interface_identity'], 'schema_version': artifact['schema_version'],
                     'backend': artifact['backend'], 'target': artifact['target']['identity']},
-                    'inventory_identity': digest(artifact['function_value_contracts']),
+                    'inventory_identity': self._digest(artifact['function_value_contracts']),
                     'build_capability': self.spec['build_capability'],
-                    'build_invocation_identity': digest({'compiler': expected['compiler_artifact_sha256'], 'source': self.spec['source'], 'configuration': self.spec['configuration'], 'roots': self.spec['dependency_roots']}),
+                    'build_invocation_identity': self._digest({'compiler': expected['compiler_artifact_sha256'], 'source': self.spec['source'], 'configuration': self.spec['configuration'], 'roots': self.spec['dependency_roots']}),
                     'remediation_admission': admission}
-            receipt = {'schema_version': BUILD_SCHEMA, 'identity': digest(core), 'core': core}
+            receipt = {'schema_version': BUILD_SCHEMA, 'identity': self._digest(core), 'core': core}
             pending = self.cache / 'current.pending'
             pending.write_text(json.dumps(receipt, sort_keys=True) + '\n')
             os.replace(pending, self.cache / 'current.json')
@@ -307,9 +470,9 @@ class ProviderArtifact:
                 'artifact_identity': info['artifact_identity'], 'artifact_sha256': info['artifact_sha256'],
                 'executor_sha256': runtime_sha, 'abi': self.spec['abi'],
                 'operation': module + '::' + function,
-                'subject_identity': 'mncs.native-decision-input:' + digest(arguments), 'input_identity': digest({'arguments': arguments, 'step_budget': step_budget, 'grants': []}),
-                'inventory_identity': receipt['core']['inventory_identity'], 'result_identity': digest(result)}
-        execution = {'schema_version': EXECUTION_SCHEMA, 'identity': digest(core), 'core': core,
+                'subject_identity': 'mncs.native-decision-input:' + self._digest(arguments), 'input_identity': self._digest({'arguments': arguments, 'step_budget': step_budget, 'grants': []}),
+                'inventory_identity': receipt['core']['inventory_identity'], 'result_identity': self._digest(result)}
+        execution = {'schema_version': EXECUTION_SCHEMA, 'identity': self._digest(core), 'core': core,
                      'build': receipt}
         return result, execution
 
@@ -317,3 +480,6 @@ class ProviderArtifact:
         if self.runtime is not None:
             self.runtime.close()
             self.runtime = None
+        with self._native_digest_lock:
+            # The digest application is process-shared and is closed at exit.
+            self._native_hasher = None

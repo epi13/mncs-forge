@@ -1,5 +1,6 @@
 """Real owner build/admission/execution and fail-closed provenance mutation."""
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -7,10 +8,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
 from mncs_forge.provider_artifacts import ProviderArtifact, ProviderArtifactError, integer
 from mncs_forge.retained_embed import RetainedEmbedError, RetainedEmbedSession
 
-BASE = Path(__file__).resolve().parents[2]
+
+def _project_family_root() -> Path:
+    test_path = Path(__file__).resolve()
+    for candidate in test_path.parents:
+        if (candidate / 'mncs-automation/.mncs/coherence-artifact.json').is_file():
+            return candidate
+    return test_path.parents[2]
+
+
+BASE = _project_family_root()
 BINARY = Path(os.environ.get('MNCS_BINARY', '/unavailable'))
 EMBED = BINARY.parent / 'libmncs_embed.so'
 
@@ -39,12 +50,35 @@ def call(provider):
     return provider.call('mncs.automation.coherence.v1', 'route_batch', args)
 
 
+def test_native_provider_sha256_matches_independent_vectors(provider):
+    hasher = provider._hasher()
+    vectors = (b'', b'abc', bytes(range(56)), bytes(range(64)), bytes(range(255)),
+               b'large-provider-input' * 61, b'boundary' * 128)
+    try:
+        for value in vectors:
+            assert hasher.digest_bytes(value) == hashlib.sha256(value).digest()
+        structured = {'z': 'føø', 'a': [0, 1, {'truth': True}]}
+        canonical = json.dumps(structured, sort_keys=True, separators=(',', ':'),
+                               ensure_ascii=False).encode()
+        assert provider._digest(structured) == hashlib.sha256(canonical).hexdigest()
+        source = provider.path(provider.spec['source'])
+        assert hasher.digest_file(source) == hashlib.sha256(source.read_bytes()).digest()
+    finally:
+        provider.close()
+
+
 def test_real_provider_repair_execution_receipt_and_quiet_reuse(provider):
     result, receipt = call(provider)
     assert result['returned'][0]['sequence']['values'][0]['integer']['value'] == 0
     assert provider.rebuilds == 1
     assert receipt['core']['build_receipt'] == provider.receipt['identity']
     assert receipt['core']['executor_sha256'] == provider.runtime.executor_sha256
+    canonical_receipt = json.dumps(receipt['core'], sort_keys=True, separators=(',', ':'),
+                                   ensure_ascii=False).encode()
+    assert receipt['identity'] == hashlib.sha256(canonical_receipt).hexdigest()
+    canonical_build = json.dumps(provider.receipt['core'], sort_keys=True, separators=(',', ':'),
+                                 ensure_ascii=False).encode()
+    assert provider.receipt['identity'] == hashlib.sha256(canonical_build).hexdigest()
     with patch('subprocess.Popen', side_effect=AssertionError('current provider spawned')):
         again, execution = call(provider)
     assert again == result and execution == receipt

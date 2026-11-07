@@ -1,0 +1,22 @@
+mncs 0.18;
+
+// Minimal retained application for provider-owned canonical identities.
+// Forge owns byte custody and serialization; MNCS owns SHA-256 state.
+module mncs.forge.provider_digest.v1;
+
+use mncs.std.sha256.v1 as sha256;
+
+fn provider_sha256_init() -> (result: sha256.DigestState) {
+    return sha256.init();
+}
+
+fn provider_sha256_update(
+    state: sha256.DigestState,
+    data: [byte; up_to 1024]
+) -> (result: sha256.DigestState) {
+    return sha256.update_blocks_standard(state, data);
+}
+
+fn provider_sha256_finalize(state: sha256.DigestState) -> (result: [byte; 32]) {
+    return sha256.finalize_standard(state);
+}
